@@ -22,6 +22,7 @@ import {
   generatePBRSurfaceAppearanceLuau,
   generateWorldEnvironmentLuau,
   normalizeValidMeshId,
+  parseRbxmxFromPartsServer,
   splitOversizedMeshPartInput,
   synthesizeProceduralMeshData,
   validatePublishedRobloxMeshId,
@@ -391,10 +392,13 @@ function saveAssetToLibrary(asset: any): any {
       part_count: Array.isArray(existing.parts) ? existing.parts.length : 0,
       luau_code: existing.luau_code || '',
       parts: existing.parts || [],
+      pbr_profile: existing.pbr_profile || undefined,
+      collision_fidelity: existing.collision_fidelity || 'Hull',
+      description: existing.description || '',
     });
   }
   asset.version = existing ? Number(existing.version || 1) + 1 : 1;
-  asset.version_history = history.slice(0, 10);
+  asset.version_history = history.slice(0, 25);
   asset.created_at = existing?.created_at || new Date().toISOString();
   asset.updated_at = new Date().toISOString();
   const filtered = assets.filter((a) => a.id !== asset.id && a.name !== asset.name);
@@ -1180,6 +1184,9 @@ app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
       targetAsset.parts = snap.parts || targetAsset.parts || [];
       targetAsset.luau_code = snap.luau_code || targetAsset.luau_code || '';
       targetAsset.poly_count = snap.poly_count || targetAsset.poly_count || 0;
+      if (snap.pbr_profile) targetAsset.pbr_profile = snap.pbr_profile;
+      if (snap.collision_fidelity) targetAsset.collision_fidelity = snap.collision_fidelity;
+      if (snap.description) targetAsset.description = snap.description;
       const saved = saveAssetToLibrary(targetAsset);
       const rbxmxSnap = buildRbxmxFromPartsServer(
         safeName,
@@ -1204,11 +1211,29 @@ app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
     const luauPath = path.join(assetsDir, targetAsset.file_name || `${safeName}.luau`);
 
     let rbxmxContent = '';
+    let parsedRbxmxPartsCount = 0;
     if (fs.existsSync(rbxmxPath)) {
       rbxmxContent = fs.readFileSync(rbxmxPath, 'utf-8');
+      const parsedRbxmx = parseRbxmxFromPartsServer(
+        rbxmxContent,
+        safeName,
+        targetAsset.collision_fidelity || 'Hull'
+      );
+      if (parsedRbxmx.parts.length > 0) {
+        parsedRbxmxPartsCount = parsedRbxmx.parts.length;
+        targetAsset.parts = parsedRbxmx.parts;
+        targetAsset.poly_count = parsedRbxmx.polyCount;
+        targetAsset.luau_code =
+          parsedRbxmx.luauCode ||
+          buildStrictLuauFromEditedParts(
+            safeName,
+            parsedRbxmx.parts,
+            targetAsset.collision_fidelity || 'Hull'
+          );
+      }
     }
 
-    if (fs.existsSync(objPath)) {
+    if (parsedRbxmxPartsCount === 0 && fs.existsSync(objPath)) {
       const objText = fs.readFileSync(objPath, 'utf-8');
       if (objText.includes('v ')) {
         const reParts = extractPartsFromUploadedMesh(

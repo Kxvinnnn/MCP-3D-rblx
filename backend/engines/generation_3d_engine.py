@@ -16,6 +16,7 @@ import json
 import math
 import struct
 import time
+import xml.etree.ElementTree as ET
 import xml.sax.saxutils as saxutils
 from typing import Any, Callable, Dict, Generator, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
@@ -50,6 +51,9 @@ ROBLOX_MATERIAL_ENUM_TOKENS: Dict[str, int] = {
     "Glass": 1568,
     "ForceField": 1584,
 }
+
+ROBLOX_TOKEN_TO_MATERIAL: Dict[int, str] = {v: k for k, v in ROBLOX_MATERIAL_ENUM_TOKENS.items()}
+
 
 
 def validate_published_roblox_mesh_id(candidate: Optional[str]) -> str:
@@ -531,6 +535,10 @@ class MeshPart3DSpec(BaseModel):
     canCollide: bool = Field(default=True)
     anchored: bool = Field(default=True)
     collisionFidelity: Literal["Default", "Box", "Hull", "PreciseConvexDecomposition"] = Field(default="Hull")
+    pbrMaterial: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional per-MeshPart 4-channel PBR material specification",
+    )
     meshData: Optional[SubMeshGeometrySpec] = Field(
         default=None,
         description="Real extracted vertex/normal/UV/triangle index buffers for MeshPart",
@@ -613,6 +621,7 @@ def split_oversized_mesh_part(
                 canCollide=part.canCollide,
                 anchored=part.anchored,
                 collisionFidelity=part.collisionFidelity,
+                pbrMaterial=part.pbrMaterial,
                 meshData=sub_geom,
             )
         )
@@ -656,14 +665,15 @@ class PBRProfileSpec(BaseModel):
     metalness: float = Field(default=0.75)
     emissive_hex: str = Field(default="#06b6d4")
     roblox_material: str = Field(default="Metal")
-    pattern: Literal[
-        "BrushedTitanium",
-        "HexGridCarbon",
-        "WeatheredStone",
-        "CyberPanel",
-        "SmoothPolymer",
-        "hex_plate",
-    ] = Field(default="BrushedTitanium")
+    pattern: str = Field(default="BrushedTitanium")
+    albedo_asset_path: Optional[str] = Field(default=None)
+    normal_asset_path: Optional[str] = Field(default=None)
+    roughness_asset_path: Optional[str] = Field(default=None)
+    metalness_asset_path: Optional[str] = Field(default=None)
+    color_map_asset_id: Optional[str] = Field(default=None)
+    normal_map_asset_id: Optional[str] = Field(default=None)
+    roughness_map_asset_id: Optional[str] = Field(default=None)
+    metalness_map_asset_id: Optional[str] = Field(default=None)
 
 
 class Generate3DEngineRequest(BaseModel):
@@ -740,6 +750,36 @@ def _euler_deg_to_rotation_matrix(rx_deg: float, ry_deg: float, rz_deg: float) -
     return (r00, r01, r02, r10, r11, r12, r20, r21, r22)
 
 
+def _rotation_matrix_to_euler_deg(
+    r00: float,
+    r01: float,
+    r02: float,
+    r10: float,
+    r11: float,
+    r12: float,
+    r20: float,
+    r21: float,
+    r22: float,
+) -> List[float]:
+    """
+    Inverse of `_euler_deg_to_rotation_matrix` (XYZ intrinsic / Roblox CFrame rotation matrix)
+    returning `[rx_deg, ry_deg, rz_deg]`.
+    """
+    clamped_r02 = max(-1.0, min(1.0, r02))
+    ry = math.asin(clamped_r02)
+    if abs(clamped_r02) < 0.999999:
+        rx = math.atan2(-r12, r22)
+        rz = math.atan2(-r01, r00)
+    else:
+        rx = math.atan2(r21, r11)
+        rz = 0.0
+    return [
+        round(math.degrees(rx), 2),
+        round(math.degrees(ry), 2),
+        round(math.degrees(rz), 2),
+    ]
+
+
 def _euler_deg_to_quaternion(rx_deg: float, ry_deg: float, rz_deg: float) -> Tuple[float, float, float, float]:
     rx = math.radians(rx_deg) * 0.5
     ry = math.radians(ry_deg) * 0.5
@@ -763,6 +803,7 @@ class Generation3DEngine:
     - Automatic topological sub-mesh splitting (`split_oversized_mesh_part`) without vertex/face truncation
     - Deterministic `--!strict` Luau `EditableMesh` builder generation (without fake `MeshId`s)
     - Autonomous `.rbxmx`, `.gltf` 2.0 (with embedded binary geometry & PBR textures), and `.obj` + `.mtl` exporters
+    - Bidirectional `.rbxmx` XML parser (`parse_rbxmx_to_parts`) for Roblox Studio <-> Forge AI Studio sync
     """
 
     def __init__(self, client: Optional[genai.Client], tier_models: Optional[Dict[str, str]] = None):
@@ -774,6 +815,21 @@ class Generation3DEngine:
 
     def resolve_model(self, model_tier: str) -> str:
         return self.tier_models.get(model_tier, self.tier_models.get("fast", "gemini-2.5-flash"))
+
+    def extract_parts_from_uploaded_mesh(
+        self,
+        model_name: str,
+        uploaded_mesh_obj: Optional[str] = None,
+        uploaded_sub_meshes: Optional[List[Dict[str, Any]]] = None,
+        collision_fidelity: str = "Hull",
+    ) -> List[MeshPart3DSpec]:
+        """Alias for `extract_parts_from_uploaded_meshes` supporting singular or plural invocation."""
+        return self.extract_parts_from_uploaded_meshes(
+            model_name=model_name,
+            uploaded_mesh_obj=uploaded_mesh_obj,
+            uploaded_sub_meshes=uploaded_sub_meshes,
+            collision_fidelity=collision_fidelity,
+        )
 
     def extract_parts_from_uploaded_meshes(
         self,
@@ -809,6 +865,7 @@ class Generation3DEngine:
                     roughness=float(sub.get("roughness", 0.35)),
                     metalness=float(sub.get("metalness", 0.65)),
                     collisionFidelity=sub.get("collisionFidelity") or collision_fidelity,  # type: ignore
+                    pbrMaterial=sub.get("pbrMaterial"),
                     meshData=geom,
                 )
                 extracted_parts.extend(split_oversized_mesh_part(raw_spec))
@@ -877,9 +934,12 @@ class Generation3DEngine:
         Outputs a `--!strict` Luau `MeshPart` creation module that constructs real 3D geometry
         directly from `Vertices`, `Normals`, `UVs`, and `Indices` via `AssetService:CreateEditableMesh()`
         and `AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh))`.
-        - Never truncates large meshes (automatically splits meshes >9,500 tris into sub-meshes).
-        - Never invents fictional `rbxassetid://` numbers or assigns read-only `MeshPart.MeshId`.
-        - Uses `InsertService:CreateMeshPartAsync` ONLY when a real published `PublishedMeshId` is provided.
+        Hardened guarantees:
+        - Detects when `AssetService:CreateEditableMesh()` returns `nil`.
+        - Verifies that all expected triangles were created (`#editableMesh:GetTriangles() == expectedTriCount`).
+        - Frees `editableMesh:Destroy()` immediately after `CreateMeshPartAsync` to prevent memory leaks.
+        - Logs exact failure causes via `warn(...)` and records `ForgeReconstructionError`.
+        - Never marks `ForgeReconstructionVerified = true` if an empty fallback `MeshPart` was produced.
         """
         safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "GeneratedMeshModel"
         parts = self.ensure_mesh_data_on_parts(safe_name, parts)
@@ -918,27 +978,43 @@ class Generation3DEngine:
             '    return string.match(uri, "^rbxassetid://[1-9]%d*$") ~= nil or string.match(uri, "^rbxasset://.+") ~= nil',
             "end",
             "",
-            "local function createEditableMeshPartFromBuffers(desc: MeshPartDescriptor): MeshPart",
+            "local function createEditableMeshPartFromBuffers(desc: MeshPartDescriptor): (MeshPart, boolean, string?)",
+            "    local lastErrorReason: string? = nil",
+            "",
             "    -- 1. If a verified published Roblox Cloud MeshId is explicitly bound, try InsertService first",
             "    if isPublishedRobloxAssetUri(desc.PublishedMeshId) then",
-            "        local okInsert, insertedMeshPart = pcall(function()",
+            "        local okInsert, insertedOrErr = pcall(function()",
             "            return InsertService:CreateMeshPartAsync(desc.PublishedMeshId, desc.CollisionFidelity, Enum.RenderFidelity.Precise)",
             "        end)",
-            "        if okInsert and insertedMeshPart then",
+            "        if okInsert and insertedOrErr and insertedOrErr:IsA(\"MeshPart\") then",
+            "            local insertedMeshPart = insertedOrErr :: MeshPart",
             "            insertedMeshPart.Name = desc.Name",
             "            insertedMeshPart.Size = desc.TargetSize",
             "            if isPublishedRobloxAssetUri(desc.PublishedTextureId) then",
             "                insertedMeshPart.TextureID = desc.PublishedTextureId",
             "            end",
             '            insertedMeshPart:SetAttribute("ForgeGeometrySource", "PublishedCloudMeshId")',
+            '            insertedMeshPart:SetAttribute("ForgeGeometryVerified", true)',
             '            insertedMeshPart:SetAttribute("PublishedMeshId", desc.PublishedMeshId)',
-            "            return insertedMeshPart",
+            '            insertedMeshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
+            '            insertedMeshPart:SetAttribute("VertexCount", #desc.Vertices)',
+            '            insertedMeshPart:SetAttribute("TriangleCount", #desc.Faces)',
+            "            return insertedMeshPart, true, nil",
+            "        else",
+            "            lastErrorReason = \"InsertService:CreateMeshPartAsync failed: \" .. tostring(insertedOrErr)",
             "        end",
             "    end",
             "",
             "    -- 2. Primary Path: Construct real MeshPart geometry directly from Vertex, Normal, UV & Triangle buffers via EditableMesh",
-            "    local okEditable, editableMeshPart = pcall(function()",
+            "    local expectedTriCount = math.floor(#desc.Indices / 3)",
+            "    local editableMeshInstance: EditableMesh? = nil",
+            "    local okEditable, editableResultOrErr = pcall(function()",
             "        local editableMesh = AssetService:CreateEditableMesh()",
+            "        if not editableMesh then",
+            '            error("AssetService:CreateEditableMesh() returned nil (EditableMesh API may be disabled or memory budget exceeded)")',
+            "        end",
+            "        editableMeshInstance = editableMesh",
+            "",
             "        local vertexIds = table.create(#desc.Vertices)",
             "        local normalIds = table.create(#desc.Normals)",
             "        local uvIds = table.create(#desc.UVs)",
@@ -953,26 +1029,40 @@ class Generation3DEngine:
             "            uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1], uv[2]))",
             "        end",
             "",
-            "        local stepCount = math.floor(#desc.Indices / 3)",
-            "        for t = 0, stepCount - 1 do",
+            "        local addedTriCount = 0",
+            "        for t = 0, expectedTriCount - 1 do",
             "            local baseIdx = t * 3",
             "            local i1, i2, i3 = desc.Indices[baseIdx + 1], desc.Indices[baseIdx + 2], desc.Indices[baseIdx + 3]",
             "            local v1, v2, v3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]",
-            "            if v1 and v2 and v3 then",
+            "            if v1 and v2 and v3 and v1 ~= v2 and v2 ~= v3 and v1 ~= v3 then",
             "                local fid = editableMesh:AddTriangle(v1, v2, v3)",
-            "                if normalIds[i1] and normalIds[i2] and normalIds[i3] then",
-            "                    pcall(function()",
-            "                        editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })",
-            "                    end)",
-            "                end",
-            "                if uvIds[i1] and uvIds[i2] and uvIds[i3] then",
-            "                    pcall(function()",
-            "                        editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })",
-            "                    end)",
+            "                if fid then",
+            "                    addedTriCount += 1",
+            "                    if normalIds[i1] and normalIds[i2] and normalIds[i3] then",
+            "                        pcall(function()",
+            "                            editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })",
+            "                        end)",
+            "                    end",
+            "                    if uvIds[i1] and uvIds[i2] and uvIds[i3] then",
+            "                        pcall(function()",
+            "                            editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })",
+            "                        end)",
+            "                    end",
             "                end",
             "            end",
             "        end",
             "",
+            "        if expectedTriCount > 0 and addedTriCount < expectedTriCount then",
+            '            error(string.format("Incomplete triangle creation in EditableMesh: expected %d, added %d", expectedTriCount, addedTriCount))',
+            "        end",
+            "        local okTris, createdTris = pcall(function()",
+            "            return editableMesh:GetTriangles()",
+            "        end)",
+            "        if okTris and type(createdTris) == \"table\" and expectedTriCount > 0 and #createdTris < expectedTriCount then",
+            '            error(string.format("EditableMesh:GetTriangles() count mismatch: expected %d, found %d", expectedTriCount, #createdTris))',
+            "        end",
+            "",
+            "        local createdPart: MeshPart? = nil",
             "        local okContent, partFromContent = pcall(function()",
             "            return AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {",
             "                CollisionFidelity = desc.CollisionFidelity,",
@@ -981,32 +1071,55 @@ class Generation3DEngine:
             "            })",
             "        end)",
             "        if okContent and partFromContent then",
-            "            return partFromContent",
+            "            createdPart = partFromContent",
+            "        else",
+            "            createdPart = (AssetService :: any):CreateMeshPartAsync(editableMesh, {",
+            "                CollisionFidelity = desc.CollisionFidelity,",
+            "                RenderFidelity = Enum.RenderFidelity.Precise,",
+            "            })",
             "        end",
-            "        return (AssetService :: any):CreateMeshPartAsync(editableMesh, {",
-            "            CollisionFidelity = desc.CollisionFidelity,",
-            "            RenderFidelity = Enum.RenderFidelity.Precise,",
-            "        })",
+            "",
+            "        if not createdPart then",
+            '            error("AssetService:CreateMeshPartAsync returned nil")',
+            "        end",
+            "        return createdPart",
             "    end)",
             "",
-            "    local meshPart: MeshPart",
-            "    if okEditable and editableMeshPart then",
-            "        meshPart = editableMeshPart",
-            '        meshPart:SetAttribute("ForgeGeometrySource", "EditableMeshBuffers")',
-            "    else",
-            '        meshPart = Instance.new("MeshPart")',
-            "        meshPart.Size = desc.TargetSize",
-            '        meshPart:SetAttribute("ForgeGeometrySource", "EmptyMeshPartFallback")',
+            "    -- Always release the temporary EditableMesh resource once baked into a MeshPart",
+            "    if editableMeshInstance then",
+            "        pcall(function()",
+            "            editableMeshInstance:Destroy()",
+            "        end)",
+            "        editableMeshInstance = nil",
             "    end",
             "",
-            "    meshPart.Name = desc.Name",
-            "    if isPublishedRobloxAssetUri(desc.PublishedTextureId) then",
-            "        meshPart.TextureID = desc.PublishedTextureId",
+            "    if okEditable and editableResultOrErr and typeof(editableResultOrErr) == \"Instance\" and editableResultOrErr:IsA(\"MeshPart\") then",
+            "        local meshPart = editableResultOrErr :: MeshPart",
+            "        meshPart.Name = desc.Name",
+            "        meshPart.Size = desc.TargetSize",
+            "        if isPublishedRobloxAssetUri(desc.PublishedTextureId) then",
+            "            meshPart.TextureID = desc.PublishedTextureId",
+            "        end",
+            '        meshPart:SetAttribute("ForgeGeometrySource", "EditableMeshBuffers")',
+            '        meshPart:SetAttribute("ForgeGeometryVerified", true)',
+            '        meshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
+            '        meshPart:SetAttribute("VertexCount", #desc.Vertices)',
+            '        meshPart:SetAttribute("TriangleCount", expectedTriCount)',
+            "        return meshPart, true, nil",
             "    end",
-            '    meshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
-            '    meshPart:SetAttribute("VertexCount", #desc.Vertices)',
-            '    meshPart:SetAttribute("TriangleCount", #desc.Faces)',
-            "    return meshPart",
+            "",
+            "    local errReason = tostring(editableResultOrErr or lastErrorReason or \"Unknown EditableMesh construction error\")",
+            '    warn(string.format("[ForgeAI EditableMesh] Failed to construct geometry for \'%s\': %s", desc.Name, errReason))',
+            '    local fallbackPart = Instance.new("MeshPart")',
+            "    fallbackPart.Name = desc.Name",
+            "    fallbackPart.Size = desc.TargetSize",
+            '    fallbackPart:SetAttribute("ForgeGeometrySource", "UnverifiedFallbackContainer")',
+            '    fallbackPart:SetAttribute("ForgeGeometryVerified", false)',
+            '    fallbackPart:SetAttribute("ForgeReconstructionError", errReason)',
+            '    fallbackPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
+            '    fallbackPart:SetAttribute("VertexCount", #desc.Vertices)',
+            '    fallbackPart:SetAttribute("TriangleCount", expectedTriCount)',
+            "    return fallbackPart, false, errReason",
             "end",
             "",
             f"local {safe_name}Builder = {{}}",
@@ -1016,6 +1129,8 @@ class Generation3DEngine:
             '    local model = Instance.new("Model")',
             f'    model.Name = "{safe_name}"',
             "    local rootMeshPart: MeshPart? = nil",
+            "    local verifiedPartCount = 0",
+            f"    local totalExpectedParts = {len(parts)}",
             "",
         ]
 
@@ -1025,6 +1140,7 @@ class Generation3DEngine:
             rx, ry, rz = (p.rotation + [0.0, 0.0, 0.0])[:3]
             cr, cg, cb = (p.color + [180, 180, 180])[:3]
             var_name = f"meshPart_{idx + 1}"
+            ok_var = f"isVerified_{idx + 1}"
             cf_mode = p.collisionFidelity or collision_fidelity or "Hull"
 
             mesh_data = p.meshData or synthesize_procedural_mesh_data(p.shape, [sx, sy, sz])
@@ -1056,7 +1172,7 @@ class Generation3DEngine:
 
             lines.extend([
                 f"    -- Sub-MeshPart #{idx + 1}: {p.name} ({len(v_items)} verts, {len(f_items)} tris)",
-                f"    local {var_name} = createEditableMeshPartFromBuffers({{",
+                f"    local {var_name}, {ok_var} = createEditableMeshPartFromBuffers({{",
                 f'        Name = "{p.name}",',
                 f'        PublishedMeshId = "{published_mesh_id}",',
                 f'        PublishedTextureId = "{published_tex_id}",',
@@ -1069,6 +1185,7 @@ class Generation3DEngine:
                 f"        Indices = {{{', '.join(flat_index_items)}}},",
                 f"        Faces = {{{', '.join(f_items)}}},",
                 "    })",
+                f"    if {ok_var} then verifiedPartCount += 1 end",
                 f"    {var_name}.CFrame = baseOrigin * CFrame.new({px:.2f}, {py:.2f}, {pz:.2f}) * CFrame.Angles(math.rad({rx:.1f}), math.rad({ry:.1f}), math.rad({rz:.1f}))",
                 f"    {var_name}.Color = Color3.fromRGB({int(cr)}, {int(cg)}, {int(cb)})",
                 f"    {var_name}.Material = Enum.Material.{p.material if p.material else 'Metal'}",
@@ -1098,20 +1215,26 @@ class Generation3DEngine:
                 ])
 
         lines.extend([
-            '    model:SetAttribute("ForgeReconstructionVerified", true)',
+            "    local allVerified = (verifiedPartCount == totalExpectedParts and totalExpectedParts > 0)",
+            '    model:SetAttribute("ForgeEditableMeshReconstructed", allVerified)',
+            '    model:SetAttribute("ForgeReconstructionVerified", allVerified)',
+            '    model:SetAttribute("ReconstructedMeshPartCount", verifiedPartCount)',
+            '    model:SetAttribute("ExpectedMeshPartCount", totalExpectedParts)',
             "    model.Parent = Workspace",
             "    return model",
             "end",
             "",
             f"-- Reconstructs placeholder MeshParts in an imported .rbxmx Model in-place using ForgeMeshGeometryJSON",
-            f"function {safe_name}Builder.ReconstructInPlace(targetModel: Model): (boolean, number)",
+            f"function {safe_name}Builder.ReconstructInPlace(targetModel: Model): (number, boolean, number)",
             '    local HttpService = game:GetService("HttpService")',
             "    local reconstructedCount = 0",
+            "    local expectedCount = 0",
             "    local rootPart: MeshPart? = nil",
             "    for _, child in ipairs(targetModel:GetChildren()) do",
             '        if child:IsA("BasePart") then',
             '            local geomVal = child:FindFirstChild("ForgeMeshGeometryJSON")',
             '            if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then',
+            "                expectedCount += 1",
             "                local okDecode, decoded = pcall(function()",
             "                    return HttpService:JSONDecode(geomVal.Value)",
             "                end)",
@@ -1125,9 +1248,9 @@ class Generation3DEngine:
             "                        table.insert(flatIndices, i2)",
             "                        table.insert(flatIndices, i3)",
             "                    end",
-            "                    local newPart = createEditableMeshPartFromBuffers({",
+            "                    local newPart, isVerified, errMsg = createEditableMeshPartFromBuffers({",
             "                        Name = child.Name,",
-            '                        PublishedMeshId = decoded.publishedMeshId or "",',
+            '                        PublishedMeshId = decoded.publishedMeshId or decoded.meshId or "",',
             '                        PublishedTextureId = "",',
             f'                        ObjSourcePath = "src/shared/Assets3D/{safe_name}.obj",',
             "                        TargetSize = child.Size,",
@@ -1138,47 +1261,63 @@ class Generation3DEngine:
             "                        Indices = flatIndices,",
             "                        Faces = facesOneBased,",
             "                    })",
-            "                    newPart.CFrame = child.CFrame",
-            "                    newPart.Color = child.Color",
-            "                    newPart.Material = child.Material",
-            "                    newPart.Transparency = child.Transparency",
-            "                    newPart.Anchored = child.Anchored",
-            "                    newPart.CanCollide = child.CanCollide",
-            "                    for _, subChild in ipairs(child:GetChildren()) do",
-            "                        subChild:Clone().Parent = newPart",
+            "                    if isVerified then",
+            "                        newPart.CFrame = child.CFrame",
+            "                        newPart.Color = child.Color",
+            "                        newPart.Material = child.Material",
+            "                        newPart.Transparency = child.Transparency",
+            "                        newPart.Anchored = child.Anchored",
+            "                        newPart.CanCollide = child.CanCollide",
+            "                        for _, subChild in ipairs(child:GetChildren()) do",
+            "                            subChild:Clone().Parent = newPart",
+            "                        end",
+            "                        newPart.Parent = targetModel",
+            "                        if targetModel.PrimaryPart == child or not rootPart then",
+            "                            rootPart = newPart",
+            "                            targetModel.PrimaryPart = newPart",
+            "                        end",
+            "                        child:Destroy()",
+            "                        reconstructedCount += 1",
+            "                    else",
+            "                        newPart:Destroy()",
+            '                        child:SetAttribute("ForgeGeometryVerified", false)',
+            '                        child:SetAttribute("ForgeReconstructionError", tostring(errMsg or "EditableMesh failed"))',
             "                    end",
-            "                    newPart.Parent = targetModel",
-            "                    if targetModel.PrimaryPart == child or not rootPart then",
-            "                        rootPart = newPart",
-            "                        targetModel.PrimaryPart = newPart",
-            "                    end",
-            "                    child:Destroy()",
-            "                    reconstructedCount += 1",
             "                end",
             "            end",
             "        end",
             "    end",
-            '    targetModel:SetAttribute("ForgeReconstructionVerified", reconstructedCount > 0)',
+            "    local allVerified = (expectedCount > 0 and reconstructedCount == expectedCount)",
+            '    targetModel:SetAttribute("ForgeEditableMeshReconstructed", allVerified)',
+            '    targetModel:SetAttribute("ForgeReconstructionVerified", allVerified)',
             '    targetModel:SetAttribute("ReconstructedMeshPartCount", reconstructedCount)',
-            "    return reconstructedCount > 0, reconstructedCount",
+            '    targetModel:SetAttribute("ExpectedMeshPartCount", expectedCount)',
+            "    return reconstructedCount, allVerified, expectedCount",
             "end",
             "",
             f"return {safe_name}Builder",
         ])
         return "\n".join(lines)
 
-    def build_rbxmx_from_parts(self, model_name: str, parts: List[MeshPart3DSpec], collision_fidelity: str = "Hull") -> str:
+    def build_rbxmx_from_parts(
+        self,
+        model_name: str,
+        parts: List[MeshPart3DSpec],
+        collision_fidelity: str = "Hull",
+        category: str = "3D Asset",
+        luau_code: Optional[str] = None,
+    ) -> str:
         """
         Autonomously builds a native Roblox Studio `.rbxmx` XML Model file containing:
         - `<Item class="Model">` with `<Item class="MeshPart">` children (never inventing fake MeshIds)
-        - `<Item class="SurfaceAppearance">` and `<Item class="StringValue" name="ForgeMeshGeometryJSON">`
+        - `<Item class="SurfaceAppearance">` with 4-channel PBR maps (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`)
+        - `<Item class="StringValue" name="ForgeMeshGeometryJSON">` containing full buffers, transform, and PBR metadata
         - `<Item class="ModuleScript" name="ForgeStudioReconstructor">`
-        - `<Item class="Script" name="ForgeAutoReconstructRunner">` that automatically invokes
-          `ReconstructInPlace(script.Parent)` with error handling and confirms each MeshPart's creation.
+        - `<Item class="Script" name="ForgeAutoReconstructRunner">` for Play/Run mode + Plugin Edit-Mode hook support.
         """
         safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
         parts = self.ensure_mesh_data_on_parts(safe_name, parts)
-        luau_reconstructor = self.build_luau_from_parts(safe_name, parts, collision_fidelity)
+        luau_reconstructor = luau_code or self.build_luau_from_parts(safe_name, parts, collision_fidelity)
 
         auto_runner_source = "\n".join([
             "--!strict",
@@ -1188,9 +1327,10 @@ class Generation3DEngine:
             "    local ok, err = xpcall(function()",
             "        local Reconstructor = require(reconstructorMod) :: any",
             '        if type(Reconstructor.ReconstructInPlace) == "function" then',
-            "            local success, count = Reconstructor.ReconstructInPlace(script.Parent)",
-            '            script.Parent:SetAttribute("ForgeAutoReconstructed", success)',
+            "            local count, verified, expected = Reconstructor.ReconstructInPlace(script.Parent)",
+            '            script.Parent:SetAttribute("ForgeAutoReconstructed", verified == true)',
             '            script.Parent:SetAttribute("ForgeReconstructedParts", count)',
+            '            script.Parent:SetAttribute("ForgeExpectedParts", expected)',
             "        end",
             "    end, debug.traceback)",
             "    if not ok then",
@@ -1229,12 +1369,35 @@ class Generation3DEngine:
             mesh_data = part.meshData or synthesize_procedural_mesh_data(part.shape, [sx, sy, sz])
             published_mesh_id = validate_published_roblox_mesh_id(part.meshId or mesh_data.meshId)
 
+            pbr_dict = part.pbrMaterial if isinstance(part.pbrMaterial, dict) else {}
+            valid_color_map = validate_published_roblox_mesh_id(
+                pbr_dict.get("colorMapAssetId") or pbr_dict.get("color_map_asset_id")
+            )
+            valid_normal_map = validate_published_roblox_mesh_id(
+                pbr_dict.get("normalMapAssetId") or pbr_dict.get("normal_map_asset_id")
+            )
+            valid_rough_map = validate_published_roblox_mesh_id(
+                pbr_dict.get("roughnessMapAssetId") or pbr_dict.get("roughness_map_asset_id")
+            )
+            valid_metal_map = validate_published_roblox_mesh_id(
+                pbr_dict.get("metalnessMapAssetId") or pbr_dict.get("metalness_map_asset_id")
+            )
+
             geom_payload = json.dumps({
                 "shape": "MeshPart",
                 "publishedMeshId": published_mesh_id,
+                "size": [round(sx, 4), round(sy, 4), round(sz, 4)],
+                "position": [round(px, 4), round(py, 4), round(pz, 4)],
+                "rotation": [round(rx, 2), round(ry, 2), round(rz, 2)],
+                "color": [int(cr), int(cg), int(cb)],
+                "material": part.material or "Metal",
                 "roughness": part.roughness,
                 "metalness": part.metalness,
+                "transparency": part.transparency,
+                "anchored": part.anchored,
+                "canCollide": part.canCollide,
                 "collisionFidelity": part.collisionFidelity or collision_fidelity,
+                "pbrMaterial": pbr_dict or None,
                 "vertices": mesh_data.vertices,
                 "normals": mesh_data.normals,
                 "uvs": mesh_data.uvs,
@@ -1245,6 +1408,26 @@ class Generation3DEngine:
                 f'<Content name="MeshId"><url>{saxutils.escape(published_mesh_id)}</url></Content>'
                 if published_mesh_id
                 else '<Content name="MeshId"><null></null></Content>'
+            )
+            color_map_xml = (
+                f'<Content name="ColorMap"><url>{saxutils.escape(valid_color_map)}</url></Content>'
+                if valid_color_map
+                else '<Content name="ColorMap"><null></null></Content>'
+            )
+            normal_map_xml = (
+                f'<Content name="NormalMap"><url>{saxutils.escape(valid_normal_map)}</url></Content>'
+                if valid_normal_map
+                else '<Content name="NormalMap"><null></null></Content>'
+            )
+            rough_map_xml = (
+                f'<Content name="RoughnessMap"><url>{saxutils.escape(valid_rough_map)}</url></Content>'
+                if valid_rough_map
+                else '<Content name="RoughnessMap"><null></null></Content>'
+            )
+            metal_map_xml = (
+                f'<Content name="MetalnessMap"><url>{saxutils.escape(valid_metal_map)}</url></Content>'
+                if valid_metal_map
+                else '<Content name="MetalnessMap"><null></null></Content>'
             )
 
             lines.extend([
@@ -1268,13 +1451,17 @@ class Generation3DEngine:
                 f"          <Z>{pz:.4f}</Z>",
                 f"          <R00>{r00:.6f}</R00><R01>{r01:.6f}</R01><R02>{r02:.6f}</R02>",
                 f"          <R10>{r10:.6f}</R10><R11>{r11:.6f}</R11><R12>{r12:.6f}</R12>",
-                f"          <R20>{r20:.6f}</R21><R21>{r21:.6f}</R21><R22>{r22:.6f}</R22>",
+                f"          <R20>{r20:.6f}</R20><R21>{r21:.6f}</R21><R22>{r22:.6f}</R22>",
                 "        </CoordinateFrame>",
                 "      </Properties>",
                 f'      <Item class="SurfaceAppearance" referent="{ref_id}_PBR">',
                 "        <Properties>",
                 f'          <string name="Name">{saxutils.escape(part_name)}_SurfaceAppearance</string>',
                 '          <token name="AlphaMode">0</token>',
+                f"          {color_map_xml}",
+                f"          {normal_map_xml}",
+                f"          {rough_map_xml}",
+                f"          {metal_map_xml}",
                 "        </Properties>",
                 "      </Item>",
                 f'      <Item class="StringValue" referent="{ref_id}_GEOM">',
@@ -1287,6 +1474,12 @@ class Generation3DEngine:
             ])
 
         lines.extend([
+            '    <Item class="StringValue" referent="RBX_FORGE_CATEGORY">',
+            "      <Properties>",
+            '        <string name="Name">ForgeAssetCategory</string>',
+            f'        <string name="Value">{saxutils.escape(category or "3D Asset")}</string>',
+            "      </Properties>",
+            "    </Item>",
             '    <Item class="ModuleScript" referent="RBX_FORGE_RECONSTRUCTOR">',
             "      <Properties>",
             '        <string name="Name">ForgeStudioReconstructor</string>',
@@ -1305,12 +1498,203 @@ class Generation3DEngine:
         ])
         return "\n".join(lines)
 
+    def parse_rbxmx_to_parts(
+        self,
+        rbxmx_text: str,
+        fallback_name: str = "Model3D",
+        default_collision_fidelity: str = "Hull",
+    ) -> Dict[str, Any]:
+        """
+        Parses a Roblox Studio `.rbxmx` XML file into `MeshPart3DSpec` instances and metadata,
+        recovering:
+        - Model name & category
+        - Full `CFrame` transformations (`position` `[X, Y, Z]` and Euler `rotation` `[RX, RY, RZ]` in degrees)
+        - `size` `[X, Y, Z]`
+        - `Color3uint8` / `Color3` -> RGB `[0..255]`
+        - Roblox `Enum.Material` token -> material name
+        - `SurfaceAppearance` 4-channel PBR maps (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`)
+        - Embedded `ForgeMeshGeometryJSON` vertex/normal/UV/face buffers
+        """
+        root = ET.fromstring(rbxmx_text)
+        model_item = root.find('.//Item[@class="Model"]')
+        model_name = fallback_name
+        category = "Roblox Studio (.rbxmx)"
+
+        if model_item is not None:
+            m_props = model_item.find("./Properties")
+            if m_props is not None:
+                name_el = m_props.find('./string[@name="Name"]')
+                if name_el is not None and name_el.text:
+                    model_name = name_el.text.strip()
+
+        for sv in root.findall('.//Item[@class="StringValue"]'):
+            sv_props = sv.find("./Properties")
+            if sv_props is not None:
+                sv_name = sv_props.find('./string[@name="Name"]')
+                sv_val = sv_props.find('./string[@name="Value"]')
+                if sv_name is not None and sv_name.text == "ForgeAssetCategory" and sv_val is not None and sv_val.text:
+                    category = sv_val.text.strip()
+
+        part_items: List[ET.Element] = []
+        for cls_name in ("MeshPart", "Part", "WedgePart", "CornerWedgePart"):
+            part_items.extend(root.findall(f'.//Item[@class="{cls_name}"]'))
+
+        recovered_parts: List[MeshPart3DSpec] = []
+        for idx, item in enumerate(part_items):
+            props = item.find("./Properties")
+            if props is None:
+                continue
+
+            def _prop_text(xpath: str, default_val: str = "") -> str:
+                el = props.find(xpath)
+                return el.text.strip() if (el is not None and el.text) else default_val
+
+            part_name = _prop_text('./string[@name="Name"]', f"MeshPart_{idx + 1}")
+            anchored = _prop_text('./bool[@name="Anchored"]', "true").lower() != "false"
+            can_collide = _prop_text('./bool[@name="CanCollide"]', "true").lower() != "false"
+            transparency = float(_prop_text('./float[@name="Transparency"]', "0.0") or 0.0)
+
+            mat_token_str = _prop_text('./token[@name="Material"]', "1088")
+            mat_token = int(mat_token_str) if mat_token_str.isdigit() else 1088
+            material_name = ROBLOX_TOKEN_TO_MATERIAL.get(mat_token, "Metal")
+
+            size_el = props.find('./Vector3[@name="size"]') or props.find('./Vector3[@name="Size"]')
+            sx, sy, sz = 2.0, 2.0, 2.0
+            if size_el is not None:
+                sx = float(size_el.findtext("X", "2.0") or 2.0)
+                sy = float(size_el.findtext("Y", "2.0") or 2.0)
+                sz = float(size_el.findtext("Z", "2.0") or 2.0)
+
+            cf_el = props.find('./CoordinateFrame[@name="CFrame"]')
+            px, py, pz = 0.0, 1.0, 0.0
+            rx, ry, rz = 0.0, 0.0, 0.0
+            if cf_el is not None:
+                px = float(cf_el.findtext("X", "0.0") or 0.0)
+                py = float(cf_el.findtext("Y", "1.0") or 1.0)
+                pz = float(cf_el.findtext("Z", "0.0") or 0.0)
+                r00 = float(cf_el.findtext("R00", "1.0") or 1.0)
+                r01 = float(cf_el.findtext("R01", "0.0") or 0.0)
+                r02 = float(cf_el.findtext("R02", "0.0") or 0.0)
+                r10 = float(cf_el.findtext("R10", "0.0") or 0.0)
+                r11 = float(cf_el.findtext("R11", "1.0") or 1.0)
+                r12 = float(cf_el.findtext("R12", "0.0") or 0.0)
+                r20 = float(cf_el.findtext("R20", "0.0") or 0.0)
+                r21 = float(cf_el.findtext("R21", "0.0") or 0.0)
+                r22 = float(cf_el.findtext("R22", "1.0") or 1.0)
+                rx, ry, rz = _rotation_matrix_to_euler_deg(r00, r01, r02, r10, r11, r12, r20, r21, r22)
+
+            cr, cg, cb = 160, 170, 185
+            c_uint_el = props.find('./Color3uint8[@name="Color3uint8"]')
+            c_float_el = props.find('./Color3[@name="Color3uint8"]') or props.find('./Color3[@name="Color"]')
+            if c_uint_el is not None and c_uint_el.text and c_uint_el.text.strip().isdigit():
+                c_val = int(c_uint_el.text.strip())
+                cr = (c_val >> 16) & 0xFF
+                cg = (c_val >> 8) & 0xFF
+                cb = c_val & 0xFF
+            elif c_float_el is not None:
+                rf = float(c_float_el.findtext("R", "0.62") or 0.62)
+                gf = float(c_float_el.findtext("G", "0.66") or 0.66)
+                bf = float(c_float_el.findtext("B", "0.72") or 0.72)
+                cr = int(round(rf * 255)) if rf <= 1.0 else int(round(rf))
+                cg = int(round(gf * 255)) if gf <= 1.0 else int(round(gf))
+                cb = int(round(bf * 255)) if bf <= 1.0 else int(round(bf))
+
+            mesh_id_url = _prop_text('./Content[@name="MeshId"]/url', "")
+            published_mesh_id = validate_published_roblox_mesh_id(mesh_id_url)
+
+            # Parse SurfaceAppearance 4-channel PBR maps if present
+            sa_item = item.find('./Item[@class="SurfaceAppearance"]')
+            sa_pbr: Dict[str, Any] = {}
+            if sa_item is not None:
+                sa_props = sa_item.find("./Properties")
+                if sa_props is not None:
+                    for xml_map_name, dict_key in [
+                        ("ColorMap", "colorMapAssetId"),
+                        ("NormalMap", "normalMapAssetId"),
+                        ("RoughnessMap", "roughnessMapAssetId"),
+                        ("MetalnessMap", "metalnessMapAssetId"),
+                    ]:
+                        url_el = sa_props.find(f'./Content[@name="{xml_map_name}"]/url')
+                        if url_el is not None and url_el.text:
+                            valid_uri = validate_published_roblox_mesh_id(url_el.text)
+                            if valid_uri:
+                                sa_pbr[dict_key] = valid_uri
+
+            # Parse embedded ForgeMeshGeometryJSON StringValue if present
+            geom_spec: Optional[SubMeshGeometrySpec] = None
+            roughness_val = 0.35
+            metalness_val = 0.65
+            cf_mode = default_collision_fidelity
+            for child_sv in item.findall('./Item[@class="StringValue"]'):
+                sv_p = child_sv.find("./Properties")
+                if sv_p is not None and sv_p.findtext('./string[@name="Name"]') == "ForgeMeshGeometryJSON":
+                    raw_json = sv_p.findtext('./string[@name="Value"]', "")
+                    if raw_json:
+                        try:
+                            decoded = json.loads(raw_json)
+                            if isinstance(decoded, dict):
+                                roughness_val = float(decoded.get("roughness", roughness_val))
+                                metalness_val = float(decoded.get("metalness", metalness_val))
+                                cf_mode = str(decoded.get("collisionFidelity") or cf_mode)
+                                if isinstance(decoded.get("pbrMaterial"), dict):
+                                    sa_pbr = {**decoded["pbrMaterial"], **sa_pbr}
+                                verts = decoded.get("vertices") or []
+                                faces = decoded.get("faces") or []
+                                if len(verts) >= 3 and len(faces) >= 1:
+                                    geom_spec = SubMeshGeometrySpec(
+                                        vertices=verts,
+                                        normals=decoded.get("normals") or [[0.0, 1.0, 0.0]] * len(verts),
+                                        uvs=decoded.get("uvs") or [[0.0, 0.0]] * len(verts),
+                                        faces=faces,
+                                        indices=[i for tri in faces for i in tri[:3]],
+                                        objFileName=f"{model_name}.obj",
+                                        meshId=published_mesh_id or None,
+                                        assetId=published_mesh_id or None,
+                                    )
+                        except Exception:
+                            pass
+
+            if geom_spec is None:
+                geom_spec = synthesize_procedural_mesh_data("MeshPart", [sx, sy, sz])
+                geom_spec.objFileName = f"{model_name}.obj"
+
+            recovered_parts.append(
+                MeshPart3DSpec(
+                    name=part_name,
+                    shape="MeshPart",
+                    meshId=published_mesh_id or None,
+                    assetId=published_mesh_id or None,
+                    size=[round(sx, 3), round(sy, 3), round(sz, 3)],
+                    position=[round(px, 3), round(py, 3), round(pz, 3)],
+                    rotation=[rx, ry, rz],
+                    color=[max(0, min(255, cr)), max(0, min(255, cg)), max(0, min(255, cb))],
+                    material=material_name,
+                    roughness=roughness_val,
+                    metalness=metalness_val,
+                    transparency=transparency,
+                    canCollide=can_collide,
+                    anchored=anchored,
+                    collisionFidelity=cf_mode if cf_mode in ("Default", "Box", "Hull", "PreciseConvexDecomposition") else "Hull",  # type: ignore
+                    pbrMaterial=sa_pbr if sa_pbr else None,
+                    meshData=geom_spec,
+                )
+            )
+
+        total_tris = sum(len(p.meshData.faces) for p in recovered_parts if p.meshData)
+        return {
+            "name": model_name,
+            "category": category,
+            "poly_count": total_tris,
+            "parts": recovered_parts,
+        }
+
     def build_obj_and_mtl_from_parts(
         self, model_name: str, parts: List[MeshPart3DSpec]
-    ) -> Tuple[str, str]:
+    ) -> Dict[str, str]:
         """
         Autonomously builds paired Wavefront `.obj` and `.mtl` files from `parts`,
         preserving world-transformed vertices, normals, UVs, and PBR material definitions.
+        Returns a dictionary `{"obj": ..., "mtl": ..., "obj_file_name": ..., "mtl_file_name": ...}`.
         """
         safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
         parts = self.ensure_mesh_data_on_parts(safe_name, parts)
@@ -1404,7 +1788,13 @@ class Generation3DEngine:
             vn_offset += len(norms)
             obj_lines.append("")
 
-        return "\n".join(obj_lines), "\n".join(mtl_lines)
+        return {
+            "obj": "\n".join(obj_lines),
+            "mtl": "\n".join(mtl_lines),
+            "obj_file_name": f"{safe_name}.obj",
+            "mtl_file_name": f"{safe_name}.mtl",
+        }
+
 
     def build_gltf_from_parts(
         self,

@@ -102,7 +102,8 @@ local function isVerifiedRobloxAssetUri(uri: any): boolean
 end
 
 -- Construct a real MeshPart from vertex, normal, UV, and triangle index buffers via EditableMesh
-local function createEditableMeshPartFromSpec(partSpec: any, idx: number): BasePart
+-- Returns: (BasePart, isVerified: boolean, errorReason: string?)
+local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (BasePart, boolean, string?)
     local partName = partSpec.name or ("MeshPart_" .. tostring(idx))
     local sz = partSpec.size or { 2, 2, 2 }
     local targetSize = Vector3.new(sz[1] or 2, sz[2] or 2, sz[3] or 2)
@@ -114,11 +115,21 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): BaseP
     local normals = if type(meshData) == "table" and type(meshData.normals) == "table" then meshData.normals else {}
     local uvs = if type(meshData) == "table" and type(meshData.uvs) == "table" then meshData.uvs else {}
     local faces = if type(meshData) == "table" and type(meshData.faces) == "table" then meshData.faces else {}
+    local lastErrorReason: string? = nil
 
     -- 1. Primary path: Construct real geometry from buffers via AssetService:CreateEditableMesh()
-    if #vertices > 0 and #faces > 0 then
-        local okEditable, generatedMeshPart = xpcall(function()
+    if #vertices >= 3 and #faces >= 1 then
+        local editableMeshInstance: EditableMesh? = nil
+        local expectedTriCount = 0
+        local addedTriCount = 0
+
+        local okEditable, generatedOrErr = xpcall(function()
             local editableMesh = AssetService:CreateEditableMesh()
+            if not editableMesh then
+                error("AssetService:CreateEditableMesh() devolvió nil (verifica permisos/memoria de EditableMesh en Studio)")
+            end
+            editableMeshInstance = editableMesh
+
             local vertexIds = table.create(#vertices)
             local normalIds = table.create(#normals)
             local uvIds = table.create(#uvs)
@@ -135,42 +146,85 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): BaseP
 
             for _, tri in ipairs(faces) do
                 if type(tri) == "table" and #tri >= 3 then
+                    expectedTriCount += 1
                     -- JSON faces are 0-based indices; Luau vertexIds table is 1-based
                     local i1 = (tonumber(tri[1]) or 0) + 1
                     local i2 = (tonumber(tri[2]) or 0) + 1
                     local i3 = (tonumber(tri[3]) or 0) + 1
                     local v1, v2, v3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]
-                    if v1 and v2 and v3 then
+                    if v1 and v2 and v3 and v1 ~= v2 and v2 ~= v3 and v1 ~= v3 then
                         local fid = editableMesh:AddTriangle(v1, v2, v3)
-                        if normalIds[i1] and normalIds[i2] and normalIds[i3] then
-                            pcall(function()
-                                editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })
-                            end)
-                        end
-                        if uvIds[i1] and uvIds[i2] and uvIds[i3] then
-                            pcall(function()
-                                editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })
-                            end)
+                        if fid then
+                            addedTriCount += 1
+                            if normalIds[i1] and normalIds[i2] and normalIds[i3] then
+                                pcall(function()
+                                    editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })
+                                end)
+                            end
+                            if uvIds[i1] and uvIds[i2] and uvIds[i3] then
+                                pcall(function()
+                                    editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })
+                                end)
+                            end
                         end
                     end
                 end
             end
 
-            return AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {
+            if addedTriCount == 0 or addedTriCount < expectedTriCount then
+                error(string.format(
+                    "Triángulos incompletos en EditableMesh para '%s': creados %d de %d esperados",
+                    partName,
+                    addedTriCount,
+                    expectedTriCount
+                ))
+            end
+
+            local meshTriangles = editableMesh:GetTriangles()
+            if type(meshTriangles) == "table" and #meshTriangles < expectedTriCount then
+                error(string.format(
+                    "EditableMesh:GetTriangles() devolvió %d triángulos de %d esperados en '%s'",
+                    #meshTriangles,
+                    expectedTriCount,
+                    partName
+                ))
+            end
+
+            local createdPart = AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {
                 CollisionFidelity = cfEnum,
                 RenderFidelity = Enum.RenderFidelity.Precise,
                 FluidFidelity = Enum.FluidFidelity.Automatic,
             })
+            if not createdPart then
+                error("AssetService:CreateMeshPartAsync() devolvió nil para '" .. partName .. "'")
+            end
+            return createdPart
         end, debug.traceback)
 
-        if okEditable and generatedMeshPart then
+        -- Release EditableMesh resource now that CreateMeshPartAsync has finished
+        if editableMeshInstance then
+            pcall(function()
+                editableMeshInstance:Destroy()
+            end)
+            editableMeshInstance = nil
+        end
+
+        if okEditable and generatedOrErr and typeof(generatedOrErr) == "Instance" and generatedOrErr:IsA("MeshPart") then
+            local generatedMeshPart = generatedOrErr :: MeshPart
             generatedMeshPart.Name = partName
             generatedMeshPart.Size = targetSize
             generatedMeshPart:SetAttribute("GeometrySource", "EditableMeshBuffer")
+            generatedMeshPart:SetAttribute("ForgeGeometryVerified", true)
             generatedMeshPart:SetAttribute("VertexCount", #vertices)
-            generatedMeshPart:SetAttribute("TriangleCount", #faces)
-            return generatedMeshPart
+            generatedMeshPart:SetAttribute("TriangleCount", addedTriCount)
+            generatedMeshPart:SetAttribute("ExpectedTriangleCount", expectedTriCount)
+            return generatedMeshPart, true, nil
+        else
+            lastErrorReason = tostring(generatedOrErr)
+            warn(string.format("[ForgeAI Plugin] Falló EditableMesh para '%s': %s", partName, lastErrorReason))
         end
+    else
+        lastErrorReason = string.format("Buffers geométricos vacíos o insuficientes (verts=%d, faces=%d)", #vertices, #faces)
     end
 
     -- 2. Secondary path: Only if a verified published Roblox Cloud MeshId (`rbxassetid://<id>`) exists
@@ -180,24 +234,31 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): BaseP
         else ""
 
     if publishedUri ~= "" then
-        local okInsert, insertedMeshPart = pcall(function()
+        local okInsert, insertedOrErr = pcall(function()
             return InsertService:CreateMeshPartAsync(publishedUri, cfEnum, Enum.RenderFidelity.Precise)
         end)
-        if okInsert and insertedMeshPart then
+        if okInsert and insertedOrErr and typeof(insertedOrErr) == "Instance" and insertedOrErr:IsA("MeshPart") then
+            local insertedMeshPart = insertedOrErr :: MeshPart
             insertedMeshPart.Name = partName
             insertedMeshPart.Size = targetSize
             insertedMeshPart:SetAttribute("PublishedMeshId", publishedUri)
             insertedMeshPart:SetAttribute("GeometrySource", "PublishedCloudAsset")
-            return insertedMeshPart
+            insertedMeshPart:SetAttribute("ForgeGeometryVerified", true)
+            return insertedMeshPart, true, nil
+        else
+            lastErrorReason = "InsertService:CreateMeshPartAsync falló para " .. publishedUri .. ": " .. tostring(insertedOrErr)
+            warn("[ForgeAI Plugin] " .. lastErrorReason)
         end
     end
 
-    -- 3. Fallback container MeshPart (never assigns read-only MeshPart.MeshId)
+    -- 3. Fallback container MeshPart (never marked as verified geometry, never assigns read-only MeshPart.MeshId)
     local container = Instance.new("MeshPart")
     container.Name = partName
     container.Size = targetSize
-    container:SetAttribute("GeometrySource", "ContainerMeshPart")
-    return container
+    container:SetAttribute("GeometrySource", "UnverifiedFallbackContainer")
+    container:SetAttribute("ForgeGeometryVerified", false)
+    container:SetAttribute("ForgeReconstructionError", lastErrorReason or "Failed to reconstruct EditableMesh")
+    return container, false, lastErrorReason
 end
 
 -- Build 3D Model from Forge3DAsset parts array in Workspace or WorldModel
@@ -213,8 +274,16 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
         else CFrame.new(0, 5, 0)
 
     local partsList = assetData.parts or {}
+    local verifiedPartCount = 0
+    local failedPartCount = 0
+
     for idx, partSpec in ipairs(partsList) do
-        local part = createEditableMeshPartFromSpec(partSpec, idx)
+        local part, isVerified, _ = createEditableMeshPartFromSpec(partSpec, idx)
+        if isVerified then
+            verifiedPartCount += 1
+        else
+            failedPartCount += 1
+        end
 
         local pos = partSpec.position or { 0, 1, 0 }
         local rot = partSpec.rotation or { 0, 0, 0 }
@@ -285,8 +354,11 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
         end
     end
 
-    model:SetAttribute("ForgeEditableMeshReconstructed", true)
-    model:SetAttribute("ForgeReconstructionVerified", true)
+    local allVerified = (#partsList > 0) and (verifiedPartCount == #partsList) and (failedPartCount == 0)
+    model:SetAttribute("ForgeEditableMeshReconstructed", allVerified)
+    model:SetAttribute("ForgeReconstructionVerified", allVerified)
+    model:SetAttribute("ForgeVerifiedPartCount", verifiedPartCount)
+    model:SetAttribute("ForgeFailedPartCount", failedPartCount)
     model.Parent = targetParent or Workspace
     Selection:Set({ model })
 
@@ -295,6 +367,99 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
     end
 
     return model
+end
+
+-- Reconstructs EditableMesh geometry for a single imported .RBXMX model in Edit Mode or Play Mode
+local function reconstructSingleModelInPlace(model: Model): (boolean, number, number)
+    local reconstructorModule = model:FindFirstChild("ForgeStudioReconstructor")
+    if reconstructorModule and reconstructorModule:IsA("ModuleScript") then
+        local okReq, builder = pcall(require, reconstructorModule)
+        if okReq and type(builder) == "table" and type(builder.ReconstructInPlace) == "function" then
+            local okRun, r1, r2, r3 = xpcall(function()
+                return builder.ReconstructInPlace(model)
+            end, debug.traceback)
+            if okRun then
+                -- Handle both `(reconstructedCount: number, allVerified: boolean, expectedCount: number)`
+                -- and `(allVerified: boolean, reconstructedCount: number)` return signatures
+                local verCount = 0
+                local allVerified = false
+                local expectedCount = 0
+                if type(r1) == "number" then
+                    verCount = r1
+                    allVerified = if type(r2) == "boolean" then r2 else (verCount > 0)
+                    expectedCount = if type(r3) == "number" then r3 else verCount
+                elseif type(r1) == "boolean" then
+                    allVerified = r1
+                    verCount = if type(r2) == "number" then r2 else 0
+                    expectedCount = verCount
+                end
+                if verCount > 0 and allVerified then
+                    model:SetAttribute("ForgeEditableMeshReconstructed", true)
+                    model:SetAttribute("ForgeReconstructionVerified", true)
+                    return true, verCount, math.max(0, expectedCount - verCount)
+                elseif verCount > 0 then
+                    model:SetAttribute("ForgeEditableMeshReconstructed", false)
+                    model:SetAttribute("ForgeReconstructionVerified", false)
+                    return false, verCount, math.max(1, expectedCount - verCount)
+                end
+            else
+                warn("[ForgeAI Plugin] Error ejecutando ForgeStudioReconstructor.ReconstructInPlace: " .. tostring(r1))
+            end
+        end
+    end
+
+    -- Direct plugin fallback using embedded ForgeMeshGeometryJSON StringValues
+    local verifiedParts = 0
+    local failedParts = 0
+    for idx, child in ipairs(model:GetChildren()) do
+        if child:IsA("BasePart") then
+            local geomVal = child:FindFirstChild("ForgeMeshGeometryJSON")
+            if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
+                local okDec, parsedGeom = pcall(function()
+                    return HttpService:JSONDecode(geomVal.Value)
+                end)
+                if okDec and type(parsedGeom) == "table" then
+                    local newPart, isVerified, errReason = createEditableMeshPartFromSpec({
+                        name = child.Name,
+                        size = parsedGeom.size or { child.Size.X, child.Size.Y, child.Size.Z },
+                        collisionFidelity = parsedGeom.collisionFidelity or "Hull",
+                        meshData = parsedGeom,
+                    }, idx)
+                    if isVerified then
+                        newPart.CFrame = child.CFrame
+                        newPart.Color = child.Color
+                        newPart.Material = child.Material
+                        newPart.Transparency = child.Transparency
+                        newPart.Anchored = child.Anchored
+                        newPart.CanCollide = child.CanCollide
+                        for _, subChild in ipairs(child:GetChildren()) do
+                            subChild:Clone().Parent = newPart
+                        end
+                        newPart.Parent = model
+                        if model.PrimaryPart == child then
+                            model.PrimaryPart = newPart
+                        end
+                        child:Destroy()
+                        verifiedParts += 1
+                    else
+                        newPart:Destroy()
+                        failedParts += 1
+                        child:SetAttribute("ForgeGeometryVerified", false)
+                        child:SetAttribute("ForgeReconstructionError", errReason or "EditableMesh reconstruction failed")
+                    end
+                else
+                    failedParts += 1
+                end
+            end
+        end
+    end
+
+    local allSucceeded = (verifiedParts > 0) and (failedParts == 0)
+    model:SetAttribute("ForgeEditableMeshReconstructed", allSucceeded)
+    model:SetAttribute("ForgeReconstructionVerified", allSucceeded)
+    model:SetAttribute("ForgeVerifiedPartCount", verifiedParts)
+    model:SetAttribute("ForgeFailedPartCount", failedParts)
+    return allSucceeded, verifiedParts, failedParts
 end
 
 -- Reconstructs EditableMesh geometry for imported .RBXMX models in Selection or Workspace
@@ -316,66 +481,19 @@ local function reconstructEditableMeshModelsInStudio(): string
         end
     end
 
-    local reconstructedModels = 0
+    local fullyVerifiedModels = 0
+    local partialOrFailedModels = 0
     local reconstructedParts = 0
+    local failedPartsTotal = 0
 
     for _, model in ipairs(candidates) do
-        local reconstructorModule = model:FindFirstChild("ForgeStudioReconstructor")
-        local handledByModule = false
-
-        if reconstructorModule and reconstructorModule:IsA("ModuleScript") then
-            local okReq, builder = pcall(require, reconstructorModule)
-            if okReq and type(builder) == "table" and type(builder.ReconstructInPlace) == "function" then
-                local okRun, countOrErr = xpcall(function()
-                    return builder.ReconstructInPlace(model)
-                end, debug.traceback)
-                if okRun and type(countOrErr) == "number" and countOrErr > 0 then
-                    reconstructedModels += 1
-                    reconstructedParts += countOrErr
-                    model:SetAttribute("ForgeReconstructionVerified", true)
-                    handledByModule = true
-                end
-            end
-        end
-
-        if not handledByModule then
-            local modelPartCount = 0
-            for idx, child in ipairs(model:GetChildren()) do
-                if child:IsA("BasePart") then
-                    local geomVal = child:FindFirstChild("ForgeMeshGeometryJSON")
-                    if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
-                        local okDec, parsedGeom = pcall(function()
-                            return HttpService:JSONDecode(geomVal.Value)
-                        end)
-                        if okDec and type(parsedGeom) == "table" then
-                            local newPart = createEditableMeshPartFromSpec({
-                                name = child.Name,
-                                size = parsedGeom.size or { child.Size.X, child.Size.Y, child.Size.Z },
-                                collisionFidelity = parsedGeom.collisionFidelity or "Hull",
-                                meshData = parsedGeom,
-                            }, idx)
-                            newPart.CFrame = child.CFrame
-                            newPart.Color = child.Color
-                            newPart.Material = child.Material
-                            newPart.Transparency = child.Transparency
-                            newPart.Anchored = child.Anchored
-                            newPart.CanCollide = child.CanCollide
-                            for _, subChild in ipairs(child:GetChildren()) do
-                                subChild:Clone().Parent = newPart
-                            end
-                            newPart.Parent = model
-                            child:Destroy()
-                            modelPartCount += 1
-                            reconstructedParts += 1
-                        end
-                    end
-                end
-            end
-            if modelPartCount > 0 then
-                reconstructedModels += 1
-                model:SetAttribute("ForgeEditableMeshReconstructed", true)
-                model:SetAttribute("ForgeReconstructionVerified", true)
-            end
+        local allOk, verCount, failCount = reconstructSingleModelInPlace(model)
+        reconstructedParts += verCount
+        failedPartsTotal += failCount
+        if allOk then
+            fullyVerifiedModels += 1
+        elseif verCount > 0 or failCount > 0 then
+            partialOrFailedModels += 1
         end
     end
 
@@ -383,12 +501,21 @@ local function reconstructEditableMeshModelsInStudio(): string
         ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
     end
 
-    if reconstructedModels == 0 then
+    if fullyVerifiedModels == 0 and partialOrFailedModels == 0 then
         return "No se encontraron modelos .RBXMX pendientes de reconstrucción en Selection ni Workspace."
     end
+    if partialOrFailedModels > 0 or failedPartsTotal > 0 then
+        return string.format(
+            "⚠️ Reconstrucción EditableMesh parcial/con avisos: %d modelo(s) 100%% verificados, %d con fallos (%d MeshParts verificados, %d fallidos). Revisa Output.",
+            fullyVerifiedModels,
+            partialOrFailedModels,
+            reconstructedParts,
+            failedPartsTotal
+        )
+    end
     return string.format(
-        "✅ Reconstrucción EditableMesh verificada: %d modelo(s), %d MeshPart(s) reconstruidos con geometría real.",
-        reconstructedModels,
+        "✅ Reconstrucción EditableMesh 100%% verificada en Modo Edición: %d modelo(s), %d MeshPart(s) reconstruidos con geometría real.",
+        fullyVerifiedModels,
         reconstructedParts
     )
 end
@@ -781,3 +908,38 @@ btnPushToForge.MouseButton1Click:Connect(function()
         outputLog.Text = pushSelectedModelToForgeStudio()
     end)
 end)
+
+-- Automatic Edit-Mode .RBXMX Reconstructor:
+-- When a .RBXMX model containing ForgeStudioReconstructor or ForgeMeshGeometryJSON is imported into Workspace
+-- in Roblox Studio Edit Mode (without starting Play Mode), reconstruct its EditableMesh geometry automatically.
+local RunService = game:GetService("RunService")
+if RunService:IsEdit() then
+    Workspace.ChildAdded:Connect(function(child: Instance)
+        if child:IsA("Model") and not child:GetAttribute("ForgeEditableMeshReconstructed") then
+            task.defer(function()
+                if child.Parent and (child:FindFirstChild("ForgeStudioReconstructor") or child:FindFirstChild("ForgeMeshGeometryJSON", true)) then
+                    local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Auto-Reconstruct Imported RBXMX")
+                    local allOk, verCount, failCount = reconstructSingleModelInPlace(child)
+                    if recordId then
+                        ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+                    end
+                    if allOk and verCount > 0 then
+                        outputLog.Text = string.format(
+                            "✨ Auto-reconstrucción .RBXMX en Modo Edición completada: '%s' (%d MeshParts verificados).",
+                            child.Name,
+                            verCount
+                        )
+                    elseif verCount > 0 or failCount > 0 then
+                        outputLog.Text = string.format(
+                            "⚠️ Auto-reconstrucción .RBXMX para '%s': %d verificados, %d fallidos.",
+                            child.Name,
+                            verCount,
+                            failCount
+                        )
+                    end
+                end
+            end)
+        end
+    end)
+end
+

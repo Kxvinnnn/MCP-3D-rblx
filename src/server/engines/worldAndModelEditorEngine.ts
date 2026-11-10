@@ -795,11 +795,20 @@ export function buildStrictLuauFromEditedParts(
     '    Faces: FaceIndexList,',
     '}',
     '',
-    'local function createTrueMeshPart(desc: MeshPartDescriptor): MeshPart',
+    'local function createTrueMeshPart(desc: MeshPartDescriptor): (MeshPart, boolean, string?)',
+    '    local editableMeshInstance: EditableMesh? = nil',
+    '    local expectedTriCount = math.floor(#desc.Indices / 3)',
+    '    local addedTriCount = 0',
+    '    local lastErrorReason: string? = nil',
+    '',
     '    -- 1. Construct real MeshPart geometry directly from Vertex, Normal, UV, and Triangle Index buffers via EditableMesh',
-    '    if #desc.Vertices > 0 and #desc.Indices >= 3 then',
-    '        local okEditable, generatedMeshPart = pcall(function()',
+    '    if #desc.Vertices >= 3 and expectedTriCount >= 1 then',
+    '        local okEditable, generatedOrErr = xpcall(function()',
     '            local editableMesh = AssetService:CreateEditableMesh()',
+    '            if not editableMesh then',
+    '                error("AssetService:CreateEditableMesh() returned nil for " .. tostring(desc.Name))',
+    '            end',
+    '            editableMeshInstance = editableMesh',
     '            local vertexIds = table.create(#desc.Vertices)',
     '            local normalIds = table.create(#desc.Normals)',
     '            local uvIds = table.create(#desc.UVs)',
@@ -814,34 +823,54 @@ export function buildStrictLuauFromEditedParts(
     '                uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1], uv[2]))',
     '            end',
     '',
-    '            local stepCount = math.floor(#desc.Indices / 3)',
-    '            for t = 0, stepCount - 1 do',
+    '            for t = 0, expectedTriCount - 1 do',
     '                local baseIdx = t * 3',
     '                local i1, i2, i3 = desc.Indices[baseIdx + 1], desc.Indices[baseIdx + 2], desc.Indices[baseIdx + 3]',
     '                local v1, v2, v3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]',
-    '                if v1 and v2 and v3 then',
+    '                if v1 and v2 and v3 and v1 ~= v2 and v2 ~= v3 and v1 ~= v3 then',
     '                    local fid = editableMesh:AddTriangle(v1, v2, v3)',
-    '                    if normalIds[i1] and normalIds[i2] and normalIds[i3] then',
-    '                        pcall(function()',
-    '                            editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })',
-    '                        end)',
-    '                    end',
-    '                    if uvIds[i1] and uvIds[i2] and uvIds[i3] then',
-    '                        pcall(function()',
-    '                            editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })',
-    '                        end)',
+    '                    if fid then',
+    '                        addedTriCount += 1',
+    '                        if normalIds[i1] and normalIds[i2] and normalIds[i3] then',
+    '                            pcall(function()',
+    '                                editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })',
+    '                            end)',
+    '                        end',
+    '                        if uvIds[i1] and uvIds[i2] and uvIds[i3] then',
+    '                            pcall(function()',
+    '                                editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })',
+    '                            end)',
+    '                        end',
     '                    end',
     '                end',
     '            end',
     '',
-    '            return AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {',
+    '            if addedTriCount == 0 or addedTriCount < expectedTriCount then',
+    '                error(string.format("Incomplete triangle creation for %s: created %d of %d expected", desc.Name, addedTriCount, expectedTriCount))',
+    '            end',
+    '            local meshTriangles = editableMesh:GetTriangles()',
+    '            if type(meshTriangles) == "table" and #meshTriangles < expectedTriCount then',
+    '                error(string.format("EditableMesh:GetTriangles() count mismatch for %s: got %d of %d", desc.Name, #meshTriangles, expectedTriCount))',
+    '            end',
+    '',
+    '            local createdPart = AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {',
     '                CollisionFidelity = desc.CollisionFidelity,',
     '                RenderFidelity = Enum.RenderFidelity.Precise,',
     '                FluidFidelity = Enum.FluidFidelity.Automatic,',
     '            })',
-    '        end)',
+    '            if not createdPart then',
+    '                error("AssetService:CreateMeshPartAsync() returned nil for " .. tostring(desc.Name))',
+    '            end',
+    '            return createdPart',
+    '        end, debug.traceback)',
     '',
-    '        if okEditable and generatedMeshPart then',
+    '        if editableMeshInstance then',
+    '            pcall(function() editableMeshInstance:Destroy() end)',
+    '            editableMeshInstance = nil',
+    '        end',
+    '',
+    '        if okEditable and generatedOrErr and typeof(generatedOrErr) == "Instance" and generatedOrErr:IsA("MeshPart") then',
+    '            local generatedMeshPart = generatedOrErr :: MeshPart',
     '            generatedMeshPart.Name = desc.Name',
     '            generatedMeshPart.Size = desc.Size',
     '            if desc.TextureId and desc.TextureId ~= "" then',
@@ -849,19 +878,27 @@ export function buildStrictLuauFromEditedParts(
     '            end',
     '            generatedMeshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
     '            generatedMeshPart:SetAttribute("VertexCount", #desc.Vertices)',
-    '            generatedMeshPart:SetAttribute("TriangleCount", #desc.Faces)',
+    '            generatedMeshPart:SetAttribute("TriangleCount", addedTriCount)',
+    '            generatedMeshPart:SetAttribute("ExpectedTriangleCount", expectedTriCount)',
     '            generatedMeshPart:SetAttribute("GeometrySource", "EditableMeshBuffer")',
-    '            return generatedMeshPart',
+    '            generatedMeshPart:SetAttribute("ForgeGeometryVerified", true)',
+    '            return generatedMeshPart, true, nil',
+    '        else',
+    '            lastErrorReason = tostring(generatedOrErr)',
+    '            warn(string.format("[ForgeAI EditableMesh] Failed reconstructing %s: %s", tostring(desc.Name), lastErrorReason))',
     '        end',
+    '    else',
+    '        lastErrorReason = "Insufficient vertex or triangle index buffer data"',
     '    end',
     '',
     '    -- 2. Only if a real published Roblox Cloud MeshId (`rbxassetid://<id>`) was explicitly provided:',
     '    local targetMeshUri = if desc.PublishedMeshId ~= "" then desc.PublishedMeshId else desc.PublishedAssetId',
     '    if targetMeshUri ~= "" then',
-    '        local okInsert, loadedMeshPart = pcall(function()',
+    '        local okInsert, loadedOrErr = pcall(function()',
     '            return InsertService:CreateMeshPartAsync(targetMeshUri, desc.CollisionFidelity, Enum.RenderFidelity.Precise)',
     '        end)',
-    '        if okInsert and loadedMeshPart then',
+    '        if okInsert and loadedOrErr and typeof(loadedOrErr) == "Instance" and loadedOrErr:IsA("MeshPart") then',
+    '            local loadedMeshPart = loadedOrErr :: MeshPart',
     '            loadedMeshPart.Name = desc.Name',
     '            loadedMeshPart.Size = desc.Size',
     '            if desc.TextureId and desc.TextureId ~= "" then',
@@ -872,19 +909,25 @@ export function buildStrictLuauFromEditedParts(
     '            loadedMeshPart:SetAttribute("VertexCount", #desc.Vertices)',
     '            loadedMeshPart:SetAttribute("TriangleCount", #desc.Faces)',
     '            loadedMeshPart:SetAttribute("GeometrySource", "PublishedCloudAsset")',
-    '            return loadedMeshPart',
+    '            loadedMeshPart:SetAttribute("ForgeGeometryVerified", true)',
+    '            return loadedMeshPart, true, nil',
+    '        else',
+    '            lastErrorReason = "InsertService:CreateMeshPartAsync failed for " .. tostring(targetMeshUri)',
+    '            warn("[ForgeAI EditableMesh] " .. lastErrorReason)',
     '        end',
     '    end',
     '',
-    '    -- 3. Container MeshPart (never assigns read-only MeshPart.MeshId)',
+    '    -- 3. Unverified fallback container MeshPart (never marked as verified geometry, never assigns read-only MeshPart.MeshId)',
     '    local meshPart = Instance.new("MeshPart")',
     '    meshPart.Name = desc.Name',
     '    meshPart.Size = desc.Size',
     '    meshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
     '    meshPart:SetAttribute("VertexCount", #desc.Vertices)',
     '    meshPart:SetAttribute("TriangleCount", #desc.Faces)',
-    '    meshPart:SetAttribute("GeometrySource", "PendingEditableMeshPermission")',
-    '    return meshPart',
+    '    meshPart:SetAttribute("GeometrySource", "UnverifiedFallbackContainer")',
+    '    meshPart:SetAttribute("ForgeGeometryVerified", false)',
+    '    meshPart:SetAttribute("ForgeReconstructionError", lastErrorReason or "EditableMesh creation failed")',
+    '    return meshPart, false, lastErrorReason',
     'end',
     '',
     `local ${safeName}Builder = {}`,
@@ -893,6 +936,9 @@ export function buildStrictLuauFromEditedParts(
     '    local baseOrigin = origin or CFrame.new(0, 0, 0)',
     '    local model = Instance.new("Model")',
     `    model.Name = "${safeName}"`,
+    `    local totalExpectedParts = ${expandedParts.length}`,
+    '    local verifiedPartCount = 0',
+    '    local failedPartCount = 0',
     '',
   ];
 
@@ -902,6 +948,7 @@ export function buildStrictLuauFromEditedParts(
     const [rx = 0, ry = 0, rz = 0] = p.rotation || [0, 0, 0];
     const [cr = 180, cg = 180, cb = 180] = p.color || [180, 180, 180];
     const vName = `meshPart_${idx + 1}`;
+    const okFlag = `isVerified_${idx + 1}`;
     const cfMode = p.collisionFidelity || collisionFidelity || 'Hull';
     const partLabel = p.name || `MeshPart_${idx + 1}`;
     const resolvedMesh = p.meshData || synthesizeProceduralMeshData('MeshPart', [sx, sy, sz]);
@@ -940,7 +987,7 @@ export function buildStrictLuauFromEditedParts(
 
     lines.push(
       `    -- Sub-MeshPart #${idx + 1}: ${partLabel} (${vEntries.length} verts, ${fEntries.length} tris)`,
-      `    local ${vName} = createTrueMeshPart({`,
+      `    local ${vName}, ${okFlag}, _ = createTrueMeshPart({`,
       `        Name = "${partLabel}",`,
       `        PublishedMeshId = "${meshIdStr}",`,
       `        PublishedAssetId = "${assetIdStr}",`,
@@ -954,6 +1001,7 @@ export function buildStrictLuauFromEditedParts(
       `        Indices = {${flatIndexEntries.join(',')}},`,
       `        Faces = {${fEntries.join(',')}},`,
       '    })',
+      `    if ${okFlag} then verifiedPartCount += 1 else failedPartCount += 1 end`,
       `    ${vName}.CFrame = baseOrigin * CFrame.new(${Number(px).toFixed(2)}, ${Number(py).toFixed(2)}, ${Number(pz).toFixed(2)}) * CFrame.Angles(math.rad(${Number(rx).toFixed(1)}), math.rad(${Number(ry).toFixed(1)}), math.rad(${Number(rz).toFixed(1)}))`,
       `    ${vName}.Color = Color3.fromRGB(${Math.round(cr)}, ${Math.round(cg)}, ${Math.round(cb)})`,
       `    ${vName}.Material = Enum.Material.${p.material || 'Metal'}`,
@@ -972,32 +1020,49 @@ export function buildStrictLuauFromEditedParts(
   });
 
   lines.push(
+    '    local allVerified = (totalExpectedParts > 0) and (verifiedPartCount == totalExpectedParts) and (failedPartCount == 0)',
+    '    model:SetAttribute("ForgeEditableMeshReconstructed", allVerified)',
+    '    model:SetAttribute("ForgeReconstructionVerified", allVerified)',
+    '    model:SetAttribute("ForgeVerifiedPartCount", verifiedPartCount)',
+    '    model:SetAttribute("ForgeFailedPartCount", failedPartCount)',
     '    model.Parent = Workspace',
     '    return model',
     'end',
     '',
     `-- Reconstructs EditableMesh geometry in-place on an imported .RBXMX Model`,
-    `function ${safeName}Builder.ReconstructInPlace(targetModel: Model): number`,
+    `-- Returns: (reconstructedCount: number, allVerified: boolean, expectedCount: number)`,
+    `function ${safeName}Builder.ReconstructInPlace(targetModel: Model): (number, boolean, number)`,
     '    local reconstructedCount = 0',
+    `    local expectedCount = ${expandedParts.length}`,
     '    local spawned = (' + safeName + 'Builder.Spawn(targetModel:GetPivot()))',
     '    for _, generatedChild in ipairs(spawned:GetChildren()) do',
     '        if generatedChild:IsA("MeshPart") then',
+    '            local isPartVerified = generatedChild:GetAttribute("ForgeGeometryVerified") == true',
     '            local existing = targetModel:FindFirstChild(generatedChild.Name)',
-    '            if existing and existing:IsA("BasePart") then',
-    '                generatedChild.CFrame = existing.CFrame',
-    '                for _, child in ipairs(existing:GetChildren()) do',
-    '                    child:Clone().Parent = generatedChild',
+    '            if isPartVerified then',
+    '                if existing and existing:IsA("BasePart") then',
+    '                    generatedChild.CFrame = existing.CFrame',
+    '                    for _, child in ipairs(existing:GetChildren()) do',
+    '                        child:Clone().Parent = generatedChild',
+    '                    end',
+    '                    existing:Destroy()',
     '                end',
-    '                existing:Destroy()',
+    '                generatedChild.Parent = targetModel',
+    '                reconstructedCount += 1',
+    '            else',
+    '                if existing then',
+    '                    existing:SetAttribute("ForgeGeometryVerified", false)',
+    '                    existing:SetAttribute("ForgeReconstructionError", generatedChild:GetAttribute("ForgeReconstructionError"))',
+    '                end',
     '            end',
-    '            generatedChild.Parent = targetModel',
-    '            reconstructedCount += 1',
     '        end',
     '    end',
     '    spawned:Destroy()',
-    '    targetModel:SetAttribute("ForgeEditableMeshReconstructed", true)',
+    '    local allVerified = (expectedCount > 0) and (reconstructedCount == expectedCount)',
+    '    targetModel:SetAttribute("ForgeEditableMeshReconstructed", allVerified)',
+    '    targetModel:SetAttribute("ForgeReconstructionVerified", allVerified)',
     '    targetModel:SetAttribute("ForgeReconstructedCount", reconstructedCount)',
-    '    return reconstructedCount',
+    '    return reconstructedCount, allVerified, expectedCount',
     'end',
     '',
     `return ${safeName}Builder`
@@ -1012,6 +1077,15 @@ function escapeXmlServer(str: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function unescapeXmlServer(str: string): string {
+  return String(str)
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
 }
 
 function eulerDegToRotationMatrixServer(rxDeg: number, ryDeg: number, rzDeg: number): number[] {
@@ -1032,6 +1106,23 @@ function eulerDegToRotationMatrixServer(rxDeg: number, ryDeg: number, rzDeg: num
     cx * sy * sz + sx * cz,
     cx * cy,
   ];
+}
+
+function rotationMatrixToEulerDegServer(m: number[]): [number, number, number] {
+  const [r00 = 1, r01 = 0, r02 = 0, r10 = 0, r11 = 1, r12 = 0, , , r22 = 1] = m;
+  const sy = Math.max(-1, Math.min(1, r02));
+  const ry = Math.asin(sy);
+  let rx = 0;
+  let rz = 0;
+  if (Math.abs(r02) < 0.99999) {
+    rx = Math.atan2(-r12, r22);
+    rz = Math.atan2(-r01, r00);
+  } else {
+    rx = Math.atan2(r10, r11);
+    rz = 0;
+  }
+  const toDeg = (rad: number) => Number(((rad * 180) / Math.PI).toFixed(2));
+  return [toDeg(rx), toDeg(ry), toDeg(rz)];
 }
 
 export function buildRbxmxFromPartsServer(
@@ -1102,14 +1193,17 @@ export function buildRbxmxFromPartsServer(
     '    if reconstructorModule and reconstructorModule:IsA("ModuleScript") then',
     '        local ok, builder = pcall(require, reconstructorModule)',
     '        if ok and type(builder) == "table" and type(builder.ReconstructInPlace) == "function" then',
-    '            local okRun, countOrErr = xpcall(function()',
+    '            local okRun, r1, r2, r3 = xpcall(function()',
     '                return builder.ReconstructInPlace(model)',
     '            end, debug.traceback)',
     '            if okRun then',
-    '                model:SetAttribute("ForgeReconstructionVerified", true)',
-    '                model:SetAttribute("ForgeReconstructedPartCount", countOrErr)',
+    '                local count = if type(r1) == "number" then r1 else (if type(r2) == "number" then r2 else 0)',
+    '                local allOk = if type(r2) == "boolean" then r2 else (if type(r1) == "boolean" then r1 else (count > 0))',
+    '                model:SetAttribute("ForgeEditableMeshReconstructed", allOk)',
+    '                model:SetAttribute("ForgeReconstructionVerified", allOk)',
+    '                model:SetAttribute("ForgeReconstructedPartCount", count)',
     '            else',
-    '                warn("[ForgeAI .RBXMX Reconstructor] Error reconstructing EditableMesh:", countOrErr)',
+    '                warn("[ForgeAI .RBXMX Reconstructor] Error reconstructing EditableMesh:", r1)',
     '            end',
     '        end',
     '    end',
@@ -1141,6 +1235,12 @@ export function buildRbxmxFromPartsServer(
     const validMeshId = validatePublishedRobloxMeshId(p.meshId || md.meshId);
     const validTexId = validatePublishedRobloxMeshId(p.textureId);
 
+    const pbr = (p as any).pbrMaterial || {};
+    const validColorMap = validatePublishedRobloxMeshId(pbr.colorMapAssetId);
+    const validNormalMap = validatePublishedRobloxMeshId(pbr.normalMapAssetId);
+    const validRoughMap = validatePublishedRobloxMeshId(pbr.roughnessMapAssetId);
+    const validMetalMap = validatePublishedRobloxMeshId(pbr.metalnessMapAssetId);
+
     const serializedMeshJson = JSON.stringify({
       vertices: md.vertices,
       normals: md.normals,
@@ -1157,6 +1257,7 @@ export function buildRbxmxFromPartsServer(
       canCollide: p.canCollide,
       anchored: p.anchored,
       collisionFidelity: p.collisionFidelity || collisionFidelity,
+      pbrMaterial: (p as any).pbrMaterial || undefined,
     });
 
     lines.push(
@@ -1208,8 +1309,20 @@ export function buildRbxmxFromPartsServer(
       '      </Properties>',
       `      <Item class="SurfaceAppearance" referent="${refId}_PBR">`,
       '        <Properties>',
-      `          <string name="Name">${escapeXmlServer(p.name)}_PBRSurface</string>`,
+      `          <string name="Name">${escapeXmlServer(p.name || `MeshPart_${idx + 1}`)}_PBRSurface</string>`,
       '          <token name="AlphaMode">0</token>',
+      validColorMap
+        ? `          <Content name="ColorMap"><url>${escapeXmlServer(validColorMap)}</url></Content>`
+        : '          <Content name="ColorMap"><null></null></Content>',
+      validNormalMap
+        ? `          <Content name="NormalMap"><url>${escapeXmlServer(validNormalMap)}</url></Content>`
+        : '          <Content name="NormalMap"><null></null></Content>',
+      validRoughMap
+        ? `          <Content name="RoughnessMap"><url>${escapeXmlServer(validRoughMap)}</url></Content>`
+        : '          <Content name="RoughnessMap"><null></null></Content>',
+      validMetalMap
+        ? `          <Content name="MetalnessMap"><url>${escapeXmlServer(validMetalMap)}</url></Content>`
+        : '          <Content name="MetalnessMap"><null></null></Content>',
       '        </Properties>',
       '      </Item>',
       `      <Item class="StringValue" referent="${refId}_GEOM">`,
@@ -1247,6 +1360,251 @@ export function buildRbxmxFromPartsServer(
   );
 
   return lines.join('\n');
+}
+
+/**
+ * Server-side `.RBXMX` XML parser for Pillar C Bidirectional Sync (`/api/v1/assets/pull-from-rojo`).
+ * Recovers full CFrames (Position + Euler Rotation from 3x3 rotation matrix), Sizes, Colors,
+ * Roblox Material enums, 4-channel `SurfaceAppearance` maps, and `ForgeMeshGeometryJSON` buffers.
+ */
+export function parseRbxmxFromPartsServer(
+  rbxmxText: string,
+  fallbackName: string = 'Model3D',
+  defaultCollisionFidelity: string = 'Hull'
+): {
+  modelName: string;
+  parts: MeshPartInput[];
+  luauCode: string | null;
+  polyCount: number;
+} {
+  const tokenToMaterial: Record<number, string> = {
+    256: 'SmoothPlastic',
+    1088: 'Metal',
+    1584: 'Neon',
+    1568: 'Glass',
+    1588: 'ForceField',
+    1056: 'DiamondPlate',
+    1040: 'CorrodedMetal',
+    1072: 'Foil',
+    816: 'Concrete',
+    800: 'Slate',
+    832: 'Granite',
+    848: 'Brick',
+    784: 'Marble',
+    864: 'Cobblestone',
+    512: 'Wood',
+    528: 'WoodPlanks',
+    1312: 'Fabric',
+    1296: 'Sand',
+    1536: 'Ice',
+    1280: 'Grass',
+  };
+  const tokenToCf: Record<number, 'Box' | 'Hull' | 'Default' | 'PreciseConvexDecomposition'> = {
+    0: 'Box',
+    1: 'Hull',
+    2: 'Default',
+    3: 'PreciseConvexDecomposition',
+  };
+
+  let modelName = fallbackName;
+  const modelNameMatch = rbxmxText.match(
+    /<Item\s+class="Model"[^>]*>[\s\S]*?<Properties>[\s\S]*?<string\s+name="Name">([^<]+)<\/string>/i
+  );
+  if (modelNameMatch?.[1]) {
+    modelName = unescapeXmlServer(modelNameMatch[1].trim()) || fallbackName;
+  }
+
+  let luauCode: string | null = null;
+  const moduleRegex =
+    /<Item\s+class="ModuleScript"[^>]*>[\s\S]*?<string\s+name="Name">ForgeStudioReconstructor<\/string>[\s\S]*?<ProtectedString\s+name="Source"><!\[CDATA\[([\s\S]*?)\]\]><\/ProtectedString>/i;
+  const modMatch = rbxmxText.match(moduleRegex);
+  if (modMatch?.[1]) {
+    luauCode = modMatch[1].trim();
+  }
+
+  const parts: MeshPartInput[] = [];
+  const itemRegex =
+    /<Item\s+class="(MeshPart|Part|WedgePart|CornerWedgePart|TrussPart)"[^>]*>([\s\S]*?)<\/Item>\s*(?=<Item\s+class="(?:MeshPart|Part|WedgePart|CornerWedgePart|TrussPart|StringValue|ModuleScript|Script)"|<\/Item>)/gi;
+
+  // Match each MeshPart/Part block by locating `<Item class="MeshPart"...>` starts
+  const startRegex = /<Item\s+class="(MeshPart|Part|WedgePart|CornerWedgePart|TrussPart)"[^>]*>/gi;
+  const starts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = startRegex.exec(rbxmxText)) !== null) {
+    starts.push(m.index);
+  }
+
+  for (let i = 0; i < starts.length; i++) {
+    const startIdx = starts[i];
+    const endIdx = i + 1 < starts.length ? starts[i + 1] : rbxmxText.length;
+    const block = rbxmxText.slice(startIdx, endIdx);
+
+    const nameMatch = block.match(/<string\s+name="Name">([^<]+)<\/string>/i);
+    const partName = nameMatch?.[1] ? unescapeXmlServer(nameMatch[1].trim()) : `MeshPart_${i + 1}`;
+
+    const sizeBlock = block.match(/<Vector3\s+name="(?:size|Size)">([\s\S]*?)<\/Vector3>/i)?.[1] || '';
+    const sx = Number(sizeBlock.match(/<X>([^<]+)<\/X>/i)?.[1] ?? 2);
+    const sy = Number(sizeBlock.match(/<Y>([^<]+)<\/Y>/i)?.[1] ?? 2);
+    const sz = Number(sizeBlock.match(/<Z>([^<]+)<\/Z>/i)?.[1] ?? 2);
+
+    const cfBlock = block.match(/<CoordinateFrame\s+name="CFrame">([\s\S]*?)<\/CoordinateFrame>/i)?.[1] || '';
+    const px = Number(cfBlock.match(/<X>([^<]+)<\/X>/i)?.[1] ?? 0);
+    const py = Number(cfBlock.match(/<Y>([^<]+)<\/Y>/i)?.[1] ?? 1);
+    const pz = Number(cfBlock.match(/<Z>([^<]+)<\/Z>/i)?.[1] ?? 0);
+    const r00 = Number(cfBlock.match(/<R00>([^<]+)<\/R00>/i)?.[1] ?? 1);
+    const r01 = Number(cfBlock.match(/<R01>([^<]+)<\/R01>/i)?.[1] ?? 0);
+    const r02 = Number(cfBlock.match(/<R02>([^<]+)<\/R02>/i)?.[1] ?? 0);
+    const r10 = Number(cfBlock.match(/<R10>([^<]+)<\/R10>/i)?.[1] ?? 0);
+    const r11 = Number(cfBlock.match(/<R11>([^<]+)<\/R11>/i)?.[1] ?? 1);
+    const r12 = Number(cfBlock.match(/<R12>([^<]+)<\/R12>/i)?.[1] ?? 0);
+    const r20 = Number(cfBlock.match(/<R20>([^<]+)<\/R20>/i)?.[1] ?? 0);
+    const r21 = Number(cfBlock.match(/<R21>([^<]+)<\/R21>/i)?.[1] ?? 0);
+    const r22 = Number(cfBlock.match(/<R22>([^<]+)<\/R22>/i)?.[1] ?? 1);
+    let rotation: [number, number, number] = rotationMatrixToEulerDegServer([
+      r00, r01, r02, r10, r11, r12, r20, r21, r22,
+    ]);
+
+    let color: [number, number, number] = [148, 163, 184];
+    const colBlock = block.match(/<Color3\s+name="(?:Color3uint8|Color)">([\s\S]*?)<\/Color3>/i)?.[1];
+    if (colBlock) {
+      let cr = Number(colBlock.match(/<R>([^<]+)<\/R>/i)?.[1] ?? 0.58);
+      let cg = Number(colBlock.match(/<G>([^<]+)<\/G>/i)?.[1] ?? 0.64);
+      let cb = Number(colBlock.match(/<B>([^<]+)<\/B>/i)?.[1] ?? 0.72);
+      if (cr <= 1 && cg <= 1 && cb <= 1) {
+        cr = Math.round(cr * 255);
+        cg = Math.round(cg * 255);
+        cb = Math.round(cb * 255);
+      }
+      color = [
+        Math.max(0, Math.min(255, Math.round(cr))),
+        Math.max(0, Math.min(255, Math.round(cg))),
+        Math.max(0, Math.min(255, Math.round(cb))),
+      ];
+    }
+
+    const matTok = Number(block.match(/<token\s+name="Material">(\d+)<\/token>/i)?.[1] ?? 1088);
+    let material = tokenToMaterial[matTok] || 'Metal';
+
+    const cfTok = Number(block.match(/<token\s+name="CollisionFidelity">(\d+)<\/token>/i)?.[1] ?? 1);
+    const collisionFidelity =
+      tokenToCf[cfTok] ||
+      (defaultCollisionFidelity as 'Box' | 'Hull' | 'Default' | 'PreciseConvexDecomposition') ||
+      'Hull';
+
+    const transparency = Number(block.match(/<float\s+name="Transparency">([^<]+)<\/float>/i)?.[1] ?? 0);
+    const reflectance = Number(block.match(/<float\s+name="Reflectance">([^<]+)<\/float>/i)?.[1] ?? 0.2);
+    const anchored = (block.match(/<bool\s+name="Anchored">([^<]+)<\/bool>/i)?.[1] ?? 'true') !== 'false';
+    const canCollide = (block.match(/<bool\s+name="CanCollide">([^<]+)<\/bool>/i)?.[1] ?? 'true') !== 'false';
+
+    const meshIdRaw = block.match(/<Content\s+name="MeshId">\s*<url>([^<]+)<\/url>/i)?.[1];
+    const texIdRaw = block.match(/<Content\s+name="TextureID">\s*<url>([^<]+)<\/url>/i)?.[1];
+    const meshId = validatePublishedRobloxMeshId(meshIdRaw ? unescapeXmlServer(meshIdRaw) : undefined) || undefined;
+    const textureId = validatePublishedRobloxMeshId(texIdRaw ? unescapeXmlServer(texIdRaw) : undefined) || undefined;
+
+    let pbrMaterial: Record<string, any> | undefined;
+    const saBlock = block.match(/<Item\s+class="SurfaceAppearance"[^>]*>([\s\S]*?)<\/Item>/i)?.[1];
+    if (saBlock) {
+      const cmap = validatePublishedRobloxMeshId(
+        saBlock.match(/<Content\s+name="ColorMap">\s*<url>([^<]+)<\/url>/i)?.[1]
+      );
+      const nmap = validatePublishedRobloxMeshId(
+        saBlock.match(/<Content\s+name="NormalMap">\s*<url>([^<]+)<\/url>/i)?.[1]
+      );
+      const rmap = validatePublishedRobloxMeshId(
+        saBlock.match(/<Content\s+name="RoughnessMap">\s*<url>([^<]+)<\/url>/i)?.[1]
+      );
+      const mmap = validatePublishedRobloxMeshId(
+        saBlock.match(/<Content\s+name="MetalnessMap">\s*<url>([^<]+)<\/url>/i)?.[1]
+      );
+      if (cmap || nmap || rmap || mmap) {
+        pbrMaterial = {
+          materialName: `${partName}_PBR`,
+          colorMapAssetId: cmap || undefined,
+          normalMapAssetId: nmap || undefined,
+          roughnessMapAssetId: rmap || undefined,
+          metalnessMapAssetId: mmap || undefined,
+        };
+      }
+    }
+
+    let meshData: SubMeshGeometryInput | undefined;
+    let roughness = 0.35;
+    let metalness = Math.min(1, Math.max(0, Number((reflectance / 0.35).toFixed(2))));
+
+    const geomMatch = block.match(
+      /<string\s+name="Name">ForgeMeshGeometryJSON<\/string>\s*<string\s+name="Value">([\s\S]*?)<\/string>/i
+    );
+    if (geomMatch?.[1]) {
+      try {
+        const parsedGeom = JSON.parse(unescapeXmlServer(geomMatch[1].trim()));
+        if (parsedGeom && Array.isArray(parsedGeom.vertices) && Array.isArray(parsedGeom.faces)) {
+          meshData = extractGeometryFromProcessedMesh(
+            {
+              name: partName,
+              studSize: [sx, sy, sz],
+              meshData: parsedGeom,
+            },
+            `${modelName}.obj`,
+            modelName
+          );
+          if (typeof parsedGeom.roughness === 'number') roughness = parsedGeom.roughness;
+          if (typeof parsedGeom.metalness === 'number') metalness = parsedGeom.metalness;
+          if (typeof parsedGeom.material === 'string') material = parsedGeom.material;
+          if (Array.isArray(parsedGeom.rotation) && parsedGeom.rotation.length === 3) {
+            rotation = [
+              Number(parsedGeom.rotation[0]),
+              Number(parsedGeom.rotation[1]),
+              Number(parsedGeom.rotation[2]),
+            ];
+          }
+          if (parsedGeom.pbrMaterial && typeof parsedGeom.pbrMaterial === 'object') {
+            pbrMaterial = { ...(pbrMaterial || {}), ...parsedGeom.pbrMaterial };
+          }
+        }
+      } catch {
+        // Fallback to synthesized geometry below
+      }
+    }
+
+    if (!meshData) {
+      meshData = synthesizeProceduralMeshData('MeshPart', [sx, sy, sz]);
+      meshData.objFileName = `${modelName}.obj`;
+      if (meshId) {
+        meshData.meshId = meshId;
+        meshData.assetId = meshId;
+      }
+    }
+
+    parts.push({
+      name: partName,
+      shape: 'MeshPart',
+      meshId,
+      assetId: meshId,
+      textureId,
+      size: [Number(sx.toFixed(3)), Number(sy.toFixed(3)), Number(sz.toFixed(3))],
+      position: [Number(px.toFixed(3)), Number(py.toFixed(3)), Number(pz.toFixed(3))],
+      rotation,
+      color,
+      material,
+      roughness,
+      metalness,
+      transparency: Number(transparency.toFixed(3)),
+      canCollide,
+      anchored,
+      collisionFidelity,
+      meshData,
+      ...(pbrMaterial ? { pbrMaterial } : {}),
+    } as MeshPartInput);
+  }
+
+  void itemRegex;
+  const polyCount = parts.reduce((sum, p) => sum + (p.meshData?.faces?.length || 0), 0);
+  return {
+    modelName,
+    parts,
+    luauCode,
+    polyCount,
+  };
 }
 
 export function buildObjAndMtlFromPartsServer(
