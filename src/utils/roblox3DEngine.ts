@@ -227,7 +227,8 @@ export function createWedgeGeometry(w: number, h: number, d: number): THREE.Buff
  * assets keep their exact 3D mesh topology instead of becoming bounding boxes.
  */
 export function buildBufferGeometryFromMeshData(
-  meshData: SubMeshGeometryData
+  meshData: SubMeshGeometryData,
+  targetStudSize?: number[]
 ): THREE.BufferGeometry {
   const geom = new THREE.BufferGeometry();
   const verts = meshData.vertices || [];
@@ -236,15 +237,47 @@ export function buildBufferGeometryFromMeshData(
   const uvs = meshData.uvs || [];
   const vColors = meshData.vertexColors || [];
 
+  // Compute current bounding box of meshData.vertices so targetStudSize edits scale vertices proportionally
+  let scaleX = 1;
+  let scaleY = 1;
+  let scaleZ = 1;
+  if (targetStudSize && targetStudSize.length >= 3 && verts.length >= 3) {
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < verts.length; i++) {
+      const vx = verts[i][0] ?? 0;
+      const vy = verts[i][1] ?? 0;
+      const vz = verts[i][2] ?? 0;
+      if (vx < minX) minX = vx;
+      if (vx > maxX) maxX = vx;
+      if (vy < minY) minY = vy;
+      if (vy > maxY) maxY = vy;
+      if (vz < minZ) minZ = vz;
+      if (vz > maxZ) maxZ = vz;
+    }
+    const spanX = maxX - minX;
+    const spanY = maxY - minY;
+    const spanZ = maxZ - minZ;
+    if (spanX > 1e-4 && targetStudSize[0] > 0.05) scaleX = targetStudSize[0] / spanX;
+    if (spanY > 1e-4 && targetStudSize[1] > 0.05) scaleY = targetStudSize[1] / spanY;
+    if (spanZ > 1e-4 && targetStudSize[2] > 0.05) scaleZ = targetStudSize[2] / spanZ;
+  }
+
   const posArray = new Float32Array(verts.length * 3);
   for (let i = 0; i < verts.length; i++) {
-    posArray[i * 3] = verts[i][0] ?? 0;
-    posArray[i * 3 + 1] = verts[i][1] ?? 0;
-    posArray[i * 3 + 2] = verts[i][2] ?? 0;
+    posArray[i * 3] = (verts[i][0] ?? 0) * scaleX;
+    posArray[i * 3 + 1] = (verts[i][1] ?? 0) * scaleY;
+    posArray[i * 3 + 2] = (verts[i][2] ?? 0) * scaleZ;
   }
   geom.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
 
-  if (norms.length === verts.length && norms.length > 0) {
+  const isScaledNonUniform =
+    Math.abs(scaleX - 1) > 1e-3 ||
+    Math.abs(scaleY - 1) > 1e-3 ||
+    Math.abs(scaleZ - 1) > 1e-3;
+
+  if (!isScaledNonUniform && norms.length === verts.length && norms.length > 0) {
     const normArray = new Float32Array(norms.length * 3);
     for (let i = 0; i < norms.length; i++) {
       normArray[i * 3] = norms[i][0] ?? 0;
@@ -293,8 +326,8 @@ export function buildBufferGeometryFromMeshData(
 
 /**
  * Builds a Three.js Group from a Forge3DAsset specification, reconstructing
- * real BufferGeometry when `part.meshData` is present (GLB/OBJ/Heightmap MeshParts)
- * or procedural Roblox primitives when `part.shape` is Block/Cylinder/Ball/Wedge.
+ * real BufferGeometry when `part.meshData` is present (GLB/OBJ/Heightmap/RBXMX MeshParts)
+ * or procedural Roblox primitives when `part.shape` is Cylinder/Ball/Wedge.
  */
 export function buildThreeGroupFromAsset(
   asset: Forge3DAsset,
@@ -335,7 +368,12 @@ export function buildThreeGroupFromAsset(
       part.meshData.vertices.length >= 3;
 
     if (hasCustomMeshData && part.meshData) {
-      geom = buildBufferGeometryFromMeshData(part.meshData);
+      const effectivePart =
+        lodRatio < 0.99 ? decimateMeshPartGeometry(part, lodRatio) : part;
+      geom = buildBufferGeometryFromMeshData(
+        effectivePart.meshData || part.meshData,
+        [sx, sy, sz]
+      );
     } else if (part.shape === 'Cylinder') {
       geom = new THREE.CylinderGeometry(sx / 2, sx / 2, sy, cylRadialSegs);
     } else if (part.shape === 'Ball') {
@@ -411,6 +449,512 @@ export function buildThreeGroupFromAsset(
     group,
     triangleCount: totalTriangles,
     partCount: (asset.parts || []).length,
+  };
+}
+
+/**
+ * Extracts SubMeshGeometryData from any Three.js BufferGeometry
+ */
+export function extractMeshDataFromBufferGeometry(
+  geom: THREE.BufferGeometry,
+  objFileName?: string
+): SubMeshGeometryData {
+  const g = geom.clone();
+  if (!g.getAttribute('normal')) {
+    g.computeVertexNormals();
+  }
+  const posAttr = g.getAttribute('position');
+  const normAttr = g.getAttribute('normal');
+  const uvAttr = g.getAttribute('uv');
+  const indexAttr = g.getIndex();
+
+  const vertices: number[][] = [];
+  const normals: number[][] = [];
+  const uvs: number[][] = [];
+  const faces: number[][] = [];
+
+  if (posAttr) {
+    for (let i = 0; i < posAttr.count; i++) {
+      vertices.push([
+        Number(posAttr.getX(i).toFixed(4)),
+        Number(posAttr.getY(i).toFixed(4)),
+        Number(posAttr.getZ(i).toFixed(4)),
+      ]);
+      if (normAttr && i < normAttr.count) {
+        normals.push([
+          Number(normAttr.getX(i).toFixed(4)),
+          Number(normAttr.getY(i).toFixed(4)),
+          Number(normAttr.getZ(i).toFixed(4)),
+        ]);
+      } else {
+        normals.push([0, 1, 0]);
+      }
+      if (uvAttr && i < uvAttr.count) {
+        uvs.push([
+          Number(uvAttr.getX(i).toFixed(4)),
+          Number(uvAttr.getY(i).toFixed(4)),
+        ]);
+      } else {
+        uvs.push([0, 0]);
+      }
+    }
+  }
+
+  if (indexAttr) {
+    for (let i = 0; i < indexAttr.count - 2; i += 3) {
+      faces.push([
+        indexAttr.getX(i),
+        indexAttr.getX(i + 1),
+        indexAttr.getX(i + 2),
+      ]);
+    }
+  } else if (posAttr) {
+    for (let i = 0; i < posAttr.count - 2; i += 3) {
+      faces.push([i, i + 1, i + 2]);
+    }
+  }
+
+  g.dispose();
+  return { vertices, normals, uvs, faces, objFileName };
+}
+
+/**
+ * Ensures a MeshPart3DSpec has real indexed meshData (synthesizing high-detail topology if missing)
+ */
+export function ensurePartHasMeshData(part: MeshPart3DSpec): SubMeshGeometryData {
+  if (
+    part.meshData &&
+    Array.isArray(part.meshData.vertices) &&
+    part.meshData.vertices.length >= 3 &&
+    Array.isArray(part.meshData.faces) &&
+    part.meshData.faces.length >= 1
+  ) {
+    return part.meshData;
+  }
+  const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
+  let geom: THREE.BufferGeometry;
+  if (part.shape === 'Cylinder') {
+    geom = new THREE.CylinderGeometry(sx / 2, sx / 2, sy, 16);
+  } else if (part.shape === 'Ball') {
+    geom = new THREE.SphereGeometry(sx / 2, 16, 12);
+  } else if (part.shape === 'Wedge' || part.shape === 'CornerWedge') {
+    geom = createWedgeGeometry(sx, sy, sz);
+  } else {
+    // Chamfered 8-sided prism so it is a true multi-faceted MeshPart
+    geom = new THREE.CylinderGeometry(sx * 0.46, sx * 0.5, sy, 8, 2);
+    geom.scale(1, 1, sz / Math.max(sx, 0.01));
+  }
+  return extractMeshDataFromBufferGeometry(geom, part.meshData?.objFileName);
+}
+
+/**
+ * Recomputes smooth vertex normals from a vertex/face list
+ */
+export function recomputeSmoothNormals(
+  vertices: number[][],
+  faces: number[][]
+): number[][] {
+  const accum = vertices.map(() => [0, 0, 0]);
+  for (const [i0, i1, i2] of faces) {
+    const v0 = vertices[i0];
+    const v1 = vertices[i1];
+    const v2 = vertices[i2];
+    if (!v0 || !v1 || !v2) continue;
+    const ux = v1[0] - v0[0];
+    const uy = v1[1] - v0[1];
+    const uz = v1[2] - v0[2];
+    const wx = v2[0] - v0[0];
+    const wy = v2[1] - v0[1];
+    const wz = v2[2] - v0[2];
+    const nx = uy * wz - uz * wy;
+    const ny = uz * wx - ux * wz;
+    const nz = ux * wy - uy * wx;
+    for (const idx of [i0, i1, i2]) {
+      accum[idx][0] += nx;
+      accum[idx][1] += ny;
+      accum[idx][2] += nz;
+    }
+  }
+  return accum.map(([nx, ny, nz]) => {
+    const len = Math.hypot(nx, ny, nz);
+    return len > 1e-6
+      ? [
+          Number((nx / len).toFixed(4)),
+          Number((ny / len).toFixed(4)),
+          Number((nz / len).toFixed(4)),
+        ]
+      : [0, 1, 0];
+  });
+}
+
+/**
+ * Rescales a MeshPart's actual vertex coordinates proportionally to match `newSize` [sx, sy, sz]
+ * and recomputes smooth normals so exported geometry preserves the exact edited dimensions and shape.
+ */
+export function rescaleMeshPartGeometry(
+  part: MeshPart3DSpec,
+  newSize: number[]
+): MeshPart3DSpec {
+  const baseData = ensurePartHasMeshData(part);
+  const verts = baseData.vertices;
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (const v of verts) {
+    if (v[0] < minX) minX = v[0];
+    if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1];
+    if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2];
+    if (v[2] > maxZ) maxZ = v[2];
+  }
+  const cx = (minX + maxX) * 0.5;
+  const cy = (minY + maxY) * 0.5;
+  const cz = (minZ + maxZ) * 0.5;
+  const spanX = Math.max(maxX - minX, 1e-4);
+  const spanY = Math.max(maxY - minY, 1e-4);
+  const spanZ = Math.max(maxZ - minZ, 1e-4);
+
+  const sx = Math.max(0.2, newSize[0] ?? part.size[0] ?? 2);
+  const sy = Math.max(0.2, newSize[1] ?? part.size[1] ?? 2);
+  const sz = Math.max(0.2, newSize[2] ?? part.size[2] ?? 2);
+
+  const scaledVertices = verts.map((v) => [
+    Number(((v[0] - cx) * (sx / spanX)).toFixed(4)),
+    Number(((v[1] - cy) * (sy / spanY)).toFixed(4)),
+    Number(((v[2] - cz) * (sz / spanZ)).toFixed(4)),
+  ]);
+  const updatedNormals = recomputeSmoothNormals(scaledVertices, baseData.faces);
+
+  return {
+    ...part,
+    shape: 'MeshPart',
+    size: [Number(sx.toFixed(2)), Number(sy.toFixed(2)), Number(sz.toFixed(2))],
+    meshData: {
+      ...baseData,
+      vertices: scaledVertices,
+      normals: updatedNormals,
+    },
+  };
+}
+
+/**
+ * Performs real 3D Midpoint Triangle Subdivision on a MeshPart's geometry
+ * (splits each triangle into 4 or splits longest edges up to Roblox's <10k limit)
+ */
+export function subdivideMeshPartGeometry(part: MeshPart3DSpec): MeshPart3DSpec {
+  const baseData = ensurePartHasMeshData(part);
+  if (baseData.faces.length * 4 > 9600) {
+    return part;
+  }
+  const vertices = baseData.vertices.map((v) => [...v]);
+  const uvs = (baseData.uvs || vertices.map(() => [0, 0])).map((u) => [...u]);
+  const midpointCache = new Map<string, number>();
+
+  const getMidpointIndex = (i1: number, i2: number): number => {
+    const key = i1 < i2 ? `${i1}_${i2}` : `${i2}_${i1}`;
+    const cached = midpointCache.get(key);
+    if (cached !== undefined) return cached;
+
+    const v1 = vertices[i1];
+    const v2 = vertices[i2];
+    const u1 = uvs[i1] || [0, 0];
+    const u2 = uvs[i2] || [0, 0];
+
+    const newIdx = vertices.length;
+    vertices.push([
+      Number(((v1[0] + v2[0]) * 0.5).toFixed(4)),
+      Number(((v1[1] + v2[1]) * 0.5).toFixed(4)),
+      Number(((v1[2] + v2[2]) * 0.5).toFixed(4)),
+    ]);
+    uvs.push([
+      Number(((u1[0] + u2[0]) * 0.5).toFixed(4)),
+      Number(((u1[1] + u2[1]) * 0.5).toFixed(4)),
+    ]);
+    midpointCache.set(key, newIdx);
+    return newIdx;
+  };
+
+  const newFaces: number[][] = [];
+  for (const [a, b, c] of baseData.faces) {
+    if (vertices[a] && vertices[b] && vertices[c]) {
+      const ab = getMidpointIndex(a, b);
+      const bc = getMidpointIndex(b, c);
+      const ca = getMidpointIndex(c, a);
+      newFaces.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
+    }
+  }
+
+  const normals = recomputeSmoothNormals(vertices, newFaces);
+  return {
+    ...part,
+    shape: 'MeshPart',
+    meshData: {
+      ...baseData,
+      vertices,
+      normals,
+      uvs,
+      faces: newFaces,
+    },
+  };
+}
+
+/**
+ * Applies Laplacian Vertex Smoothing to a MeshPart's geometry and recomputes smooth normals
+ */
+export function smoothMeshPartGeometry(
+  part: MeshPart3DSpec,
+  iterations: number = 1,
+  lambda: number = 0.38
+): MeshPart3DSpec {
+  const baseData = ensurePartHasMeshData(part);
+  let currentVerts = baseData.vertices.map((v) => [...v]);
+  const faces = baseData.faces;
+
+  const neighbors: Array<Set<number>> = currentVerts.map(() => new Set<number>());
+  for (const [a, b, c] of faces) {
+    if (a < currentVerts.length && b < currentVerts.length && c < currentVerts.length) {
+      neighbors[a].add(b);
+      neighbors[a].add(c);
+      neighbors[b].add(a);
+      neighbors[b].add(c);
+      neighbors[c].add(a);
+      neighbors[c].add(b);
+    }
+  }
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const nextVerts = currentVerts.map((v, idx) => {
+      const nbrs = Array.from(neighbors[idx]);
+      if (nbrs.length === 0) return v;
+      let avgX = 0, avgY = 0, avgZ = 0;
+      for (const nIdx of nbrs) {
+        avgX += currentVerts[nIdx][0];
+        avgY += currentVerts[nIdx][1];
+        avgZ += currentVerts[nIdx][2];
+      }
+      avgX /= nbrs.length;
+      avgY /= nbrs.length;
+      avgZ /= nbrs.length;
+      return [
+        Number((v[0] + lambda * (avgX - v[0])).toFixed(4)),
+        Number((v[1] + lambda * (avgY - v[1])).toFixed(4)),
+        Number((v[2] + lambda * (avgZ - v[2])).toFixed(4)),
+      ];
+    });
+    currentVerts = nextVerts;
+  }
+
+  const normals = recomputeSmoothNormals(currentVerts, faces);
+  return {
+    ...part,
+    shape: 'MeshPart',
+    meshData: {
+      ...baseData,
+      vertices: currentVerts,
+      normals,
+    },
+  };
+}
+
+/**
+ * Real 3D Spatial Grid Vertex-Clustering Mesh Decimation
+ * Reduces triangle and vertex counts geometrically while preserving UV coordinates and normals.
+ */
+export function decimateMeshPartGeometry(
+  part: MeshPart3DSpec,
+  targetRatio: number = 0.65
+): MeshPart3DSpec {
+  const baseData = ensurePartHasMeshData(part);
+  const clampedRatio = Math.max(0.2, Math.min(1.0, targetRatio));
+  if (clampedRatio >= 0.98 || baseData.faces.length <= 16) {
+    return part;
+  }
+
+  const verts = baseData.vertices;
+  const uvs = baseData.uvs || [];
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (const v of verts) {
+    if (v[0] < minX) minX = v[0];
+    if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1];
+    if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2];
+    if (v[2] > maxZ) maxZ = v[2];
+  }
+
+  const gridDivs = Math.max(4, Math.round(Math.cbrt(verts.length * clampedRatio) * 1.6));
+  const stepX = Math.max((maxX - minX) / gridDivs, 1e-4);
+  const stepY = Math.max((maxY - minY) / gridDivs, 1e-4);
+  const stepZ = Math.max((maxZ - minZ) / gridDivs, 1e-4);
+
+  const cellMap = new Map<
+    string,
+    { sumX: number; sumY: number; sumZ: number; sumU: number; sumV: number; count: number; newIndex: number }
+  >();
+  const oldToNewIndex: number[] = new Array(verts.length);
+
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const uv = uvs[i] || [0, 0];
+    const gx = Math.floor((v[0] - minX) / stepX);
+    const gy = Math.floor((v[1] - minY) / stepY);
+    const gz = Math.floor((v[2] - minZ) / stepZ);
+    const key = `${gx}_${gy}_${gz}`;
+    let cluster = cellMap.get(key);
+    if (!cluster) {
+      cluster = {
+        sumX: 0,
+        sumY: 0,
+        sumZ: 0,
+        sumU: 0,
+        sumV: 0,
+        count: 0,
+        newIndex: cellMap.size,
+      };
+      cellMap.set(key, cluster);
+    }
+    cluster.sumX += v[0];
+    cluster.sumY += v[1];
+    cluster.sumZ += v[2];
+    cluster.sumU += uv[0];
+    cluster.sumV += uv[1];
+    cluster.count += 1;
+    oldToNewIndex[i] = cluster.newIndex;
+  }
+
+  const newVertices: number[][] = [];
+  const newUvs: number[][] = [];
+  for (const cluster of cellMap.values()) {
+    newVertices.push([
+      Number((cluster.sumX / cluster.count).toFixed(4)),
+      Number((cluster.sumY / cluster.count).toFixed(4)),
+      Number((cluster.sumZ / cluster.count).toFixed(4)),
+    ]);
+    newUvs.push([
+      Number((cluster.sumU / cluster.count).toFixed(4)),
+      Number((cluster.sumV / cluster.count).toFixed(4)),
+    ]);
+  }
+
+  const faceSet = new Set<string>();
+  const newFaces: number[][] = [];
+  for (const [a, b, c] of baseData.faces) {
+    const na = oldToNewIndex[a];
+    const nb = oldToNewIndex[b];
+    const nc = oldToNewIndex[c];
+    if (na !== undefined && nb !== undefined && nc !== undefined && na !== nb && nb !== nc && na !== nc) {
+      const key = `${na}_${nb}_${nc}`;
+      if (!faceSet.has(key)) {
+        faceSet.add(key);
+        newFaces.push([na, nb, nc]);
+      }
+    }
+  }
+
+  if (newFaces.length < 4) {
+    return part;
+  }
+
+  const newNormals = recomputeSmoothNormals(newVertices, newFaces);
+  return {
+    ...part,
+    shape: 'MeshPart',
+    meshData: {
+      ...baseData,
+      vertices: newVertices,
+      normals: newNormals,
+      uvs: newUvs,
+      faces: newFaces,
+    },
+  };
+}
+
+/**
+ * Recomputes Tri-Planar / Box-Projected UV coordinates and smooth normals on a MeshPart
+ * so PBR SurfaceAppearance maps tile cleanly without distortion.
+ */
+export function recomputeNormalsAndBoxUVs(part: MeshPart3DSpec): MeshPart3DSpec {
+  const baseData = ensurePartHasMeshData(part);
+  const verts = baseData.vertices;
+  const normals = recomputeSmoothNormals(verts, baseData.faces);
+
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (const v of verts) {
+    if (v[0] < minX) minX = v[0];
+    if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1];
+    if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2];
+    if (v[2] > maxZ) maxZ = v[2];
+  }
+  const spanX = Math.max(maxX - minX, 1e-4);
+  const spanY = Math.max(maxY - minY, 1e-4);
+  const spanZ = Math.max(maxZ - minZ, 1e-4);
+
+  const uvs = verts.map((v, idx) => {
+    const n = normals[idx] || [0, 1, 0];
+    const ax = Math.abs(n[0]);
+    const ay = Math.abs(n[1]);
+    const az = Math.abs(n[2]);
+    if (ay >= ax && ay >= az) {
+      return [
+        Number(((v[0] - minX) / spanX).toFixed(4)),
+        Number(((v[2] - minZ) / spanZ).toFixed(4)),
+      ];
+    }
+    if (ax >= ay && ax >= az) {
+      return [
+        Number(((v[2] - minZ) / spanZ).toFixed(4)),
+        Number(((v[1] - minY) / spanY).toFixed(4)),
+      ];
+    }
+    return [
+      Number(((v[0] - minX) / spanX).toFixed(4)),
+      Number(((v[1] - minY) / spanY).toFixed(4)),
+    ];
+  });
+
+  return {
+    ...part,
+    shape: 'MeshPart',
+    meshData: {
+      ...baseData,
+      normals,
+      uvs,
+    },
+  };
+}
+
+/**
+ * Grounds all parts in a Forge3DAsset so the lowest point of the entire model sits flush at Y = 0 Studs
+ */
+export function snapAssetToGroundY0(asset: Forge3DAsset): Forge3DAsset {
+  if (!asset.parts || asset.parts.length === 0) return asset;
+  let minWorldY = Infinity;
+  for (const part of asset.parts) {
+    const py = part.position?.[1] ?? 0;
+    const sy = part.size?.[1] ?? 2;
+    const lowY = py - sy * 0.5;
+    if (lowY < minWorldY) minWorldY = lowY;
+  }
+  if (!Number.isFinite(minWorldY) || Math.abs(minWorldY) < 1e-4) return asset;
+
+  const updatedParts = asset.parts.map((part) => ({
+    ...part,
+    position: [
+      part.position?.[0] ?? 0,
+      Number(((part.position?.[1] ?? 0) - minWorldY).toFixed(3)),
+      part.position?.[2] ?? 0,
+    ],
+  }));
+  return {
+    ...asset,
+    parts: updatedParts,
   };
 }
 
@@ -497,7 +1041,6 @@ export function generateEditableMeshLuauCode(
     '    meshId: string,',
     '    assetId: string,',
     '    objSourcePath: string,',
-    '    size: Vector3,',
     '    offsetPos: Vector3,',
     '    offsetRotDeg: Vector3,',
     '    color: Color3,',
@@ -517,7 +1060,6 @@ export function generateEditableMeshLuauCode(
   ];
 
   for (const sub of subMeshes) {
-    const [sx, sy, sz] = sub.size;
     const [px, py, pz] = sub.position;
     const [rx, ry, rz] = sub.rotation;
     const [cr, cg, cb] = sub.color;
@@ -552,8 +1094,8 @@ export function generateEditableMeshLuauCode(
     );
 
     const objFile = sub.meshData?.objFileName || `${safeName}.obj`;
-    const meshId = sub.meshId || `rbxmesh://${safeName}/${sub.name}`;
-    const assetId = sub.assetId || 'rbxassetid://0';
+    const meshId = sub.meshId && sub.meshId.startsWith('rbxassetid://') ? sub.meshId : 'rbxassetid://1000000001';
+    const assetId = sub.assetId && sub.assetId.startsWith('rbxassetid://') ? sub.assetId : meshId;
 
     lines.push(
       '    {',
@@ -561,7 +1103,6 @@ export function generateEditableMeshLuauCode(
       `        meshId = "${meshId}",`,
       `        assetId = "${assetId}",`,
       `        objSourcePath = "src/shared/Assets3D/${objFile}",`,
-      `        size = Vector3.new(${sx.toFixed(2)}, ${sy.toFixed(2)}, ${sz.toFixed(2)}),`,
       `        offsetPos = Vector3.new(${px.toFixed(2)}, ${py.toFixed(2)}, ${pz.toFixed(2)}),`,
       `        offsetRotDeg = Vector3.new(${rx.toFixed(1)}, ${ry.toFixed(1)}, ${rz.toFixed(1)}),`,
       `        color = Color3.fromRGB(${Math.round(cr)}, ${Math.round(cg)}, ${Math.round(cb)}),`,
@@ -581,60 +1122,65 @@ export function generateEditableMeshLuauCode(
     '}',
     '',
     'local function buildMeshPartFromPayload(payload: SubMeshPayload, overrideAssetId: string?): MeshPart',
-    '    local resolvedUri = if overrideAssetId and overrideAssetId ~= "" then overrideAssetId else payload.meshId',
-    '    local hasPublishedAsset = string.match(resolvedUri, "^rbxassetid://([1-9]%d*)$") ~= nil',
-    '        or string.match(payload.assetId, "^rbxassetid://([1-9]%d*)$") ~= nil',
-    '    if hasPublishedAsset then',
-    '        local targetUri = if string.match(resolvedUri, "^rbxassetid://([1-9]%d*)$") then resolvedUri else payload.assetId',
-    '        local ok, meshPart = pcall(function()',
-    '            return InsertService:CreateMeshPartAsync(targetUri, payload.collisionFidelity, payload.renderFidelity)',
-    '        end)',
-    '        if ok and meshPart then',
-    '            meshPart.DoubleSided = payload.doubleSided',
-    '            meshPart.Size = payload.size',
-    '            meshPart:SetAttribute("MeshId", payload.meshId)',
-    '            meshPart:SetAttribute("AssetId", payload.assetId)',
-    '            meshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
-    '            return meshPart',
+    '    local okEditable, generatedMeshPart = pcall(function()',
+    '        local editableMesh = AssetService:CreateEditableMesh()',
+    '        local vertexIds: { number } = table.create(#payload.vertices)',
+    '        local normalIds: { number } = table.create(#payload.normals)',
+    '        local uvIds: { number } = table.create(#payload.uvs)',
+    '        for i, v in ipairs(payload.vertices) do',
+    '            vertexIds[i] = editableMesh:AddVertex(Vector3.new(v[1], v[2], v[3]))',
     '        end',
+    '        for i, n in ipairs(payload.normals) do',
+    '            normalIds[i] = editableMesh:AddNormal(Vector3.new(n[1], n[2], n[3]))',
+    '        end',
+    '        for i, uv in ipairs(payload.uvs) do',
+    '            uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1], uv[2]))',
+    '        end',
+    '        for _, tri in ipairs(payload.faces) do',
+    '            local i1, i2, i3 = tri[1], tri[2], tri[3]',
+    '            local id1, id2, id3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]',
+    '            if id1 and id2 and id3 then',
+    '                local fid = editableMesh:AddTriangle(id1, id2, id3)',
+    '                if normalIds[i1] and normalIds[i2] and normalIds[i3] then',
+    '                    pcall(function() editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] }) end)',
+    '                end',
+    '                if uvIds[i1] and uvIds[i2] and uvIds[i3] then',
+    '                    pcall(function() editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] }) end)',
+    '                end',
+    '            end',
+    '        end',
+    '        return AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {',
+    '            CollisionFidelity = payload.collisionFidelity,',
+    '            RenderFidelity = payload.renderFidelity,',
+    '        })',
+    '    end)',
+    '    if okEditable and generatedMeshPart then',
+    '        generatedMeshPart.DoubleSided = payload.doubleSided',
+    '        generatedMeshPart:SetAttribute("MeshId", payload.meshId)',
+    '        generatedMeshPart:SetAttribute("AssetId", payload.assetId)',
+    '        generatedMeshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
+    '        return generatedMeshPart',
     '    end',
     '',
-    '    local editableMesh = AssetService:CreateEditableMesh()',
-    '    local vertexIds: { number } = table.create(#payload.vertices)',
-    '    local normalIds: { number } = table.create(#payload.normals)',
-    '    local uvIds: { number } = table.create(#payload.uvs)',
-    '    for i, v in ipairs(payload.vertices) do',
-    '        vertexIds[i] = editableMesh:AddVertex(Vector3.new(v[1], v[2], v[3]))',
+    '    local resolvedUri = if overrideAssetId and overrideAssetId ~= "" then overrideAssetId else payload.meshId',
+    '    local ok, meshPart = pcall(function()',
+    '        return InsertService:CreateMeshPartAsync(resolvedUri, payload.collisionFidelity, payload.renderFidelity)',
+    '    end)',
+    '    if ok and meshPart then',
+    '        meshPart.DoubleSided = payload.doubleSided',
+    '        meshPart:SetAttribute("MeshId", payload.meshId)',
+    '        meshPart:SetAttribute("AssetId", payload.assetId)',
+    '        meshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
+    '        return meshPart',
     '    end',
-    '    for i, n in ipairs(payload.normals) do',
-    '        normalIds[i] = editableMesh:AddNormal(Vector3.new(n[1], n[2], n[3]))',
-    '    end',
-    '    for i, uv in ipairs(payload.uvs) do',
-    '        uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1], uv[2]))',
-    '    end',
-    '    for _, tri in ipairs(payload.faces) do',
-    '        local i1, i2, i3 = tri[1], tri[2], tri[3]',
-    '        local id1, id2, id3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]',
-    '        if id1 and id2 and id3 then',
-    '            local fid = editableMesh:AddTriangle(id1, id2, id3)',
-    '            if normalIds[i1] and normalIds[i2] and normalIds[i3] then',
-    '                pcall(function() editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] }) end)',
-    '            end',
-    '            if uvIds[i1] and uvIds[i2] and uvIds[i3] then',
-    '                pcall(function() editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] }) end)',
-    '            end',
-    '        end',
-    '    end',
-    '    local generatedMeshPart = AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {',
-    '        CollisionFidelity = payload.collisionFidelity,',
-    '        RenderFidelity = payload.renderFidelity,',
-    '    })',
-    '    generatedMeshPart.DoubleSided = payload.doubleSided',
-    '    generatedMeshPart.Size = payload.size',
-    '    generatedMeshPart:SetAttribute("MeshId", payload.meshId)',
-    '    generatedMeshPart:SetAttribute("AssetId", payload.assetId)',
-    '    generatedMeshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
-    '    return generatedMeshPart',
+    '',
+    '    local fallbackMeshPart = Instance.new("MeshPart")',
+    '    fallbackMeshPart.DoubleSided = payload.doubleSided',
+    '    pcall(function() (fallbackMeshPart :: any).MeshId = resolvedUri end)',
+    '    fallbackMeshPart:SetAttribute("MeshId", payload.meshId)',
+    '    fallbackMeshPart:SetAttribute("AssetId", payload.assetId)',
+    '    fallbackMeshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
+    '    return fallbackMeshPart',
     'end',
     '',
     `function ${safeName}MeshBuilder.Spawn(config: MeshSpawnConfig?): Model`,
@@ -705,7 +1251,6 @@ export async function convertImageTo3DHeightmapMesh(
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-      // Cap resolution for inline Luau EditableMesh while keeping high fidelity
       const safeRes = Math.max(12, Math.min(64, gridRes));
       const canvas = document.createElement('canvas');
       canvas.width = safeRes;
@@ -923,3 +1468,776 @@ export function exportObject3DToOBJ(rootObject: THREE.Object3D): string {
 
   return output;
 }
+
+/**
+ * Exports a Forge3DAsset to paired Wavefront .OBJ and PBR Material Library (.MTL)
+ * so Roblox Studio 3D Importer and Blender preserve both exact geometry and per-part materials.
+ */
+export function exportAssetToOBJWithMTL(asset: Forge3DAsset): {
+  obj: string;
+  mtl: string;
+  objFileName: string;
+  mtlFileName: string;
+} {
+  const safeName = (asset.name || 'ForgeModel3D').replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeModel3D';
+  const objFileName = `${safeName}.obj`;
+  const mtlFileName = `${safeName}.mtl`;
+
+  let obj = `# Forge AI Studio - Roblox Studio 3D Mesh (.OBJ + .MTL)\n`;
+  obj += `# Model: ${safeName} | Parts: ${asset.parts?.length || 0}\n`;
+  obj += `mtllib ${mtlFileName}\n\n`;
+
+  let mtl = `# Forge AI Studio - PBR Material Library (.MTL)\n`;
+  mtl += `# Model: ${safeName}\n\n`;
+
+  let vertexOffset = 1;
+  let uvOffset = 1;
+  let normalOffset = 1;
+
+  const euler = new THREE.Euler();
+  const quat = new THREE.Quaternion();
+  const mat4 = new THREE.Matrix4();
+  const normMat = new THREE.Matrix3();
+  const vVec = new THREE.Vector3();
+  const nVec = new THREE.Vector3();
+
+  for (let idx = 0; idx < (asset.parts || []).length; idx++) {
+    const part = asset.parts[idx];
+    const partName = (part.name || `MeshPart_${idx + 1}`).replace(/\s+/g, '_');
+    const matName = `${partName}_Mat`;
+    const [r = 160, g = 170, b = 185] = part.color || [160, 170, 185];
+    const kdR = (r / 255).toFixed(4);
+    const kdG = (g / 255).toFixed(4);
+    const kdB = (b / 255).toFixed(4);
+    const roughness = Math.max(0.04, Math.min(1, part.roughness ?? 0.35));
+    const metalness = Math.max(0, Math.min(1, part.metalness ?? 0.65));
+    const opacity = Math.max(0.05, Math.min(1, 1 - (part.transparency || 0)));
+
+    mtl += `newmtl ${matName}\n`;
+    mtl += `Ka ${kdR} ${kdG} ${kdB}\n`;
+    mtl += `Kd ${kdR} ${kdG} ${kdB}\n`;
+    mtl += `Ks ${metalness.toFixed(4)} ${metalness.toFixed(4)} ${metalness.toFixed(4)}\n`;
+    mtl += `Pr ${roughness.toFixed(4)}\n`;
+    mtl += `Pm ${metalness.toFixed(4)}\n`;
+    if (part.material === 'Neon') {
+      mtl += `Ke ${kdR} ${kdG} ${kdB}\n`;
+    }
+    mtl += `d ${opacity.toFixed(4)}\n`;
+    mtl += `illum 2\n\n`;
+
+    const geom = buildBufferGeometryFromMeshData(
+      ensurePartHasMeshData(part),
+      part.size || [2, 2, 2]
+    );
+    const [px = 0, py = 1, pz = 0] = part.position || [0, 1, 0];
+    const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
+    euler.set(
+      THREE.MathUtils.degToRad(rx),
+      THREE.MathUtils.degToRad(ry),
+      THREE.MathUtils.degToRad(rz)
+    );
+    quat.setFromEuler(euler);
+    mat4.compose(new THREE.Vector3(px, py, pz), quat, new THREE.Vector3(1, 1, 1));
+    normMat.getNormalMatrix(mat4);
+
+    const posAttr = geom.getAttribute('position');
+    const normAttr = geom.getAttribute('normal');
+    const uvAttr = geom.getAttribute('uv');
+    const indexAttr = geom.getIndex();
+
+    if (!posAttr) {
+      geom.dispose();
+      continue;
+    }
+
+    obj += `o ${partName}\n`;
+    obj += `g ${partName}\n`;
+    obj += `usemtl ${matName}\n`;
+
+    for (let i = 0; i < posAttr.count; i++) {
+      vVec.fromBufferAttribute(posAttr, i).applyMatrix4(mat4);
+      obj += `v ${vVec.x.toFixed(4)} ${vVec.y.toFixed(4)} ${vVec.z.toFixed(4)}\n`;
+    }
+
+    const hasUV = Boolean(uvAttr && uvAttr.count === posAttr.count);
+    if (hasUV && uvAttr) {
+      for (let i = 0; i < uvAttr.count; i++) {
+        obj += `vt ${uvAttr.getX(i).toFixed(4)} ${uvAttr.getY(i).toFixed(4)}\n`;
+      }
+    }
+
+    const hasNorm = Boolean(normAttr && normAttr.count === posAttr.count);
+    if (hasNorm && normAttr) {
+      for (let i = 0; i < normAttr.count; i++) {
+        nVec.fromBufferAttribute(normAttr, i).applyNormalMatrix(normMat).normalize();
+        obj += `vn ${nVec.x.toFixed(4)} ${nVec.y.toFixed(4)} ${nVec.z.toFixed(4)}\n`;
+      }
+    }
+
+    const fmtIdx = (localIdx: number): string => {
+      const vi = localIdx + vertexOffset;
+      const ti = hasUV ? `${localIdx + uvOffset}` : '';
+      const ni = hasNorm ? `${localIdx + normalOffset}` : '';
+      if (hasUV && hasNorm) return `${vi}/${ti}/${ni}`;
+      if (hasUV) return `${vi}/${ti}`;
+      if (hasNorm) return `${vi}//${ni}`;
+      return `${vi}`;
+    };
+
+    if (indexAttr) {
+      for (let i = 0; i < indexAttr.count - 2; i += 3) {
+        obj += `f ${fmtIdx(indexAttr.getX(i))} ${fmtIdx(indexAttr.getX(i + 1))} ${fmtIdx(indexAttr.getX(i + 2))}\n`;
+      }
+    } else {
+      for (let i = 0; i < posAttr.count - 2; i += 3) {
+        obj += `f ${fmtIdx(i)} ${fmtIdx(i + 1)} ${fmtIdx(i + 2)}\n`;
+      }
+    }
+
+    vertexOffset += posAttr.count;
+    if (hasUV && uvAttr) uvOffset += uvAttr.count;
+    if (hasNorm && normAttr) normalOffset += normAttr.count;
+    obj += '\n';
+    geom.dispose();
+  }
+
+  return { obj, mtl, objFileName, mtlFileName };
+}
+
+const ROBLOX_MATERIAL_ENUM_TOKENS: Record<string, number> = {
+  Plastic: 256,
+  SmoothPlastic: 272,
+  Neon: 288,
+  Wood: 512,
+  WoodPlanks: 528,
+  Marble: 784,
+  Slate: 800,
+  Concrete: 816,
+  Granite: 832,
+  Brick: 848,
+  Pebble: 864,
+  Cobblestone: 880,
+  CorrodedMetal: 1040,
+  DiamondPlate: 1056,
+  Foil: 1072,
+  Metal: 1088,
+  Grass: 1280,
+  Sand: 1296,
+  Fabric: 1312,
+  Ice: 1536,
+  Glass: 1568,
+  ForceField: 1584,
+};
+
+const ROBLOX_TOKEN_TO_MATERIAL: Record<number, string> = Object.entries(
+  ROBLOX_MATERIAL_ENUM_TOKENS
+).reduce((acc, [name, token]) => {
+  acc[token] = name;
+  return acc;
+}, {} as Record<number, string>);
+
+function escapeXml(str: string): string {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Exports a Forge3DAsset to a native Roblox Studio XML Model (.rbxmx)
+ * Can be dragged & dropped directly into Roblox Studio or imported via "Insert from File...".
+ * Preserves hierarchy, CFrames, MeshPart properties, Roblox Materials, SurfaceAppearance PBR,
+ * and embeds both full vertex/normal/UV/face JSON (`ForgeMeshGeometryJSON`) and a
+ * `--!strict` `ForgeStudioReconstructor` ModuleScript for 1-click EditableMesh reconstruction.
+ */
+export function exportAssetToRBXMX(asset: Forge3DAsset): string {
+  const safeName = (asset.name || 'ForgeModel3D').replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeModel3D';
+  const euler = new THREE.Euler();
+  const mat4 = new THREE.Matrix4();
+
+  const lines: string[] = [
+    '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
+    '  <External>null</External>',
+    '  <External>nil</External>',
+    `  <Item class="Model" referent="RBX_FORGE_MODEL_${safeName}">`,
+    '    <Properties>',
+    `      <string name="Name">${escapeXml(safeName)}</string>`,
+    '      <Ref name="PrimaryPart">RBX_PART_1</Ref>',
+    '    </Properties>',
+  ];
+
+  for (let idx = 0; idx < (asset.parts || []).length; idx++) {
+    const part = asset.parts[idx];
+    const refId = `RBX_PART_${idx + 1}`;
+    const partName = part.name || `MeshPart_${idx + 1}`;
+    const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
+    const [px = 0, py = 1, pz = 0] = part.position || [0, 1, 0];
+    const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
+    const [cr = 160, cg = 170, cb = 185] = part.color || [160, 170, 185];
+
+    euler.set(
+      THREE.MathUtils.degToRad(rx),
+      THREE.MathUtils.degToRad(ry),
+      THREE.MathUtils.degToRad(rz),
+      'XYZ'
+    );
+    mat4.makeRotationFromEuler(euler);
+    const te = mat4.elements;
+    // Three.js column-major to Roblox row-major R00..R22
+    const r00 = te[0].toFixed(6), r01 = te[4].toFixed(6), r02 = te[8].toFixed(6);
+    const r10 = te[1].toFixed(6), r11 = te[5].toFixed(6), r12 = te[9].toFixed(6);
+    const r20 = te[2].toFixed(6), r21 = te[6].toFixed(6), r22 = te[10].toFixed(6);
+
+    const colorUint8 =
+      ((0xff << 24) |
+        ((Math.max(0, Math.min(255, Math.round(cr))) & 0xff) << 16) |
+        ((Math.max(0, Math.min(255, Math.round(cg))) & 0xff) << 8) |
+        (Math.max(0, Math.min(255, Math.round(cb))) & 0xff)) >>>
+      0;
+
+    const matToken = ROBLOX_MATERIAL_ENUM_TOKENS[part.material] ?? 1088;
+    const meshData = ensurePartHasMeshData(part);
+    const meshId =
+      part.meshId && part.meshId.startsWith('rbxassetid://')
+        ? part.meshId
+        : `rbxassetid://${1000000000 + idx + 1}`;
+
+    const geometryJsonPayload = JSON.stringify({
+      shape: 'MeshPart',
+      meshId,
+      roughness: part.roughness ?? 0.35,
+      metalness: part.metalness ?? 0.65,
+      collisionFidelity: part.collisionFidelity || 'Hull',
+      vertices: meshData.vertices.slice(0, 2500),
+      normals: (meshData.normals || []).slice(0, 2500),
+      uvs: (meshData.uvs || []).slice(0, 2500),
+      faces: meshData.faces.slice(0, 3500),
+    });
+
+    lines.push(
+      `    <Item class="MeshPart" referent="${refId}">`,
+      '      <Properties>',
+      `        <string name="Name">${escapeXml(partName)}</string>`,
+      `        <bool name="Anchored">${part.anchored !== false ? 'true' : 'false'}</bool>`,
+      `        <bool name="CanCollide">${part.canCollide !== false ? 'true' : 'false'}</bool>`,
+      `        <bool name="DoubleSided">${part.doubleSided ? 'true' : 'false'}</bool>`,
+      `        <float name="Transparency">${Number(part.transparency ?? 0).toFixed(3)}</float>`,
+      `        <token name="Material">${matToken}</token>`,
+      `        <Color3uint8 name="Color3uint8">${colorUint8}</Color3uint8>`,
+      `        <Content name="MeshId"><url>${escapeXml(meshId)}</url></Content>`,
+      '        <Vector3 name="size">',
+      `          <X>${Number(sx).toFixed(4)}</X>`,
+      `          <Y>${Number(sy).toFixed(4)}</Y>`,
+      `          <Z>${Number(sz).toFixed(4)}</Z>`,
+      '        </Vector3>',
+      '        <CoordinateFrame name="CFrame">',
+      `          <X>${Number(px).toFixed(4)}</X>`,
+      `          <Y>${Number(py).toFixed(4)}</Y>`,
+      `          <Z>${Number(pz).toFixed(4)}</Z>`,
+      `          <R00>${r00}</R00><R01>${r01}</R01><R02>${r02}</R02>`,
+      `          <R10>${r10}</R10><R11>${r11}</R11><R12>${r12}</R12>`,
+      `          <R20>${r20}</R20><R21>${r21}</R21><R22>${r22}</R22>`,
+      '        </CoordinateFrame>',
+      '      </Properties>',
+      `      <Item class="SurfaceAppearance" referent="${refId}_PBR">`,
+      '        <Properties>',
+      `          <string name="Name">${escapeXml(partName)}_SurfaceAppearance</string>`,
+      '          <token name="AlphaMode">0</token>',
+      '        </Properties>',
+      '      </Item>',
+      `      <Item class="StringValue" referent="${refId}_GEOM">`,
+      '        <Properties>',
+      '          <string name="Name">ForgeMeshGeometryJSON</string>',
+      `          <string name="Value">${escapeXml(geometryJsonPayload)}</string>`,
+      '        </Properties>',
+      '      </Item>',
+      '    </Item>'
+    );
+  }
+
+  const luauScript =
+    asset.luau_code ||
+    generateEditableMeshLuauCode(
+      safeName,
+      (asset.parts || []).map((p) => ({
+        name: p.name,
+        size: [p.size[0] ?? 2, p.size[1] ?? 2, p.size[2] ?? 2],
+        position: [p.position[0] ?? 0, p.position[1] ?? 1, p.position[2] ?? 0],
+        rotation: [p.rotation[0] ?? 0, p.rotation[1] ?? 0, p.rotation[2] ?? 0],
+        color: [p.color[0] ?? 160, p.color[1] ?? 170, p.color[2] ?? 185],
+        material: p.material || 'Metal',
+        roughness: p.roughness ?? 0.35,
+        metalness: p.metalness ?? 0.65,
+        collisionFidelity: p.collisionFidelity || 'Hull',
+        meshId: p.meshId,
+        meshData: ensurePartHasMeshData(p),
+      }))
+    );
+
+  lines.push(
+    `    <Item class="ModuleScript" referent="RBX_FORGE_RECONSTRUCTOR">`,
+    '      <Properties>',
+    '        <string name="Name">ForgeStudioReconstructor</string>',
+    `        <ProtectedString name="Source"><![CDATA[${luauScript}]]></ProtectedString>`,
+    '      </Properties>',
+    '    </Item>',
+    '  </Item>',
+    '</roblox>'
+  );
+
+  return lines.join('\n');
+}
+
+/**
+ * Parses a Roblox Studio XML Model (.rbxmx) file into a Forge3DAsset,
+ * recovering all MeshParts/Parts, CFrame positions and rotations, sizes, colors,
+ * Roblox Materials, and embedded `ForgeMeshGeometryJSON` vertex/normal/UV/face buffers.
+ */
+export function parseRBXMXToForgeAsset(
+  xmlText: string,
+  fileName: string = 'ImportedRobloxModel.rbxmx'
+): Forge3DAsset {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'text/xml');
+  const baseModelName =
+    fileName.replace(/\.rbxmx$/i, '').replace(/[^a-zA-Z0-9_]/g, '') || 'RobloxImportedModel';
+
+  const modelItem = doc.querySelector('Item[class="Model"]');
+  let modelName = baseModelName;
+  if (modelItem) {
+    const modelNameNode = modelItem.querySelector(':scope > Properties > string[name="Name"]');
+    if (modelNameNode?.textContent) {
+      modelName = modelNameNode.textContent.trim();
+    }
+  }
+
+  const partNodes = Array.from(
+    doc.querySelectorAll('Item[class="MeshPart"], Item[class="Part"], Item[class="WedgePart"]')
+  );
+
+  const parts: MeshPart3DSpec[] = [];
+  let totalTriangles = 0;
+  const rotMat = new THREE.Matrix4();
+  const euler = new THREE.Euler();
+
+  partNodes.forEach((itemNode, idx) => {
+    const props = itemNode.querySelector(':scope > Properties');
+    if (!props) return;
+
+    const getText = (sel: string): string | null =>
+      props.querySelector(sel)?.textContent?.trim() ?? null;
+
+    const partName = getText('string[name="Name"]') || `MeshPart_${idx + 1}`;
+    const sx = parseFloat(getText('Vector3[name="size"] > X, Vector3[name="Size"] > X') || '2') || 2;
+    const sy = parseFloat(getText('Vector3[name="size"] > Y, Vector3[name="Size"] > Y') || '2') || 2;
+    const sz = parseFloat(getText('Vector3[name="size"] > Z, Vector3[name="Size"] > Z') || '2') || 2;
+
+    const px = parseFloat(getText('CoordinateFrame[name="CFrame"] > X') || '0') || 0;
+    const py = parseFloat(getText('CoordinateFrame[name="CFrame"] > Y') || '1') || 1;
+    const pz = parseFloat(getText('CoordinateFrame[name="CFrame"] > Z') || '0') || 0;
+
+    const r00 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R00') || '1');
+    const r01 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R01') || '0');
+    const r02 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R02') || '0');
+    const r10 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R10') || '0');
+    const r11 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R11') || '1');
+    const r12 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R12') || '0');
+    const r20 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R20') || '0');
+    const r21 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R21') || '0');
+    const r22 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R22') || '1');
+
+    rotMat.set(
+      r00, r01, r02, 0,
+      r10, r11, r12, 0,
+      r20, r21, r22, 0,
+      0,   0,   0,   1
+    );
+    euler.setFromRotationMatrix(rotMat, 'XYZ');
+    const rx = Number(THREE.MathUtils.radToDeg(euler.x).toFixed(1));
+    const ry = Number(THREE.MathUtils.radToDeg(euler.y).toFixed(1));
+    const rz = Number(THREE.MathUtils.radToDeg(euler.z).toFixed(1));
+
+    let color: [number, number, number] = [148, 163, 184];
+    const colorUintStr = getText('Color3uint8[name="Color3uint8"]');
+    if (colorUintStr) {
+      const val = parseInt(colorUintStr, 10) >>> 0;
+      color = [(val >> 16) & 0xff, (val >> 8) & 0xff, val & 0xff];
+    } else {
+      const cr = parseFloat(getText('Color3[name="Color"] > R') || '-1');
+      const cg = parseFloat(getText('Color3[name="Color"] > G') || '-1');
+      const cb = parseFloat(getText('Color3[name="Color"] > B') || '-1');
+      if (cr >= 0 && cg >= 0 && cb >= 0) {
+        color = [
+          Math.round(cr <= 1 ? cr * 255 : cr),
+          Math.round(cg <= 1 ? cg * 255 : cg),
+          Math.round(cb <= 1 ? cb * 255 : cb),
+        ];
+      }
+    }
+
+    const matToken = parseInt(getText('token[name="Material"]') || '1088', 10);
+    const material = ROBLOX_TOKEN_TO_MATERIAL[matToken] || 'Metal';
+    const transparency = parseFloat(getText('float[name="Transparency"]') || '0') || 0;
+    const anchored = getText('bool[name="Anchored"]') !== 'false';
+    const canCollide = getText('bool[name="CanCollide"]') !== 'false';
+    const doubleSided = getText('bool[name="DoubleSided"]') === 'true';
+    const meshId = getText('Content[name="MeshId"] > url') || undefined;
+
+    let meshData: SubMeshGeometryData | undefined;
+    let roughness = 0.35;
+    let metalness = 0.65;
+    let collisionFidelity: MeshPart3DSpec['collisionFidelity'] = 'Hull';
+
+    const geomValueNode = Array.from(itemNode.querySelectorAll('Item[class="StringValue"]')).find(
+      (sv) =>
+        sv.querySelector(':scope > Properties > string[name="Name"]')?.textContent?.trim() ===
+        'ForgeMeshGeometryJSON'
+    );
+    const geomJsonText = geomValueNode
+      ?.querySelector(':scope > Properties > string[name="Value"]')
+      ?.textContent?.trim();
+
+    if (geomJsonText) {
+      try {
+        const parsedGeom = JSON.parse(geomJsonText);
+        if (Array.isArray(parsedGeom.vertices) && Array.isArray(parsedGeom.faces)) {
+          meshData = {
+            vertices: parsedGeom.vertices,
+            normals: parsedGeom.normals,
+            uvs: parsedGeom.uvs,
+            faces: parsedGeom.faces,
+            objFileName: `${modelName}.obj`,
+          };
+        }
+        if (typeof parsedGeom.roughness === 'number') roughness = parsedGeom.roughness;
+        if (typeof parsedGeom.metalness === 'number') metalness = parsedGeom.metalness;
+        if (parsedGeom.collisionFidelity) collisionFidelity = parsedGeom.collisionFidelity;
+      } catch {
+        // Fallback to synthesized geometry below
+      }
+    }
+
+    const basePart: MeshPart3DSpec = {
+      name: partName,
+      shape: 'MeshPart',
+      size: [Number(sx.toFixed(2)), Number(sy.toFixed(2)), Number(sz.toFixed(2))],
+      position: [Number(px.toFixed(2)), Number(py.toFixed(2)), Number(pz.toFixed(2))],
+      rotation: [rx, ry, rz],
+      color,
+      material,
+      roughness,
+      metalness,
+      transparency,
+      canCollide,
+      anchored,
+      doubleSided,
+      collisionFidelity,
+      meshId,
+      meshData,
+    };
+
+    const resolvedMesh = ensurePartHasMeshData(basePart);
+    basePart.meshData = resolvedMesh;
+    totalTriangles += resolvedMesh.faces.length;
+    parts.push(basePart);
+  });
+
+  if (parts.length === 0) {
+    throw new Error('El archivo .rbxmx no contiene ningún MeshPart o Part válido.');
+  }
+
+  const luauCode = generateEditableMeshLuauCode(
+    modelName,
+    parts.map((p) => ({
+      name: p.name,
+      size: [p.size[0] ?? 2, p.size[1] ?? 2, p.size[2] ?? 2],
+      position: [p.position[0] ?? 0, p.position[1] ?? 1, p.position[2] ?? 0],
+      rotation: [p.rotation[0] ?? 0, p.rotation[1] ?? 0, p.rotation[2] ?? 0],
+      color: [p.color[0] ?? 148, p.color[1] ?? 163, p.color[2] ?? 184],
+      material: p.material,
+      roughness: p.roughness,
+      metalness: p.metalness,
+      collisionFidelity: p.collisionFidelity,
+      doubleSided: p.doubleSided,
+      meshId: p.meshId,
+      meshData: p.meshData,
+    }))
+  );
+
+  return {
+    id: `rbxmx-${Date.now()}`,
+    name: modelName,
+    category: 'Roblox Studio (.rbxmx)',
+    asset_type: 'Model3D',
+    poly_count: totalTriangles,
+    collision_fidelity: parts[0]?.collisionFidelity || 'Hull',
+    rojo_target_folder: 'src/shared/Assets3D',
+    file_name: `${modelName}.luau`,
+    obj_file_name: `${modelName}.obj`,
+    description: `Modelo importado desde Roblox Studio (.rbxmx) con ${parts.length} MeshParts y ${totalTriangles} triángulos.`,
+    pbr_profile: {
+      albedo_hex: '#38bdf8',
+      roughness: parts[0]?.roughness ?? 0.35,
+      metalness: parts[0]?.metalness ?? 0.65,
+      emissive_hex: '#06b6d4',
+      roblox_material: parts[0]?.material || 'Metal',
+      pattern: 'BrushedTitanium',
+    },
+    parts,
+    luau_code: luauCode,
+    created_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * Exports a Forge3DAsset to a standard glTF 2.0 (.gltf) file with embedded binary buffers
+ * and PBR Metallic-Roughness materials. Ready to import directly into Roblox Studio's 3D Importer
+ * or Blender without losing geometry or materials.
+ */
+export function exportAssetToGLTF(asset: Forge3DAsset): string {
+  const safeName = (asset.name || 'ForgeModel3D').replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeModel3D';
+  const euler = new THREE.Euler();
+  const quat = new THREE.Quaternion();
+
+  const bufferChunks: Uint8Array[] = [];
+  const bufferViews: any[] = [];
+  const accessors: any[] = [];
+  const meshes: any[] = [];
+  const materials: any[] = [];
+  const nodes: any[] = [];
+
+  let byteOffset = 0;
+
+  const appendTypedArray = (arr: Float32Array | Uint32Array, target: number): number => {
+    const uint8 = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+    const pad = (4 - (uint8.byteLength % 4)) % 4;
+    const viewIndex = bufferViews.length;
+    bufferViews.push({
+      buffer: 0,
+      byteOffset,
+      byteLength: uint8.byteLength,
+      target,
+    });
+    bufferChunks.push(uint8);
+    if (pad > 0) {
+      bufferChunks.push(new Uint8Array(pad));
+    }
+    byteOffset += uint8.byteLength + pad;
+    return viewIndex;
+  };
+
+  for (let idx = 0; idx < (asset.parts || []).length; idx++) {
+    const part = asset.parts[idx];
+    const partName = part.name || `MeshPart_${idx + 1}`;
+    const geom = buildBufferGeometryFromMeshData(
+      ensurePartHasMeshData(part),
+      part.size || [2, 2, 2]
+    );
+
+    const posAttr = geom.getAttribute('position');
+    const normAttr = geom.getAttribute('normal');
+    const uvAttr = geom.getAttribute('uv');
+    const indexAttr = geom.getIndex();
+
+    if (!posAttr || posAttr.count < 3) {
+      geom.dispose();
+      continue;
+    }
+
+    const vCount = posAttr.count;
+    const posF32 = new Float32Array(vCount * 3);
+    const normF32 = new Float32Array(vCount * 3);
+    const uvF32 = new Float32Array(vCount * 2);
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (let i = 0; i < vCount; i++) {
+      const vx = posAttr.getX(i);
+      const vy = posAttr.getY(i);
+      const vz = posAttr.getZ(i);
+      posF32[i * 3] = vx;
+      posF32[i * 3 + 1] = vy;
+      posF32[i * 3 + 2] = vz;
+      if (vx < minX) minX = vx;
+      if (vy < minY) minY = vy;
+      if (vz < minZ) minZ = vz;
+      if (vx > maxX) maxX = vx;
+      if (vy > maxY) maxY = vy;
+      if (vz > maxZ) maxZ = vz;
+
+      normF32[i * 3] = normAttr ? normAttr.getX(i) : 0;
+      normF32[i * 3 + 1] = normAttr ? normAttr.getY(i) : 1;
+      normF32[i * 3 + 2] = normAttr ? normAttr.getZ(i) : 0;
+
+      uvF32[i * 2] = uvAttr ? uvAttr.getX(i) : 0;
+      uvF32[i * 2 + 1] = uvAttr ? uvAttr.getY(i) : 0;
+    }
+
+    let indicesU32: Uint32Array;
+    if (indexAttr) {
+      indicesU32 = new Uint32Array(indexAttr.count);
+      for (let i = 0; i < indexAttr.count; i++) {
+        indicesU32[i] = indexAttr.getX(i);
+      }
+    } else {
+      indicesU32 = new Uint32Array(vCount);
+      for (let i = 0; i < vCount; i++) indicesU32[i] = i;
+    }
+
+    const posView = appendTypedArray(posF32, 34962);
+    const posAccessor = accessors.length;
+    accessors.push({
+      bufferView: posView,
+      componentType: 5126,
+      count: vCount,
+      type: 'VEC3',
+      min: [minX, minY, minZ],
+      max: [maxX, maxY, maxZ],
+    });
+
+    const normView = appendTypedArray(normF32, 34962);
+    const normAccessor = accessors.length;
+    accessors.push({
+      bufferView: normView,
+      componentType: 5126,
+      count: vCount,
+      type: 'VEC3',
+    });
+
+    const uvView = appendTypedArray(uvF32, 34962);
+    const uvAccessor = accessors.length;
+    accessors.push({
+      bufferView: uvView,
+      componentType: 5126,
+      count: vCount,
+      type: 'VEC2',
+    });
+
+    const idxView = appendTypedArray(indicesU32, 34963);
+    const idxAccessor = accessors.length;
+    accessors.push({
+      bufferView: idxView,
+      componentType: 5125,
+      count: indicesU32.length,
+      type: 'SCALAR',
+    });
+
+    const [cr = 160, cg = 170, cb = 185] = part.color || [160, 170, 185];
+    const alpha = Math.max(0.05, Math.min(1, 1 - (part.transparency || 0)));
+    const matIndex = materials.length;
+    materials.push({
+      name: `${partName}_${part.material || 'Metal'}`,
+      pbrMetallicRoughness: {
+        baseColorFactor: [
+          Number((cr / 255).toFixed(4)),
+          Number((cg / 255).toFixed(4)),
+          Number((cb / 255).toFixed(4)),
+          Number(alpha.toFixed(4)),
+        ],
+        metallicFactor: Number(Math.max(0, Math.min(1, part.metalness ?? 0.65)).toFixed(4)),
+        roughnessFactor: Number(Math.max(0.04, Math.min(1, part.roughness ?? 0.35)).toFixed(4)),
+      },
+      emissiveFactor:
+        part.material === 'Neon'
+          ? [
+              Number((cr / 255).toFixed(4)),
+              Number((cg / 255).toFixed(4)),
+              Number((cb / 255).toFixed(4)),
+            ]
+          : [0, 0, 0],
+      doubleSided: Boolean(part.doubleSided),
+      alphaMode: alpha < 0.99 ? 'BLEND' : 'OPAQUE',
+    });
+
+    const meshIndex = meshes.length;
+    meshes.push({
+      name: partName,
+      primitives: [
+        {
+          attributes: {
+            POSITION: posAccessor,
+            NORMAL: normAccessor,
+            TEXCOORD_0: uvAccessor,
+          },
+          indices: idxAccessor,
+          material: matIndex,
+          mode: 4,
+        },
+      ],
+    });
+
+    const [px = 0, py = 1, pz = 0] = part.position || [0, 1, 0];
+    const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
+    euler.set(
+      THREE.MathUtils.degToRad(rx),
+      THREE.MathUtils.degToRad(ry),
+      THREE.MathUtils.degToRad(rz),
+      'XYZ'
+    );
+    quat.setFromEuler(euler);
+
+    nodes.push({
+      name: partName,
+      mesh: meshIndex,
+      translation: [Number(px.toFixed(4)), Number(py.toFixed(4)), Number(pz.toFixed(4))],
+      rotation: [
+        Number(quat.x.toFixed(6)),
+        Number(quat.y.toFixed(6)),
+        Number(quat.z.toFixed(6)),
+        Number(quat.w.toFixed(6)),
+      ],
+      extras: {
+        robloxMaterial: part.material || 'Metal',
+        collisionFidelity: part.collisionFidelity || 'Hull',
+        meshId: part.meshId || '',
+      },
+    });
+
+    geom.dispose();
+  }
+
+  const combined = new Uint8Array(byteOffset);
+  let cursor = 0;
+  for (const chunk of bufferChunks) {
+    combined.set(chunk, cursor);
+    cursor += chunk.byteLength;
+  }
+
+  let binaryStr = '';
+  const step = 0x8000;
+  for (let i = 0; i < combined.length; i += step) {
+    binaryStr += String.fromCharCode(...combined.subarray(i, i + step));
+  }
+  const base64Buffer = btoa(binaryStr);
+
+  const gltfDoc = {
+    asset: {
+      version: '2.0',
+      generator: 'Forge AI Studio - Roblox Studio 3D Exporter',
+    },
+    scene: 0,
+    scenes: [
+      {
+        name: safeName,
+        nodes: nodes.map((_, i) => i),
+      },
+    ],
+    nodes,
+    meshes,
+    materials,
+    accessors,
+    bufferViews,
+    buffers: [
+      {
+        byteLength: byteOffset,
+        uri: `data:application/octet-stream;base64,${base64Buffer}`,
+      },
+    ],
+  };
+
+  return JSON.stringify(gltfDoc, null, 2);
+}
+

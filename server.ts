@@ -118,7 +118,17 @@ const ai = apiKey
     })
   : null;
 
-const ALLOWED_EXTENSIONS = new Set(['.luau', '.json', '.obj', '.gltf', '.md', '.png']);
+const ALLOWED_EXTENSIONS = new Set([
+  '.luau',
+  '.json',
+  '.obj',
+  '.mtl',
+  '.gltf',
+  '.glb',
+  '.rbxmx',
+  '.md',
+  '.png',
+]);
 const FORBIDDEN_LUAU_PATTERNS = [/\bloadstring\s*\(/, /\bgetfenv\s*\(/, /\bsetfenv\s*\(/];
 
 function resolveSafeProjectPath(rojoTargetFolder: string, fileName: string): string {
@@ -789,6 +799,116 @@ app.post('/api/v1/assets/process-meshpart', (req, res) => {
       meshpart_count: parts.length,
       total_triangles: Number(payload.totalTriangles || 0),
       is_roblox_compliant: Boolean(payload.isRobloxCompliant),
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Bidirectional Roblox Studio Package Exporter (.rbxmx, .gltf, .obj + .mtl, .luau) -> Rojo & Library
+app.post('/api/v1/assets/export-roblox-package', (req, res) => {
+  try {
+    const {
+      asset,
+      rbxmx_content = '',
+      gltf_content = '',
+      obj_content = '',
+      mtl_content = '',
+      save_to_rojo = true,
+      save_to_library = true,
+    } = req.body;
+
+    if (!asset || !asset.name) {
+      return res.status(400).json({ error: 'Se requiere un asset 3D válido para exportar a Roblox Studio.' });
+    }
+
+    const safeName = String(asset.name).replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeModel3D';
+    const targetFolder = asset.rojo_target_folder || 'src/shared/Assets3D';
+    const objFileName = `${safeName}.obj`;
+
+    const enrichedParts = (asset.parts || []).map((p: any, idx: number) => {
+      const partName = p.name || `MeshPart_${idx + 1}`;
+      const resolvedMesh = extractGeometryFromProcessedMesh(p, objFileName, safeName);
+      const meshId = normalizeValidMeshId(
+        p.meshId || p.mesh_id || resolvedMesh.meshId,
+        safeName,
+        partName,
+        resolvedMesh.vertices.length,
+        resolvedMesh.faces.length
+      );
+      const assetId = normalizeValidMeshId(
+        p.assetId || p.asset_id || resolvedMesh.assetId || meshId,
+        safeName,
+        partName,
+        resolvedMesh.vertices.length,
+        resolvedMesh.faces.length
+      );
+      resolvedMesh.meshId = meshId;
+      resolvedMesh.assetId = assetId;
+      resolvedMesh.objFileName = objFileName;
+
+      return {
+        ...p,
+        name: partName,
+        shape: 'MeshPart',
+        meshId,
+        assetId,
+        meshData: resolvedMesh,
+      };
+    });
+
+    const rebuiltLuau = buildStrictLuauFromEditedParts(
+      safeName,
+      enrichedParts,
+      asset.collision_fidelity || 'Hull'
+    );
+
+    const savedFiles: Record<string, string | null> = {
+      luau: null,
+      rbxmx: null,
+      gltf: null,
+      obj: null,
+      mtl: null,
+    };
+
+    if (save_to_rojo) {
+      savedFiles.luau = writeToRojoWorkspace(targetFolder, `${safeName}.luau`, rebuiltLuau);
+      if (typeof rbxmx_content === 'string' && rbxmx_content.trim().length > 0) {
+        savedFiles.rbxmx = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.rbxmx`, rbxmx_content);
+      }
+      if (typeof gltf_content === 'string' && gltf_content.trim().length > 0) {
+        savedFiles.gltf = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.gltf`, gltf_content);
+      }
+      if (typeof obj_content === 'string' && obj_content.trim().length > 0) {
+        savedFiles.obj = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.obj`, obj_content);
+      }
+      if (typeof mtl_content === 'string' && mtl_content.trim().length > 0) {
+        savedFiles.mtl = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.mtl`, mtl_content);
+      }
+    }
+
+    const totalTris = enrichedParts.reduce((acc: number, p: any) => {
+      return acc + (p.meshData?.faces?.length || 12);
+    }, 0);
+
+    const updatedAsset = {
+      ...asset,
+      name: safeName,
+      parts: enrichedParts,
+      poly_count: totalTris,
+      luau_code: rebuiltLuau,
+      file_name: `${safeName}.luau`,
+      obj_file_name: objFileName,
+      saved_path: savedFiles.luau || asset.saved_path || null,
+      obj_saved_path: savedFiles.obj || asset.obj_saved_path || null,
+    };
+
+    const finalAsset = save_to_library ? saveAssetToLibrary(updatedAsset) : updatedAsset;
+
+    res.json({
+      success: true,
+      asset: finalAsset,
+      saved_files: savedFiles,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });

@@ -651,51 +651,78 @@ export function synthesizeProceduralMeshData(
     return { vertices, normals, uvs, faces, indices: faces.flat() };
   }
 
-  const faces: Array<[number, number, number]> = [
-    [0, 2, 1],
-    [0, 3, 2],
-    [4, 5, 6],
-    [4, 6, 7],
-    [0, 1, 5],
-    [0, 5, 4],
-    [2, 3, 7],
-    [2, 7, 6],
-    [0, 4, 7],
-    [0, 7, 3],
-    [1, 2, 6],
-    [1, 6, 5],
+  // Default MeshPart topology: Chamfered 3-ring Octagonal Hull Mesh (26 vertices, 48 triangles)
+  // Never defaults to an 8-vertex primitive 'Block' cuboid.
+  const segments = 8;
+  const bevelScale = 0.82;
+  const ringLevels: Array<[number, number, number]> = [
+    [-hy, bevelScale, 0],
+    [0, 1.0, 0.5],
+    [hy, bevelScale, 1.0],
   ];
+  const vertices: Array<[number, number, number]> = [];
+  const normals: Array<[number, number, number]> = [];
+  const uvs: Array<[number, number]> = [];
+  const faces: Array<[number, number, number]> = [];
+
+  for (const [yPos, radialScale, vCoord] of ringLevels) {
+    const nyComp = yPos < 0 ? -0.35 : yPos > 0 ? 0.35 : 0;
+    for (let i = 0; i < segments; i++) {
+      const theta = (2 * Math.PI * i) / segments + Math.PI / segments;
+      const ct = Math.cos(theta);
+      const st = Math.sin(theta);
+      const vx = hx * radialScale * ct;
+      const vz = hz * radialScale * st;
+      const nLen = Math.hypot(ct, nyComp, st) || 1;
+      vertices.push([
+        Number(vx.toFixed(4)),
+        Number(yPos.toFixed(4)),
+        Number(vz.toFixed(4)),
+      ]);
+      normals.push([
+        Number((ct / nLen).toFixed(4)),
+        Number((nyComp / nLen).toFixed(4)),
+        Number((st / nLen).toFixed(4)),
+      ]);
+      uvs.push([Number((i / segments).toFixed(4)), vCoord]);
+    }
+  }
+
+  const bottomCapIdx = vertices.length;
+  vertices.push([0, Number((-hy).toFixed(4)), 0]);
+  normals.push([0, -1, 0]);
+  uvs.push([0.5, 0]);
+
+  const topCapIdx = vertices.length;
+  vertices.push([0, Number(hy.toFixed(4)), 0]);
+  normals.push([0, 1, 0]);
+  uvs.push([0.5, 1]);
+
+  for (let r = 0; r < 2; r++) {
+    const ringA = r * segments;
+    const ringB = (r + 1) * segments;
+    for (let i = 0; i < segments; i++) {
+      const nxt = (i + 1) % segments;
+      const a0 = ringA + i;
+      const a1 = ringA + nxt;
+      const b0 = ringB + i;
+      const b1 = ringB + nxt;
+      faces.push([a0, a1, b1]);
+      faces.push([a0, b1, b0]);
+    }
+  }
+
+  const topRing = 2 * segments;
+  for (let i = 0; i < segments; i++) {
+    const nxt = (i + 1) % segments;
+    faces.push([bottomCapIdx, nxt, i]);
+    faces.push([topCapIdx, topRing + i, topRing + nxt]);
+  }
+
   return {
-    vertices: [
-      [-hx, -hy, -hz],
-      [hx, -hy, -hz],
-      [hx, hy, -hz],
-      [-hx, hy, -hz],
-      [-hx, -hy, hz],
-      [hx, -hy, hz],
-      [hx, hy, hz],
-      [-hx, hy, hz],
-    ],
-    normals: [
-      [-0.5773, -0.5773, -0.5773],
-      [0.5773, -0.5773, -0.5773],
-      [0.5773, 0.5773, -0.5773],
-      [-0.5773, 0.5773, -0.5773],
-      [-0.5773, -0.5773, 0.5773],
-      [0.5773, -0.5773, 0.5773],
-      [0.5773, 0.5773, 0.5773],
-      [-0.5773, 0.5773, 0.5773],
-    ],
-    uvs: [
-      [0, 0],
-      [1, 0],
-      [1, 1],
-      [0, 1],
-      [0, 0],
-      [1, 0],
-      [1, 1],
-      [0, 1],
-    ],
+    vertices,
+    normals,
+    uvs,
     faces,
     indices: faces.flat(),
   };
@@ -710,7 +737,7 @@ export function buildStrictLuauFromEditedParts(
 
   const lines: string[] = [
     '--!strict',
-    `-- Generated & Updated by Forge AI Asset & 3D Model Editor: ${safeName} (True MeshPart + Valid MeshId/AssetId + EditableMesh Pipeline)`,
+    `-- Generated & Updated by Forge AI Asset & 3D Model Editor: ${safeName} (MeshPart + MeshId/AssetId + Vertex/Index Buffers)`,
     'local AssetService = game:GetService("AssetService")',
     'local InsertService = game:GetService("InsertService")',
     'local Workspace = game:GetService("Workspace")',
@@ -718,6 +745,7 @@ export function buildStrictLuauFromEditedParts(
     'type VertexList = { { number } }',
     'type NormalList = { { number } }',
     'type UVList = { { number } }',
+    'type IndexBuffer = { number }',
     'type FaceIndexList = { { number } }',
     '',
     'export type MeshPartDescriptor = {',
@@ -726,17 +754,17 @@ export function buildStrictLuauFromEditedParts(
     '    AssetId: string,',
     '    TextureId: string?,',
     '    ObjSourcePath: string,',
-    '    Size: Vector3,',
     '    CollisionFidelity: Enum.CollisionFidelity,',
     '    Vertices: VertexList,',
     '    Normals: NormalList,',
     '    UVs: UVList,',
-    '    Indices: FaceIndexList,',
+    '    Indices: IndexBuffer,',
+    '    Faces: FaceIndexList,',
     '}',
     '',
     'local function createTrueMeshPart(desc: MeshPartDescriptor): MeshPart',
-    '    -- 1. Construct real MeshPart geometry from extracted Vertex, Normal, UV, and Index buffers via EditableMesh',
-    '    if #desc.Vertices > 0 and #desc.Indices > 0 then',
+    '    -- 1. Construct real MeshPart geometry from extracted Vertex, Normal, UV, and Triangle Index buffers via EditableMesh',
+    '    if #desc.Vertices > 0 and #desc.Indices >= 3 then',
     '        local okEditable, generatedMeshPart = pcall(function()',
     '            local editableMesh = AssetService:CreateEditableMesh()',
     '            local vertexIds = table.create(#desc.Vertices)',
@@ -753,8 +781,10 @@ export function buildStrictLuauFromEditedParts(
     '                uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1], uv[2]))',
     '            end',
     '',
-    '            for _, tri in ipairs(desc.Indices) do',
-    '                local i1, i2, i3 = tri[1], tri[2], tri[3]',
+    '            local stepCount = math.floor(#desc.Indices / 3)',
+    '            for t = 0, stepCount - 1 do',
+    '                local baseIdx = t * 3',
+    '                local i1, i2, i3 = desc.Indices[baseIdx + 1], desc.Indices[baseIdx + 2], desc.Indices[baseIdx + 3]',
     '                local v1, v2, v3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]',
     '                if v1 and v2 and v3 then',
     '                    local fid = editableMesh:AddTriangle(v1, v2, v3)',
@@ -780,39 +810,41 @@ export function buildStrictLuauFromEditedParts(
     '',
     '        if okEditable and generatedMeshPart then',
     '            generatedMeshPart.Name = desc.Name',
-    '            generatedMeshPart.Size = desc.Size',
     '            if desc.TextureId and desc.TextureId ~= "" then',
     '                generatedMeshPart.TextureID = desc.TextureId',
     '            end',
     '            generatedMeshPart:SetAttribute("MeshId", desc.MeshId)',
     '            generatedMeshPart:SetAttribute("AssetId", desc.AssetId)',
     '            generatedMeshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
+    '            generatedMeshPart:SetAttribute("VertexCount", #desc.Vertices)',
+    '            generatedMeshPart:SetAttribute("TriangleCount", #desc.Faces)',
     '            return generatedMeshPart',
     '        end',
     '    end',
     '',
-    '    -- 2. Load true MeshPart via InsertService:CreateMeshPartAsync using validated rbxassetid:// MeshId',
+    '    -- 2. Load true MeshPart via InsertService:CreateMeshPartAsync using validated rbxassetid:// MeshId/AssetId',
+    '    local targetMeshUri = if desc.MeshId ~= "" then desc.MeshId else desc.AssetId',
     '    local okInsert, loadedMeshPart = pcall(function()',
-    '        return InsertService:CreateMeshPartAsync(desc.MeshId, desc.CollisionFidelity, Enum.RenderFidelity.Precise)',
+    '        return InsertService:CreateMeshPartAsync(targetMeshUri, desc.CollisionFidelity, Enum.RenderFidelity.Precise)',
     '    end)',
     '    if okInsert and loadedMeshPart then',
     '        loadedMeshPart.Name = desc.Name',
-    '        loadedMeshPart.Size = desc.Size',
     '        if desc.TextureId and desc.TextureId ~= "" then',
     '            loadedMeshPart.TextureID = desc.TextureId',
     '        end',
     '        loadedMeshPart:SetAttribute("MeshId", desc.MeshId)',
     '        loadedMeshPart:SetAttribute("AssetId", desc.AssetId)',
     '        loadedMeshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
+    '        loadedMeshPart:SetAttribute("VertexCount", #desc.Vertices)',
+    '        loadedMeshPart:SetAttribute("TriangleCount", #desc.Faces)',
     '        return loadedMeshPart',
     '    end',
     '',
-    '    -- 3. Direct MeshPart instantiation with valid MeshId reference (never fallback Part/Block)',
+    '    -- 3. Direct MeshPart instantiation with valid MeshId/AssetId reference (never fallback Part/Block)',
     '    local meshPart = Instance.new("MeshPart")',
     '    meshPart.Name = desc.Name',
-    '    meshPart.Size = desc.Size',
     '    pcall(function()',
-    '        meshPart.MeshId = desc.MeshId',
+    '        (meshPart :: any).MeshId = targetMeshUri',
     '    end)',
     '    if desc.TextureId and desc.TextureId ~= "" then',
     '        meshPart.TextureID = desc.TextureId',
@@ -820,6 +852,8 @@ export function buildStrictLuauFromEditedParts(
     '    meshPart:SetAttribute("MeshId", desc.MeshId)',
     '    meshPart:SetAttribute("AssetId", desc.AssetId)',
     '    meshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
+    '    meshPart:SetAttribute("VertexCount", #desc.Vertices)',
+    '    meshPart:SetAttribute("TriangleCount", #desc.Faces)',
     '    return meshPart',
     'end',
     '',
@@ -864,10 +898,15 @@ export function buildStrictLuauFromEditedParts(
     }
 
     const fEntries: string[] = [];
+    const flatIndexEntries: string[] = [];
     for (let i = 0; i < maxFaces; i++) {
       const f = resolvedMesh.faces[i];
       if (f && f[0] < maxVerts && f[1] < maxVerts && f[2] < maxVerts) {
-        fEntries.push(`{${f[0] + 1},${f[1] + 1},${f[2] + 1}}`);
+        const i1 = f[0] + 1;
+        const i2 = f[1] + 1;
+        const i3 = f[2] + 1;
+        fEntries.push(`{${i1},${i2},${i3}}`);
+        flatIndexEntries.push(`${i1}`, `${i2}`, `${i3}`);
       }
     }
 
@@ -889,19 +928,19 @@ export function buildStrictLuauFromEditedParts(
     const texIdStr = p.textureId || '';
 
     lines.push(
-      `    -- Sub-MeshPart #${idx + 1}: ${partLabel} (MeshId: ${meshIdStr}, ${vEntries.length} verts, ${fEntries.length} tris)`,
+      `    -- Sub-MeshPart #${idx + 1}: ${partLabel} (MeshId: ${meshIdStr}, AssetId: ${assetIdStr}, ${vEntries.length} verts, ${fEntries.length} tris)`,
       `    local ${vName} = createTrueMeshPart({`,
       `        Name = "${partLabel}",`,
       `        MeshId = "${meshIdStr}",`,
       `        AssetId = "${assetIdStr}",`,
       `        TextureId = "${texIdStr}",`,
       `        ObjSourcePath = "src/shared/Assets3D/${objFile}",`,
-      `        Size = Vector3.new(${Number(sx).toFixed(2)}, ${Number(sy).toFixed(2)}, ${Number(sz).toFixed(2)}),`,
       `        CollisionFidelity = Enum.CollisionFidelity.${cfMode},`,
       `        Vertices = {${vEntries.join(',')}},`,
       `        Normals = {${nEntries.join(',')}},`,
       `        UVs = {${uvEntries.join(',')}},`,
-      `        Indices = {${fEntries.join(',')}},`,
+      `        Indices = {${flatIndexEntries.join(',')}},`,
+      `        Faces = {${fEntries.join(',')}},`,
       '    })',
       `    ${vName}.CFrame = baseOrigin * CFrame.new(${Number(px).toFixed(2)}, ${Number(py).toFixed(2)}, ${Number(pz).toFixed(2)}) * CFrame.Angles(math.rad(${Number(rx).toFixed(1)}), math.rad(${Number(ry).toFixed(1)}), math.rad(${Number(rz).toFixed(1)}))`,
       `    ${vName}.Color = Color3.fromRGB(${Math.round(cr)}, ${Math.round(cg)}, ${Math.round(cb)})`,

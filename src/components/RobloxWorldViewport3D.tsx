@@ -23,6 +23,10 @@ import {
   buildRobloxR15ScaleDummy,
   generateProceduralPBRTextures,
   exportObject3DToOBJ,
+  exportAssetToOBJWithMTL,
+  exportAssetToRBXMX,
+  exportAssetToGLTF,
+  parseRBXMXToForgeAsset,
   convertImageTo3DHeightmapMesh,
 } from '../utils/roblox3DEngine.ts';
 import { default3DEngineProcessor } from './engines/3dEngine.ts';
@@ -465,7 +469,7 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     requestRenderRef.current?.();
   };
 
-  // Import external GLB, GLTF, OBJ, or FBX 3D file via Roblox3DEngineProcessor (src/components/engines/3dEngine.ts)
+  // Import external .RBXMX, .GLB, .GLTF, .OBJ, or .FBX 3D file into Forge & sync to Rojo
   const handleImport3DFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !subjectGroupRef.current) return;
@@ -473,8 +477,37 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     try {
       setStats((prev) => ({
         ...prev,
-        status: `Pre-procesando ${file.name} a Roblox MeshParts...`,
+        status: `Importando ${file.name} a Forge 3D Studio...`,
       }));
+
+      if (file.name.toLowerCase().endsWith('.rbxmx')) {
+        const xmlText = await file.text();
+        const parsedAsset = parseRBXMXToForgeAsset(xmlText, file.name);
+        try {
+          const resp = await fetch('/api/v1/assets/rebuild-luau', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              asset: parsedAsset,
+              save_to_rojo: true,
+              save_to_library: true,
+            }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data.asset && onPreprocessedAssetReady) {
+              onPreprocessedAssetReady(data.asset);
+              return;
+            }
+          }
+        } catch {
+          // Fallback to local parsed asset if backend is offline
+        }
+        if (onPreprocessedAssetReady) {
+          onPreprocessedAssetReady(parsedAsset);
+        }
+        return;
+      }
 
       const { threeObject, exportPayload, backendResponse } =
         await default3DEngineProcessor.processAndSyncWithBackend(file, {
@@ -526,13 +559,50 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     } catch (err: any) {
       setStats((prev) => ({
         ...prev,
-        status: `Error al procesar archivo 3D: ${err.message || err}`,
+        status: `Error al importar archivo 3D: ${err.message || err}`,
       }));
     }
   };
 
-  // Export current 3D scene model to .OBJ for Roblox Studio MeshPart import
+  // Export current 3D model to native Roblox Studio .RBXMX XML Model
+  const handleDownloadRBXMX = () => {
+    if (!asset) return;
+    const rbxmxXml = exportAssetToRBXMX(asset);
+    const blob = new Blob([rbxmxXml], { type: 'application/xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(asset.name || 'RobloxModel').replace(/\s+/g, '_')}.rbxmx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Export current 3D model to standard glTF 2.0 (.GLTF) with embedded geometry & PBR materials
+  const handleDownloadGLTF = () => {
+    if (!asset) return;
+    const gltfJson = exportAssetToGLTF(asset);
+    const blob = new Blob([gltfJson], { type: 'model/gltf+json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(asset.name || 'RobloxModel').replace(/\s+/g, '_')}.gltf`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Export current 3D scene model to .OBJ (+ .MTL if asset has parts) for Roblox Studio 3D Importer
   const handleDownloadOBJ = () => {
+    if (asset && asset.parts && asset.parts.length > 0) {
+      const { obj, objFileName } = exportAssetToOBJWithMTL(asset);
+      const blob = new Blob([obj], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = objFileName;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
     if (!subjectGroupRef.current) return;
     const objText = exportObject3DToOBJ(subjectGroupRef.current);
     const blob = new Blob([objText], { type: 'text/plain;charset=utf-8' });
@@ -547,14 +617,14 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
   return (
     <div className="relative w-full h-full min-h-[540px] rounded-xl border border-slate-800 bg-[#0b0f17] overflow-hidden flex flex-col">
       {/* Top Minimal Spec Header (No Pulsating Dots, No Clutter) */}
-      <div className="z-10 px-4 py-2.5 bg-[#0f172a] border-b border-slate-800 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3 text-xs text-slate-300">
+      <div className="z-10 px-4 py-2.5 bg-[#0f172a] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 text-xs text-slate-300">
           <span className="font-semibold text-white">
             {asset?.name || 'Roblox 3D WorldModel Viewport'}
           </span>
           <span aria-hidden="true">·</span>
           <span className="font-mono tabular-nums text-sky-400">
-            {stats.tris.toLocaleString()} Triángulos
+            {stats.tris.toLocaleString()} Tris
           </span>
           <span aria-hidden="true">·</span>
           <span className="font-mono tabular-nums text-slate-400">
@@ -564,30 +634,49 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
             <>
               <span aria-hidden="true">·</span>
               <span className="text-amber-300 font-mono">
-                Seleccionado: {selectedPartName}
+                Pieza: {selectedPartName}
               </span>
             </>
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <label className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <label className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap shrink-0">
             <Upload className="w-3.5 h-3.5 text-sky-400" />
-            <span>Importar GLB / GLTF / OBJ / FBX</span>
+            <span>Importar (.RBXMX / .GLB / .GLTF / .OBJ / .FBX)</span>
             <input
               type="file"
-              accept=".glb,.gltf,.obj,.fbx"
+              accept=".rbxmx,.glb,.gltf,.obj,.fbx"
               onChange={handleImport3DFile}
               className="hidden"
             />
           </label>
 
           <button
-            onClick={handleDownloadOBJ}
-            className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap shrink-0"
+            onClick={handleDownloadRBXMX}
+            title="Descargar modelo XML nativo de Roblox Studio (.rbxmx)"
+            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>Exportar .OBJ (Roblox MeshPart)</span>
+            <span>.RBXMX (Roblox Studio)</span>
+          </button>
+
+          <button
+            onClick={handleDownloadGLTF}
+            title="Descargar escena glTF 2.0 con geometría y materiales PBR (.gltf)"
+            className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>.GLTF (PBR)</span>
+          </button>
+
+          <button
+            onClick={handleDownloadOBJ}
+            title="Descargar malla Wavefront (.obj)"
+            className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>.OBJ</span>
           </button>
         </div>
       </div>

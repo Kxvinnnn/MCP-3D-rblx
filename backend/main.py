@@ -82,7 +82,7 @@ RUNTIME_CONFIG: Dict[str, Any] = {
     "rate_limit_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "45")),
 }
 
-ALLOWED_EXTENSIONS = {".luau", ".json", ".obj", ".gltf", ".md", ".png"}
+ALLOWED_EXTENSIONS = {".luau", ".json", ".obj", ".mtl", ".gltf", ".glb", ".rbxmx", ".md", ".png"}
 FORBIDDEN_LUAU_PATTERNS = [
     r"\bloadstring\s*\(",
     r"\bgetfenv\s*\(",
@@ -789,6 +789,67 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
         "meshpart_count": len(parts),
         "total_triangles": total_tris,
         "is_roblox_compliant": bool(payload.get("isRobloxCompliant", True)),
+    }
+
+
+@app.post("/api/v1/assets/export-roblox-package")
+def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    """
+    Exports a complete Roblox Studio 3D package (.rbxmx, .gltf, .obj, .mtl, and .luau)
+    into the Rojo workspace (`src/shared/Assets3D/`) and persists the updated asset.
+    """
+    verify_security_token(x_forge_token)
+    asset = payload_body.get("asset", {})
+    if not asset or not asset.get("name"):
+        raise HTTPException(status_code=400, detail="Valid asset object required.")
+
+    safe_name = re.sub(r"[^a-zA-Z0-9_]", "", str(asset.get("name", "ForgeModel3D"))) or "ForgeModel3D"
+    target_folder = str(asset.get("rojo_target_folder", "src/shared/Assets3D"))
+    save_to_rojo = bool(payload_body.get("save_to_rojo", True))
+    save_to_library = bool(payload_body.get("save_to_library", True))
+
+    raw_parts = asset.get("parts", [])
+    part_specs = [MeshPart3DSpec(**p) for p in raw_parts]
+    enriched_specs = generation_3d_engine.ensure_mesh_data_on_parts(safe_name, part_specs)
+    rebuilt_luau = generation_3d_engine.build_luau_from_parts(
+        safe_name,
+        enriched_specs,
+        str(asset.get("collision_fidelity", "Hull")),
+    )
+
+    saved_files: Dict[str, Optional[str]] = {
+        "luau": None,
+        "rbxmx": None,
+        "gltf": None,
+        "obj": None,
+        "mtl": None,
+    }
+    if save_to_rojo:
+        saved_files["luau"] = save_luau_to_rojo(target_folder, f"{safe_name}.luau", rebuilt_luau)
+        for key, ext in [("rbxmx_content", "rbxmx"), ("gltf_content", "gltf"), ("obj_content", "obj"), ("mtl_content", "mtl")]:
+            content_str = str(payload_body.get(key, "") or "")
+            if content_str.strip():
+                saved_files[ext] = save_raw_asset_to_rojo(target_folder, f"{safe_name}.{ext}", content_str.encode("utf-8"))
+
+    total_tris = sum(len(p.meshData.faces) for p in enriched_specs if p.meshData)
+    updated_asset = {
+        **asset,
+        "name": safe_name,
+        "parts": [p.model_dump() for p in enriched_specs],
+        "poly_count": total_tris,
+        "luau_code": rebuilt_luau,
+        "file_name": f"{safe_name}.luau",
+        "obj_file_name": f"{safe_name}.obj",
+        "saved_path": saved_files["luau"] or asset.get("saved_path"),
+        "obj_saved_path": saved_files["obj"] or asset.get("obj_saved_path"),
+    }
+    if save_to_library:
+        save_asset_to_library(updated_asset)
+
+    return {
+        "success": True,
+        "asset": updated_asset,
+        "saved_files": saved_files,
     }
 
 

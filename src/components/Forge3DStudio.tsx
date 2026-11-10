@@ -25,6 +25,17 @@ import {
   PBRTextureSet,
   generateProceduralPBRTextures,
   convertImageTo3DHeightmapMesh,
+  ensurePartHasMeshData,
+  rescaleMeshPartGeometry,
+  subdivideMeshPartGeometry,
+  smoothMeshPartGeometry,
+  decimateMeshPartGeometry,
+  recomputeNormalsAndBoxUVs,
+  snapAssetToGroundY0,
+  exportAssetToRBXMX,
+  exportAssetToGLTF,
+  exportAssetToOBJWithMTL,
+  parseRBXMXToForgeAsset,
 } from '../utils/roblox3DEngine.ts';
 import { RobloxWorldViewport3D } from './RobloxWorldViewport3D.tsx';
 import { FloatingTerminalLog, TerminalLogEntry } from './FloatingTerminalLog.tsx';
@@ -521,6 +532,19 @@ export const Forge3DStudio: React.FC = () => {
     ];
   };
 
+  const import3DFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [exportingPackage, setExportingPackage] = useState<boolean>(false);
+  const [exportedFilesList, setExportedFilesList] = useState<string[]>([]);
+
+  const recomputeAssetPolyCount = (parts: MeshPart3DSpec[]): number => {
+    return parts.reduce((sum, p) => {
+      if (p.meshData && Array.isArray(p.meshData.faces) && p.meshData.faces.length > 0) {
+        return sum + p.meshData.faces.length;
+      }
+      return sum + 12;
+    }, 0);
+  };
+
   const handleUpdateSelectedPart = (updater: (part: MeshPart3DSpec) => MeshPart3DSpec) => {
     if (!activeAsset || !selectedPart) return;
     const nextPart = updater(selectedPart);
@@ -530,6 +554,7 @@ export const Forge3DStudio: React.FC = () => {
     );
     setActiveAsset({
       ...activeAsset,
+      poly_count: recomputeAssetPolyCount(updatedParts),
       parts: updatedParts,
     });
   };
@@ -537,9 +562,9 @@ export const Forge3DStudio: React.FC = () => {
   const handleAddSubPart = () => {
     if (!activeAsset) return;
     const idx = (activeAsset.parts?.length || 0) + 1;
-    const newPart: MeshPart3DSpec = {
-      name: `CustomModule_${idx}`,
-      shape: 'Block',
+    const rawPart: MeshPart3DSpec = {
+      name: `CustomMesh_${idx}`,
+      shape: 'MeshPart',
       size: [2.0, 1.2, 2.0],
       position: [0, 3.5, 0],
       rotation: [0, 0, 0],
@@ -552,13 +577,21 @@ export const Forge3DStudio: React.FC = () => {
       anchored: true,
       collisionFidelity: collisionFidelity,
     };
+    const newPart: MeshPart3DSpec = {
+      ...rawPart,
+      meshData: ensurePartHasMeshData(rawPart),
+    };
     const updatedParts = [...(activeAsset.parts || []), newPart];
     setActiveAsset({
       ...activeAsset,
+      poly_count: recomputeAssetPolyCount(updatedParts),
       parts: updatedParts,
     });
     setSelectedPart(newPart);
-    addLog('info', `Editor 3D: Pieza '${newPart.name}' añadida al modelo '${activeAsset.name}'.`);
+    addLog(
+      'info',
+      `Editor 3D: MeshPart '${newPart.name}' con geometría real (${newPart.meshData?.vertices.length || 0} vértices) añadida a '${activeAsset.name}'.`
+    );
   };
 
   const handleDeleteSelectedPart = () => {
@@ -567,10 +600,246 @@ export const Forge3DStudio: React.FC = () => {
     const remaining = activeAsset.parts.filter((p) => p.name !== selectedPart.name);
     setActiveAsset({
       ...activeAsset,
+      poly_count: recomputeAssetPolyCount(remaining),
       parts: remaining,
     });
     setSelectedPart(remaining[0] || null);
     addLog('info', `Editor 3D: Pieza '${selectedPart.name}' eliminada del modelo.`);
+  };
+
+  const handleSubdivideSelectedPart = () => {
+    if (!selectedPart) return;
+    handleUpdateSelectedPart((prev) => {
+      const next = subdivideMeshPartGeometry(prev);
+      addLog(
+        'info',
+        `Geometría subdividida en '${prev.name}': ${next.meshData?.vertices.length || 0} vértices, ${next.meshData?.faces.length || 0} triángulos.`
+      );
+      return next;
+    });
+  };
+
+  const handleSmoothSelectedPart = () => {
+    if (!selectedPart) return;
+    handleUpdateSelectedPart((prev) => {
+      const next = smoothMeshPartGeometry(prev, 0.35);
+      addLog(
+        'info',
+        `Suavizado Laplaciano aplicado a '${prev.name}' con normales recalculadas.`
+      );
+      return next;
+    });
+  };
+
+  const handleDecimateSelectedPart = () => {
+    if (!selectedPart) return;
+    handleUpdateSelectedPart((prev) => {
+      const next = decimateMeshPartGeometry(prev, 0.65);
+      addLog(
+        'info',
+        `Simplificación geométrica LOD (-35%) en '${prev.name}': ${next.meshData?.faces.length || 0} triángulos.`
+      );
+      return next;
+    });
+  };
+
+  const handleRecomputeUVsAndNormals = () => {
+    if (!selectedPart) return;
+    handleUpdateSelectedPart((prev) => {
+      const next = recomputeNormalsAndBoxUVs(prev);
+      addLog(
+        'info',
+        `Normales suaves y coordenadas UV triplanares recalculadas en '${prev.name}'.`
+      );
+      return next;
+    });
+  };
+
+  const handleGroundModelY0 = () => {
+    if (!activeAsset) return;
+    const grounded = snapAssetToGroundY0(activeAsset);
+    setActiveAsset(grounded);
+    if (selectedPart) {
+      const found = grounded.parts.find((p) => p.name === selectedPart.name);
+      if (found) setSelectedPart(found);
+    }
+    addLog('info', `Modelo '${activeAsset.name}' alineado exactamente al plano base Y=0 Studs.`);
+  };
+
+  const handleApplyMaterialToAllParts = () => {
+    if (!activeAsset || !selectedPart) return;
+    const updatedParts = (activeAsset.parts || []).map((p) => ({
+      ...p,
+      material: selectedPart.material,
+      color: [...selectedPart.color],
+      roughness: selectedPart.roughness ?? pbrRoughness,
+      metalness: selectedPart.metalness ?? pbrMetalness,
+      transparency: selectedPart.transparency ?? 0,
+    }));
+    setActiveAsset({
+      ...activeAsset,
+      parts: updatedParts,
+      pbr_profile: {
+        albedo_hex: rgbToHex(selectedPart.color),
+        roughness: selectedPart.roughness ?? pbrRoughness,
+        metalness: selectedPart.metalness ?? pbrMetalness,
+        emissive_hex: pbrAccentHex,
+        roblox_material: selectedPart.material,
+        pattern: pbrPreset,
+      },
+    });
+    addLog(
+      'success',
+      `Material Roblox '${selectedPart.material}' (Roughness ${Number(selectedPart.roughness ?? 0.35).toFixed(2)}, Metalness ${Number(selectedPart.metalness ?? 0.6).toFixed(2)}) aplicado a las ${updatedParts.length} piezas del modelo.`
+    );
+  };
+
+  const handleDirectImport3DFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      if (ext === 'rbxmx') {
+        addLog('info', `Importando modelo nativo Roblox Studio (.rbxmx): ${file.name}...`);
+        const xmlText = await file.text();
+        const importedAsset = parseRBXMXToForgeAsset(xmlText, file.name);
+        setActiveAsset(importedAsset);
+        setSelectedPart(importedAsset.parts?.[0] || null);
+        setInspectorTab('viewport');
+        addLog(
+          'success',
+          `Modelo Roblox Studio '${importedAsset.name}' importado (${importedAsset.parts.length} MeshParts, ${importedAsset.poly_count} triángulos).`
+        );
+      } else {
+        addLog('info', `Pre-procesando archivo 3D (${file.name}) con conservación de vértices, normales y UVs...`);
+        const { exportPayload, backendResponse } =
+          await default3DEngineProcessor.processAndSyncWithBackend(file, {
+            targetStudHeight: 6.0,
+            decimationRatio: 1.0,
+            collisionFidelity,
+            autoSplitOversizedMeshes: true,
+          });
+        if (backendResponse?.asset) {
+          setActiveAsset(backendResponse.asset);
+          setSelectedPart(backendResponse.asset.parts?.[0] || null);
+          setInspectorTab('viewport');
+          fetchAssetLibrary();
+          addLog(
+            'success',
+            `Modelo 3D '${backendResponse.asset.name}' importado con geometría intacta (${exportPayload.totalVertices} vértices, ${exportPayload.totalTriangles} triángulos).`
+          );
+        }
+      }
+    } catch (err: any) {
+      setError(err.message || 'Error al importar archivo 3D');
+      addLog('error', err.message || 'Error en importación 3D');
+    } finally {
+      setLoading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDownloadRBXMX = () => {
+    if (!activeAsset) return;
+    const xml = exportAssetToRBXMX(activeAsset);
+    const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeAsset.name}.rbxmx`;
+    a.click();
+    URL.revokeObjectURL(url);
+    addLog(
+      'success',
+      `Archivo nativo Roblox Studio '${activeAsset.name}.rbxmx' exportado con jerarquía Model, MeshParts, CFrames, SurfaceAppearance y geometría completa.`
+    );
+  };
+
+  const handleDownloadGLTF = () => {
+    if (!activeAsset) return;
+    const gltf = exportAssetToGLTF(activeAsset);
+    const blob = new Blob([gltf], { type: 'model/gltf+json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeAsset.name}.gltf`;
+    a.click();
+    URL.revokeObjectURL(url);
+    addLog(
+      'success',
+      `Archivo estándar '${activeAsset.name}.gltf' (glTF 2.0) exportado con buffers binarios de vértices, normales, UVs y materiales PBR.`
+    );
+  };
+
+  const handleDownloadOBJWithMTL = () => {
+    if (!activeAsset) return;
+    const { obj, mtl } = exportAssetToOBJWithMTL(activeAsset);
+    const objBlob = new Blob([obj], { type: 'text/plain;charset=utf-8' });
+    const objUrl = URL.createObjectURL(objBlob);
+    const aObj = document.createElement('a');
+    aObj.href = objUrl;
+    aObj.download = `${activeAsset.name}.obj`;
+    aObj.click();
+    URL.revokeObjectURL(objUrl);
+
+    const mtlBlob = new Blob([mtl], { type: 'text/plain;charset=utf-8' });
+    const mtlUrl = URL.createObjectURL(mtlBlob);
+    const aMtl = document.createElement('a');
+    aMtl.href = mtlUrl;
+    aMtl.download = `${activeAsset.name}.mtl`;
+    aMtl.click();
+    URL.revokeObjectURL(mtlUrl);
+
+    addLog(
+      'success',
+      `Malla '${activeAsset.name}.obj' + biblioteca de materiales PBR '${activeAsset.name}.mtl' descargadas para el Importador 3D de Roblox Studio.`
+    );
+  };
+
+  const handleExportFullPackageToRojo = async () => {
+    if (!activeAsset) return;
+    setExportingPackage(true);
+    setError(null);
+    try {
+      const rbxmxContent = exportAssetToRBXMX(activeAsset);
+      const gltfContent = exportAssetToGLTF(activeAsset);
+      const { obj: objContent, mtl: mtlContent } = exportAssetToOBJWithMTL(activeAsset);
+
+      addLog(
+        'info',
+        `Exportando paquete completo Roblox Studio (.rbxmx + .gltf + .obj + .mtl + .luau) para '${activeAsset.name}'...`
+      );
+      const res = await fetch('/api/v1/assets/export-roblox-package', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asset: activeAsset,
+          rbxmx_content: rbxmxContent,
+          gltf_content: gltfContent,
+          obj_content: objContent,
+          mtl_content: mtlContent,
+          save_to_rojo: true,
+          save_to_library: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.asset) {
+        setActiveAsset(data.asset);
+        setExportedFilesList(data.saved_files || []);
+        fetchAssetLibrary();
+        addLog(
+          'rojo',
+          `Paquete 3D completo sincronizado en Rojo: ${(data.saved_files || []).join(', ')}`
+        );
+      }
+    } catch (err: any) {
+      setError(err.message || 'Error al exportar paquete completo a Rojo');
+      addLog('error', `Error en exportación a Rojo: ${err.message}`);
+    } finally {
+      setExportingPackage(false);
+    }
   };
 
   const handleSaveEditedModelToRojo = async () => {
@@ -1099,16 +1368,16 @@ export const Forge3DStudio: React.FC = () => {
             )}
           </div>
 
-          {/* P2 Interactive 3D Model Editor (Modify Parts, Size, Position, Material & Sync to Rojo) */}
+          {/* P2 Interactive 3D Geometry & Material Editor */}
           {activeAsset && (
             <div className="p-4 rounded-2xl bg-[#0d1117] border border-slate-800 shadow-lg flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
                 <div>
                   <span className="text-xs font-bold text-cyan-400 font-mono block">
-                    P2 · Editor Interactivo de Modelo 3D ({activeAsset.parts?.length || 0} piezas)
+                    Editor de Geometría Real &amp; Materiales ({activeAsset.parts?.length || 0} MeshParts • {activeAsset.poly_count} tris)
                   </span>
                   <span className="text-[11px] text-slate-400">
-                    Modifica geometría, escala en Studs, posición y materiales en tiempo real
+                    Edita vértices, subdivisión, normales, UVs, escala en Studs y materiales PBR sin perder la forma
                   </span>
                 </div>
 
@@ -1118,7 +1387,7 @@ export const Forge3DStudio: React.FC = () => {
                     onClick={handleAddSubPart}
                     className="px-2.5 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-[11px] font-semibold text-cyan-300 cursor-pointer"
                   >
-                    + Añadir Pieza
+                    + Añadir MeshPart
                   </button>
                   {selectedPart && (activeAsset.parts?.length || 0) > 1 && (
                     <button
@@ -1150,7 +1419,7 @@ export const Forge3DStudio: React.FC = () => {
                     >
                       {activeAsset.parts.map((p, idx) => (
                         <option key={`${p.name}-${idx}`} value={p.name}>
-                          {p.name} ({p.shape})
+                          {p.name} ({p.meshData?.vertices?.length || 24}v)
                         </option>
                       ))}
                     </select>
@@ -1160,18 +1429,27 @@ export const Forge3DStudio: React.FC = () => {
                     <>
                       <div>
                         <label className="block text-[10px] font-mono text-slate-400 mb-1">
-                          PRIMITIVA (SHAPE)
+                          TIPO DE GEOMETRÍA
                         </label>
                         <select
                           value={selectedPart.shape}
                           onChange={(e) =>
-                            handleUpdateSelectedPart((prev) => ({
-                              ...prev,
-                              shape: e.target.value as any,
-                            }))
+                            handleUpdateSelectedPart((prev) => {
+                              const nextShape = e.target.value as any;
+                              const tempPart: MeshPart3DSpec = {
+                                ...prev,
+                                shape: nextShape,
+                                meshData: nextShape === 'MeshPart' ? prev.meshData : undefined,
+                              };
+                              return {
+                                ...tempPart,
+                                meshData: ensurePartHasMeshData(tempPart),
+                              };
+                            })
                           }
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-white"
                         >
+                          <option value="MeshPart">MeshPart (Malla 3D Real)</option>
                           <option value="Block">Block</option>
                           <option value="Cylinder">Cylinder</option>
                           <option value="Ball">Ball</option>
@@ -1198,9 +1476,15 @@ export const Forge3DStudio: React.FC = () => {
                           <option value="Neon">Neon</option>
                           <option value="DiamondPlate">DiamondPlate</option>
                           <option value="SmoothPlastic">SmoothPlastic</option>
+                          <option value="ForceField">ForceField</option>
                           <option value="Glass">Glass</option>
                           <option value="Slate">Slate</option>
                           <option value="Concrete">Concrete</option>
+                          <option value="Granite">Granite</option>
+                          <option value="Marble">Marble</option>
+                          <option value="WoodPlanks">WoodPlanks</option>
+                          <option value="CorrodedMetal">CorrodedMetal</option>
+                          <option value="Ice">Ice</option>
                         </select>
                       </div>
                     </>
@@ -1210,36 +1494,36 @@ export const Forge3DStudio: React.FC = () => {
 
               {selectedPart && (
                 <>
-                  {/* Size X, Y, Z & Position X, Y, Z in Studs */}
-                  <div className="grid grid-cols-2 gap-2.5 text-[11px] font-mono">
-                    <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/90 flex flex-col gap-1.5">
-                      <span className="text-[10px] text-slate-400">SIZE EN STUDS (X, Y, Z)</span>
-                      <div className="grid grid-cols-3 gap-1.5">
+                  {/* Size X, Y, Z, Position X, Y, Z, Rotation RX, RY, RZ */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-mono">
+                    <div className="p-2 rounded-xl bg-slate-950 border border-slate-800/90 flex flex-col gap-1">
+                      <span className="text-[10px] text-slate-400">ESCALA STUDS (X, Y, Z)</span>
+                      <div className="grid grid-cols-3 gap-1">
                         {[0, 1, 2].map((axis) => (
                           <input
                             key={`size-${axis}`}
                             type="number"
                             step="0.2"
                             min="0.2"
-                            max="40"
+                            max="60"
                             value={Number(selectedPart.size[axis] ?? 2).toFixed(1)}
                             onChange={(e) => {
                               const val = Math.max(0.2, Number(e.target.value) || 0.2);
                               handleUpdateSelectedPart((prev) => {
                                 const nextSize = [...prev.size];
                                 nextSize[axis] = val;
-                                return { ...prev, size: nextSize };
+                                return rescaleMeshPartGeometry(prev, nextSize);
                               });
                             }}
-                            className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-center text-white tabular-nums"
+                            className="w-full bg-slate-900 border border-slate-800 rounded px-1 py-1 text-center text-white tabular-nums"
                           />
                         ))}
                       </div>
                     </div>
 
-                    <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/90 flex flex-col gap-1.5">
-                      <span className="text-[10px] text-slate-400">POSITION STUDS (X, Y, Z)</span>
-                      <div className="grid grid-cols-3 gap-1.5">
+                    <div className="p-2 rounded-xl bg-slate-950 border border-slate-800/90 flex flex-col gap-1">
+                      <span className="text-[10px] text-slate-400">POSICIÓN STUDS (X, Y, Z)</span>
+                      <div className="grid grid-cols-3 gap-1">
                         {[0, 1, 2].map((axis) => (
                           <input
                             key={`pos-${axis}`}
@@ -1254,14 +1538,84 @@ export const Forge3DStudio: React.FC = () => {
                                 return { ...prev, position: nextPos };
                               });
                             }}
-                            className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-center text-white tabular-nums"
+                            className="w-full bg-slate-900 border border-slate-800 rounded px-1 py-1 text-center text-white tabular-nums"
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="p-2 rounded-xl bg-slate-950 border border-slate-800/90 flex flex-col gap-1">
+                      <span className="text-[10px] text-slate-400">ROTACIÓN ° (RX, RY, RZ)</span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {[0, 1, 2].map((axis) => (
+                          <input
+                            key={`rot-${axis}`}
+                            type="number"
+                            step="15"
+                            value={Number(selectedPart.rotation?.[axis] ?? 0).toFixed(0)}
+                            onChange={(e) => {
+                              const val = Number(e.target.value) || 0;
+                              handleUpdateSelectedPart((prev) => {
+                                const nextRot = [...(prev.rotation || [0, 0, 0])];
+                                nextRot[axis] = val;
+                                return { ...prev, rotation: nextRot };
+                              });
+                            }}
+                            className="w-full bg-slate-900 border border-slate-800 rounded px-1 py-1 text-center text-white tabular-nums"
                           />
                         ))}
                       </div>
                     </div>
                   </div>
 
-                  {/* Color Picker + PBR Roughness / Metalness */}
+                  {/* Real Mesh Topology Modifiers */}
+                  <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/90 flex flex-col gap-2">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                      <span>OPERADORES DE MALLA 3D REAL (VÉRTICES / NORMALES / UVS)</span>
+                      <span className="text-cyan-300 tabular-nums">
+                        {selectedPart.meshData?.vertices?.length || 24} vértices • {selectedPart.meshData?.faces?.length || 12} tris
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={handleSubdivideSelectedPart}
+                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-cyan-300 transition cursor-pointer"
+                      >
+                        Subdividir
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSmoothSelectedPart}
+                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-purple-300 transition cursor-pointer"
+                      >
+                        Suavizar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDecimateSelectedPart}
+                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-amber-300 transition cursor-pointer"
+                      >
+                        LOD -35%
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRecomputeUVsAndNormals}
+                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-emerald-300 transition cursor-pointer"
+                      >
+                        Recalc UV/Norm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleGroundModelY0}
+                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-blue-300 transition cursor-pointer col-span-2 sm:col-span-1"
+                      >
+                        Base Y=0
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Color Picker + PBR Roughness / Metalness + Apply to All */}
                   <div className="grid grid-cols-3 gap-2 items-center p-2.5 rounded-xl bg-slate-950 border border-slate-800/90 text-[11px]">
                     <div className="flex items-center gap-2">
                       <input
@@ -1319,18 +1673,126 @@ export const Forge3DStudio: React.FC = () => {
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleSaveEditedModelToRojo}
-                    className="w-full py-2 px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Recompilar Luau --!strict &amp; Sincronizar Modelo Modificado en Rojo</span>
-                  </button>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleApplyMaterialToAllParts}
+                      className="py-2 px-3 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-200 font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      <Sliders className="w-3.5 h-3.5" />
+                      <span>Aplicar Material a Todo el Modelo</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleSaveEditedModelToRojo}
+                      className="py-2 px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Recompilar Luau &amp; Guardar en Rojo</span>
+                    </button>
+                  </div>
                 </>
               )}
             </div>
           )}
+
+          {/* Direct Importer / Exporter Bridge: Forge AI Studio <-> Roblox Studio */}
+          <div className="p-4 rounded-2xl bg-[#0d1117] border border-cyan-500/30 shadow-lg flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+              <div>
+                <h3 className="text-xs font-bold text-white font-mono">
+                  Importador / Exportador Directo Forge ↔ Roblox Studio
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  Importa o exporta modelos reales (.RBXMX, .GLTF, .OBJ+.MTL, .LUAU) conservando forma y materiales
+                </p>
+              </div>
+              <input
+                ref={import3DFileInputRef}
+                type="file"
+                accept=".rbxmx,.glb,.gltf,.obj,.fbx"
+                onChange={handleDirectImport3DFile}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => import3DFileInputRef.current?.click()}
+                disabled={loading}
+                className="px-3 py-1.5 rounded-xl bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/50 text-purple-200 font-semibold text-xs flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Importar .RBXMX / .GLB / .OBJ / .FBX</span>
+              </button>
+            </div>
+
+            {activeAsset && (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDownloadRBXMX}
+                    className="py-2 px-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-200 font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    title="Modelo XML nativo de Roblox Studio: arrástralo directamente al Viewport de Roblox Studio"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span>.RBXMX (Studio)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDownloadGLTF}
+                    className="py-2 px-2.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    title="Archivo glTF 2.0 con geometría binaria embebida y materiales PBR para el Importador 3D de Roblox Studio"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span>.GLTF 2.0 (PBR)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDownloadOBJWithMTL}
+                    className="py-2 px-2.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-200 font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    title="Malla Wavefront .OBJ acompañada de su biblioteca de materiales .MTL"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span>.OBJ + .MTL</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={downloadLuauBuilderFile}
+                    className="py-2 px-2.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-200 font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    title="Script constructor Luau --!strict con AssetService:CreateEditableMesh()"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span>.LUAU (EditableMesh)</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleExportFullPackageToRojo}
+                  disabled={exportingPackage}
+                  className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    {exportingPackage
+                      ? 'Sincronizando Paquete Completo en Rojo...'
+                      : 'Sincronizar Paquete Completo en Rojo (.rbxmx + .gltf + .obj + .mtl + .luau)'}
+                  </span>
+                </button>
+
+                {exportedFilesList.length > 0 && (
+                  <div className="p-2.5 rounded-xl bg-slate-950 border border-emerald-500/30 text-[11px] font-mono text-emerald-300">
+                    Archivos listos en <span className="text-white">rojo_workspace/src/shared/Assets3D/</span>:{' '}
+                    {exportedFilesList.join(' • ')}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* Right Column: Real 3D WebGL Viewport & Luau WorldModel Code */}
