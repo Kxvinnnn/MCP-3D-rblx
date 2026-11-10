@@ -1,0 +1,6 @@
+{
+  "name": "Forge AI - Roblox Luau & Rojo Engine",
+  "description": "FastAPI & Luau architecture backend for Roblox Studio and Rojo with Gemini structured outputs, Maid pattern, and ForgeGUI generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

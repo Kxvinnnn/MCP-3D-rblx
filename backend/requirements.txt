@@ -1,0 +1,10 @@
+# Python dependencies for Forge AI - Roblox Luau & Rojo Engine Backend
+# Compatible with Python 3.11+
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.8.0
+python-dotenv>=1.0.0
+
+# Official modern Google GenAI SDK (DO NOT use legacy google-generativeai)
+google-genai>=1.0.0
