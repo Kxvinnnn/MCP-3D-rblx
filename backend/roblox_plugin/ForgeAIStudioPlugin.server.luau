@@ -239,6 +239,37 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
             part.TextureID = partSpec.textureId
         end
 
+        -- Apply 4-channel SurfaceAppearance per MeshPart if pbrMaterial is configured
+        if type(partSpec.pbrMaterial) == "table" and part:IsA("MeshPart") then
+            local pbr = partSpec.pbrMaterial
+            local hasColor = isVerifiedRobloxAssetUri(pbr.colorMapAssetId)
+            local hasNormal = isVerifiedRobloxAssetUri(pbr.normalMapAssetId)
+            local hasRough = isVerifiedRobloxAssetUri(pbr.roughnessMapAssetId)
+            local hasMetal = isVerifiedRobloxAssetUri(pbr.metalnessMapAssetId)
+            if hasColor or hasNormal or hasRough or hasMetal then
+                local existingSA = part:FindFirstChildOfClass("SurfaceAppearance")
+                if existingSA then
+                    existingSA:Destroy()
+                end
+                local sa = Instance.new("SurfaceAppearance")
+                sa.Name = "SurfaceAppearance"
+                sa.AlphaMode = Enum.AlphaMode.Overlay
+                if hasColor then
+                    sa.ColorMap = pbr.colorMapAssetId
+                end
+                if hasNormal then
+                    sa.NormalMap = pbr.normalMapAssetId
+                end
+                if hasRough then
+                    sa.RoughnessMap = pbr.roughnessMapAssetId
+                end
+                if hasMetal then
+                    sa.MetalnessMap = pbr.metalnessMapAssetId
+                end
+                sa.Parent = part
+            end
+        end
+
         -- Add PointLight for Neon emitter parts
         if part.Material == Enum.Material.Neon then
             local light = Instance.new("PointLight")
@@ -436,6 +467,103 @@ local function optimizeSelectedGeometry(collisionMode: string, anchorAll: boolea
     return string.format("Optimizadas %d BaseParts en la selección actual (Collision: %s, Anchored: %s).", partCount, collisionMode, tostring(anchorAll))
 end
 
+-- Push selected Model or BaseParts from Roblox Studio back to Forge AI Studio incrementally (Pillar C Bidirectional Sync)
+local function pushSelectedModelToForgeStudio(): string
+    local selected = Selection:Get()
+    if #selected == 0 then
+        return "Selecciona un Model o MeshParts en Roblox Studio para sincronizar hacia Forge."
+    end
+
+    local targetModel: Model? = nil
+    local collectedParts: { BasePart } = {}
+
+    for _, inst in ipairs(selected) do
+        if inst:IsA("Model") and not targetModel then
+            targetModel = inst
+            for _, child in ipairs(inst:GetDescendants()) do
+                if child:IsA("BasePart") then
+                    table.insert(collectedParts, child)
+                end
+            end
+        elseif inst:IsA("BasePart") then
+            table.insert(collectedParts, inst)
+            if not targetModel and inst.Parent and inst.Parent:IsA("Model") and inst.Parent ~= Workspace then
+                targetModel = inst.Parent
+            end
+        end
+    end
+
+    if #collectedParts == 0 then
+        return "La selección no contiene BaseParts ni MeshParts."
+    end
+
+    local modelName = if targetModel then targetModel.Name else "StudioSyncedModel"
+    local serializedParts = {}
+
+    for _, part in ipairs(collectedParts) do
+        local rx, ry, rz = part.CFrame:ToEulerAnglesXYZ()
+        local geomVal = part:FindFirstChild("ForgeMeshGeometryJSON")
+        local meshData = nil
+        if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
+            local okDec, decoded = pcall(function()
+                return HttpService:JSONDecode(geomVal.Value)
+            end)
+            if okDec and type(decoded) == "table" then
+                meshData = decoded
+            end
+        end
+
+        local sa = part:FindFirstChildOfClass("SurfaceAppearance")
+        local pbrSpec = nil
+        if sa then
+            pbrSpec = {
+                materialName = part.Name .. "_PBR",
+                albedoHex = string.format("#%02x%02x%02x", math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255)),
+                roughness = part:GetAttribute("ForgePBRRoughness") or 0.35,
+                metalness = part:GetAttribute("ForgePBRMetalness") or 0.65,
+                colorMapAssetId = if isVerifiedRobloxAssetUri(sa.ColorMap) then sa.ColorMap else nil,
+                normalMapAssetId = if isVerifiedRobloxAssetUri(sa.NormalMap) then sa.NormalMap else nil,
+                roughnessMapAssetId = if isVerifiedRobloxAssetUri(sa.RoughnessMap) then sa.RoughnessMap else nil,
+                metalnessMapAssetId = if isVerifiedRobloxAssetUri(sa.MetalnessMap) then sa.MetalnessMap else nil,
+            }
+        end
+
+        table.insert(serializedParts, {
+            name = part.Name,
+            shape = "MeshPart",
+            size = { part.Size.X, part.Size.Y, part.Size.Z },
+            position = { part.Position.X, part.Position.Y, part.Position.Z },
+            rotation = { math.deg(rx), math.deg(ry), math.deg(rz) },
+            color = { math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255) },
+            material = part.Material.Name,
+            transparency = part.Transparency,
+            canCollide = part.CanCollide,
+            anchored = part.Anchored,
+            collisionFidelity = if part:IsA("MeshPart") then part.CollisionFidelity.Name else "Hull",
+            meshData = meshData,
+            pbrMaterial = pbrSpec,
+        })
+    end
+
+    local ok, resp = requestBackend("/api/v1/assets/studio-push", "POST", {
+        model_name = modelName,
+        parts = serializedParts,
+        remove_missing = false,
+    })
+
+    if not ok then
+        return "Error en Push Incremental hacia Forge: " .. tostring(resp)
+    end
+
+    return string.format(
+        "✅ Push Incremental Studio → Forge completado: %s (%d piezas sincronizadas, v%s)\nRojo .rbxmx: %s",
+        modelName,
+        #serializedParts,
+        tostring(resp.asset and resp.asset.version or 1),
+        tostring(resp.rbxmx_saved_path or "Actualizado")
+    )
+end
+
 -- UI Construction for Plugin Widget
 local root = Instance.new("ScrollingFrame")
 root.Size = UDim2.fromScale(1, 1)
@@ -557,6 +685,11 @@ btnOptimizeSel.Size = UDim2.new(1, 0, 0, 32)
 btnOptimizeSel.BackgroundColor3 = Color3.fromRGB(71, 85, 105)
 btnOptimizeSel.LayoutOrder = 8
 
+local btnPushToForge = createSmallButton(root, "Sincronizar Selección hacia Forge Studio (Push Incremental)", 1)
+btnPushToForge.Size = UDim2.new(1, 0, 0, 32)
+btnPushToForge.BackgroundColor3 = Color3.fromRGB(217, 119, 6)
+btnPushToForge.LayoutOrder = 9
+
 local outputLog = Instance.new("TextLabel")
 outputLog.Text = "Listo. Conecta FastAPI/Express en " .. BACKEND_URL
 outputLog.Font = Enum.Font.Code
@@ -567,7 +700,7 @@ outputLog.Size = UDim2.new(1, 0, 0, 180)
 outputLog.TextWrapped = true
 outputLog.TextXAlignment = Enum.TextXAlignment.Left
 outputLog.TextYAlignment = Enum.TextYAlignment.Top
-outputLog.LayoutOrder = 9
+outputLog.LayoutOrder = 10
 outputLog.Parent = root
 
 btnGenerate3D.MouseButton1Click:Connect(function()
@@ -640,4 +773,11 @@ end)
 
 btnOptimizeSel.MouseButton1Click:Connect(function()
     outputLog.Text = optimizeSelectedGeometry("Hull", true)
+end)
+
+btnPushToForge.MouseButton1Click:Connect(function()
+    outputLog.Text = "Sincronizando selección de Studio hacia Forge AI Studio..."
+    task.spawn(function()
+        outputLog.Text = pushSelectedModelToForgeStudio()
+    end)
 end)

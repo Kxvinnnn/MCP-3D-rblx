@@ -23,6 +23,11 @@ import {
   Forge3DAsset,
   MeshPart3DSpec,
   PBRTextureSet,
+  PartPBRMaterialSpec,
+  OperationHistoryEntry,
+  DegenerateGeometryReport,
+  ModelVersionDiffReport,
+  AutomatedValidationSuiteReport,
   generateProceduralPBRTextures,
   convertImageTo3DHeightmapMesh,
   ensurePartHasMeshData,
@@ -32,10 +37,15 @@ import {
   decimateMeshPartGeometry,
   recomputeNormalsAndBoxUVs,
   snapAssetToGroundY0,
+  validateAndRepairDegenerateGeometry,
+  smartSplitMeshPartGeometry,
   exportAssetToRBXMX,
   exportAssetToGLTF,
   exportAssetToOBJWithMTL,
   parseRBXMXToForgeAsset,
+  computeModelVersionDiff,
+  incrementalMergeAssets,
+  runAutomatedValidationAndSelfHeal,
 } from '../utils/roblox3DEngine.ts';
 import { RobloxWorldViewport3D } from './RobloxWorldViewport3D.tsx';
 import { FloatingTerminalLog, TerminalLogEntry } from './FloatingTerminalLog.tsx';
@@ -78,14 +88,31 @@ export const Forge3DStudio: React.FC = () => {
   const [colorMapAssetId, setColorMapAssetId] = useState<string>('');
   const [normalMapAssetId, setNormalMapAssetId] = useState<string>('');
   const [roughnessMapAssetId, setRoughnessMapAssetId] = useState<string>('');
+  const [metalnessMapAssetId, setMetalnessMapAssetId] = useState<string>('');
+  const [pbrApplyScope, setPbrApplyScope] = useState<'selected_part' | 'all_parts'>('selected_part');
 
-  // Active 3D Asset, Undo/Redo History & Part Inspector
+  // Active 3D Asset, Non-Destructive Operation History, Undo/Redo & Part Inspector
   const [activeAsset, setActiveAsset] = useState<Forge3DAsset | null>(null);
   const [undoStack, setUndoStack] = useState<Forge3DAsset[]>([]);
   const [redoStack, setRedoStack] = useState<Forge3DAsset[]>([]);
+  const [operationHistory, setOperationHistory] = useState<OperationHistoryEntry[]>([]);
+  const [lastGeometryValidation, setLastGeometryValidation] = useState<DegenerateGeometryReport | null>(null);
   const [selectedPart, setSelectedPart] = useState<MeshPart3DSpec | null>(null);
   const [inspectorTab, setInspectorTab] = useState<'viewport' | 'luau' | 'pbr'>('viewport');
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
+
+  // Pillar C: Bidirectional Sync, Conflict Detection & Incremental Merge state
+  const [versionDiffReport, setVersionDiffReport] = useState<ModelVersionDiffReport | null>(null);
+  const [incomingSyncAsset, setIncomingSyncAsset] = useState<Forge3DAsset | null>(null);
+  const [mergeStrategy, setMergeStrategy] = useState<'smart_merge' | 'accept_studio' | 'keep_forge'>('smart_merge');
+  const [selectedCompareTarget, setSelectedCompareTarget] = useState<string>('rojo_disk');
+
+  // Pillar D: Automated Validation & Self-Heal Suite state
+  const [validationSuiteReport, setValidationSuiteReport] = useState<AutomatedValidationSuiteReport | null>(null);
+  const [rojoBuildChecks, setRojoBuildChecks] = useState<
+    Array<{ id: string; title: string; passed: boolean; auto_healed: boolean; details: string }>
+  >([]);
+  const [runningValidationSuite, setRunningValidationSuite] = useState<boolean>(false);
 
   // Reusable Asset Library
   const [assetLibrary, setAssetLibrary] = useState<Forge3DAsset[]>([]);
@@ -139,16 +166,18 @@ export const Forge3DStudio: React.FC = () => {
     fetchAssetLibrary();
   }, []);
 
-  // Generate procedural PBR maps whenever PBR parameters change
+  // Generate procedural 4-channel PBR maps (Albedo, Normal, Roughness, Metalness + glTF ORM) whenever PBR parameters change
   useEffect(() => {
     const bundle = generateProceduralPBRTextures(
       pbrPreset,
       pbrColorHex,
       pbrAccentHex,
-      4
+      4,
+      pbrRoughness,
+      pbrMetalness
     );
     setPbrBundle(bundle);
-  }, [pbrPreset, pbrColorHex, pbrAccentHex]);
+  }, [pbrPreset, pbrColorHex, pbrAccentHex, pbrRoughness, pbrMetalness]);
 
   // Handle uploading a reference image for Image-to-3D or Heightmap extrusion
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -311,16 +340,88 @@ export const Forge3DStudio: React.FC = () => {
     }
   };
 
-  // Publish synthesized PBR Texture Maps + SurfaceAppearance Luau binder to Rojo
+  // Associate 4-channel PBR textures directly with Selected MeshPart or All MeshParts
+  const handleAssociatePBRWithParts = (scope: 'selected_part' | 'all_parts') => {
+    if (!activeAsset || !pbrBundle) return;
+    const targetLabel =
+      scope === 'selected_part' && selectedPart
+        ? `PBR 4 Canales (${pbrPreset}) → ${selectedPart.name}`
+        : `PBR 4 Canales (${pbrPreset}) → Todo el Modelo`;
+    pushUndoSnapshot(activeAsset, targetLabel, scope === 'selected_part' ? selectedPart?.name : undefined);
+
+    const pbrSpec: PartPBRMaterialSpec = {
+      pattern: pbrPreset,
+      albedoHex: pbrColorHex,
+      emissiveHex: pbrAccentHex,
+      roughness: pbrRoughness,
+      metalness: pbrMetalness,
+      albedoDataUrl: pbrBundle.albedoDataUrl,
+      normalDataUrl: pbrBundle.normalDataUrl,
+      roughnessDataUrl: pbrBundle.roughnessDataUrl,
+      metalnessDataUrl: pbrBundle.metalnessDataUrl,
+      colorMapAssetId: colorMapAssetId.trim() || undefined,
+      normalMapAssetId: normalMapAssetId.trim() || undefined,
+      roughnessMapAssetId: roughnessMapAssetId.trim() || undefined,
+      metalnessMapAssetId: metalnessMapAssetId.trim() || undefined,
+    };
+
+    const rgbCol = hexToRgb(pbrColorHex);
+    const updatedParts = (activeAsset.parts || []).map((part) => {
+      if (scope === 'selected_part' && selectedPart && part.name !== selectedPart.name) {
+        return part;
+      }
+      return {
+        ...part,
+        color: rgbCol,
+        roughness: pbrRoughness,
+        metalness: pbrMetalness,
+        pbrMaterial: pbrSpec,
+      };
+    });
+
+    const nextAsset: Forge3DAsset = {
+      ...activeAsset,
+      parts: updatedParts,
+      pbr_profile: {
+        albedo_hex: pbrColorHex,
+        roughness: pbrRoughness,
+        metalness: pbrMetalness,
+        emissive_hex: pbrAccentHex,
+        roblox_material: selectedPart?.material || 'Metal',
+        pattern: pbrPreset,
+      },
+    };
+    setActiveAsset(nextAsset);
+    if (selectedPart) {
+      const updatedSel = updatedParts.find((p) => p.name === selectedPart.name);
+      if (updatedSel) setSelectedPart(updatedSel);
+    }
+    addLog(
+      'success',
+      `Material PBR de 4 canales (Albedo, Normal, Roughness, Metalness + ORM glTF) asociado a ${
+        scope === 'selected_part' && selectedPart ? `'${selectedPart.name}'` : `las ${updatedParts.length} MeshParts`
+      }.`
+    );
+  };
+
+  // Publish synthesized 4-channel PBR Texture Maps + SurfaceAppearance Luau binder to Rojo
   const handlePublishPBRToRojo = async () => {
     if (!pbrBundle) return;
     setLoading(true);
     setError(null);
+    const targetPartName =
+      pbrApplyScope === 'selected_part' && selectedPart ? selectedPart.name : undefined;
     const matName = activeAsset?.name
-      ? `${activeAsset.name}_${pbrPreset}`
+      ? targetPartName
+        ? `${activeAsset.name}_${targetPartName}_${pbrPreset}`
+        : `${activeAsset.name}_${pbrPreset}`
       : `Forge_${pbrPreset}`;
-    addLog('info', `Publicando mapas PBR (${matName}) y módulo SurfaceAppearance en Rojo...`);
+    addLog(
+      'info',
+      `Publicando 4 mapas PBR (${matName}: ColorMap, NormalMap, RoughnessMap, MetalnessMap) y módulo SurfaceAppearance en Rojo...`
+    );
     try {
+      handleAssociatePBRWithParts(pbrApplyScope);
       const res = await default3DEngineProcessor.publishPBRToRojo({
         material_name: matName,
         pattern: pbrPreset,
@@ -331,17 +432,22 @@ export const Forge3DStudio: React.FC = () => {
         albedo_data_url: pbrBundle.albedoDataUrl,
         normal_data_url: pbrBundle.normalDataUrl,
         roughness_data_url: pbrBundle.roughnessDataUrl,
+        metalness_data_url: pbrBundle.metalnessDataUrl,
         target_asset_id: activeAsset?.id,
+        target_part_name: targetPartName,
         color_map_asset_id: colorMapAssetId.trim() || undefined,
         normal_map_asset_id: normalMapAssetId.trim() || undefined,
         roughness_map_asset_id: roughnessMapAssetId.trim() || undefined,
+        metalness_map_asset_id: metalnessMapAssetId.trim() || undefined,
       });
       addLog(
         'rojo',
-        `PBR SurfaceAppearance publicado en ${res.luau_binder_path || `src/shared/Assets3D/${matName}_SurfaceAppearance.luau`} (${
+        `PBR 4 Canales SurfaceAppearance publicado en ${
+          res.luau_binder_path || `src/shared/Assets3D/${matName}_SurfaceAppearance.luau`
+        } (${
           res.is_cloud_published
             ? 'AssetIds verificados de Roblox Cloud asociados'
-            : 'PNGs locales en Textures/ + EditableImage runtime'
+            : '4 PNGs guardados en Textures/ + EditableImage runtime'
         })`
       );
       if (activeAsset) {
@@ -560,10 +666,44 @@ export const Forge3DStudio: React.FC = () => {
     }, 0);
   };
 
-  const pushUndoSnapshot = (snapshot: Forge3DAsset) => {
+  const pushUndoSnapshot = (
+    snapshot: Forge3DAsset,
+    operationLabel: string = 'Edición Geométrica',
+    targetPartName?: string
+  ) => {
     const cloned = JSON.parse(JSON.stringify(snapshot)) as Forge3DAsset;
     setUndoStack((prev) => [...prev.slice(-19), cloned]);
     setRedoStack([]);
+    const totalVerts = (cloned.parts || []).reduce(
+      (s, p) => s + (p.meshData?.vertices?.length || 24),
+      0
+    );
+    const entry: OperationHistoryEntry = {
+      id: `op-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toTimeString().split(' ')[0],
+      operationType: 'subdivide',
+      partName: targetPartName || cloned.name,
+      summary: operationLabel,
+      vertexBefore: totalVerts,
+      vertexAfter: totalVerts,
+      triangleBefore: cloned.poly_count || 0,
+      triangleAfter: cloned.poly_count || 0,
+      snapshot: cloned,
+    };
+    setOperationHistory((prev) => [entry, ...prev.slice(0, 14)]);
+  };
+
+  const handleRevertToHistoryEntry = (entry: OperationHistoryEntry) => {
+    if (!activeAsset) return;
+    const currentClone = JSON.parse(JSON.stringify(activeAsset)) as Forge3DAsset;
+    setRedoStack((prev) => [...prev.slice(-19), currentClone]);
+    const restored = JSON.parse(JSON.stringify(entry.snapshot)) as Forge3DAsset;
+    setActiveAsset(restored);
+    setSelectedPart(restored.parts?.[0] || null);
+    addLog(
+      'info',
+      `Historial No Destructivo: Revertido al punto '${entry.summary}' (${entry.timestamp} • ${restored.parts?.length || 0} piezas, ${restored.poly_count} tris).`
+    );
   };
 
   const handleUndo = () => {
@@ -596,9 +736,12 @@ export const Forge3DStudio: React.FC = () => {
     addLog('info', `Editor 3D: Rehacer aplicado (${nextState.parts?.length || 0} piezas, ${nextState.poly_count} tris).`);
   };
 
-  const handleUpdateSelectedPart = (updater: (part: MeshPart3DSpec) => MeshPart3DSpec) => {
+  const handleUpdateSelectedPart = (
+    updater: (part: MeshPart3DSpec) => MeshPart3DSpec,
+    operationLabel: string = 'Modificar Pieza'
+  ) => {
     if (!activeAsset || !selectedPart) return;
-    pushUndoSnapshot(activeAsset);
+    pushUndoSnapshot(activeAsset, operationLabel, selectedPart.name);
     const nextPart = updater(selectedPart);
     setSelectedPart(nextPart);
     const updatedParts = (activeAsset.parts || []).map((p) =>
@@ -667,10 +810,10 @@ export const Forge3DStudio: React.FC = () => {
       const next = subdivideMeshPartGeometry(prev);
       addLog(
         'info',
-        `Geometría subdividida en '${prev.name}': ${next.meshData?.vertices.length || 0} vértices, ${next.meshData?.faces.length || 0} triángulos.`
+        `Geometría subdividida en '${prev.name}' (UVs y normales preservadas): ${next.meshData?.vertices.length || 0} vértices, ${next.meshData?.faces.length || 0} triángulos.`
       );
       return next;
-    });
+    }, `Subdividir (${selectedPart.name})`);
   };
 
   const handleSmoothSelectedPart = () => {
@@ -679,10 +822,10 @@ export const Forge3DStudio: React.FC = () => {
       const next = smoothMeshPartGeometry(prev, 0.35);
       addLog(
         'info',
-        `Suavizado Laplaciano aplicado a '${prev.name}' con normales recalculadas.`
+        `Suavizado Laplaciano aplicado a '${prev.name}' con normales y UVs preservadas.`
       );
       return next;
-    });
+    }, `Suavizar (${selectedPart.name})`);
   };
 
   const handleDecimateSelectedPart = () => {
@@ -694,7 +837,7 @@ export const Forge3DStudio: React.FC = () => {
         `Simplificación geométrica LOD (-35%) en '${prev.name}': ${next.meshData?.faces.length || 0} triángulos.`
       );
       return next;
-    });
+    }, `LOD -35% (${selectedPart.name})`);
   };
 
   const handleRecomputeUVsAndNormals = () => {
@@ -706,12 +849,54 @@ export const Forge3DStudio: React.FC = () => {
         `Normales suaves y coordenadas UV triplanares recalculadas en '${prev.name}'.`
       );
       return next;
+    }, `Recalcular UV/Normales (${selectedPart.name})`);
+  };
+
+  const handleSmartSplitSelectedPart = () => {
+    if (!activeAsset || !selectedPart) return;
+    pushUndoSnapshot(activeAsset, `División Inteligente (${selectedPart.name})`, selectedPart.name);
+    const { splitParts, mode, summary } = smartSplitMeshPartGeometry(selectedPart);
+    if (splitParts.length <= 1) {
+      addLog('info', summary);
+      return;
+    }
+    const nextParts: MeshPart3DSpec[] = [];
+    for (const p of activeAsset.parts) {
+      if (p.name === selectedPart.name) {
+        nextParts.push(...splitParts);
+      } else {
+        nextParts.push(p);
+      }
+    }
+    setActiveAsset({
+      ...activeAsset,
+      poly_count: recomputeAssetPolyCount(nextParts),
+      parts: nextParts,
     });
+    setSelectedPart(splitParts[0]);
+    addLog('success', `[Smart Split • ${mode}] ${summary}`);
+  };
+
+  const handleValidateAndRepairSelectedPart = () => {
+    if (!activeAsset || !selectedPart) return;
+    pushUndoSnapshot(activeAsset, `Validar/Reparar Geometría (${selectedPart.name})`, selectedPart.name);
+    const { repairedPart, report } = validateAndRepairDegenerateGeometry(selectedPart);
+    setLastGeometryValidation(report);
+    const updatedParts = activeAsset.parts.map((p) =>
+      p.name === selectedPart.name ? repairedPart : p
+    );
+    setActiveAsset({
+      ...activeAsset,
+      poly_count: recomputeAssetPolyCount(updatedParts),
+      parts: updatedParts,
+    });
+    setSelectedPart(repairedPart);
+    addLog('success', `Validación Geométrica: ${report.summary}`);
   };
 
   const handleGroundModelY0 = () => {
     if (!activeAsset) return;
-    pushUndoSnapshot(activeAsset);
+    pushUndoSnapshot(activeAsset, 'Alinear Modelo a Base Y=0');
     const grounded = snapAssetToGroundY0(activeAsset);
     setActiveAsset(grounded);
     if (selectedPart) {
@@ -881,6 +1066,8 @@ export const Forge3DStudio: React.FC = () => {
                 albedo_data_url: pbrBundle.albedoDataUrl,
                 normal_data_url: pbrBundle.normalDataUrl,
                 roughness_data_url: pbrBundle.roughnessDataUrl,
+                metalness_data_url: pbrBundle.metalnessDataUrl,
+                metallic_roughness_data_url: pbrBundle.metallicRoughnessDataUrl,
               }
             : undefined,
           save_to_rojo: true,
@@ -920,27 +1107,31 @@ export const Forge3DStudio: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
+      const payload: Record<string, any> = {
+        asset_id: activeAsset.id,
+        asset_name: activeAsset.name,
+      };
+      if (selectedCompareTarget.startsWith('v:')) {
+        payload.restore_version = Number(selectedCompareTarget.replace('v:', ''));
+      }
       const res = await fetch('/api/v1/assets/pull-from-rojo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ asset_name: activeAsset.name }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.detail || data.error || 'No se pudo sincronizar el archivo .rbxmx desde Rojo');
       }
       if (data.rbxmx_content) {
-        pushUndoSnapshot(activeAsset);
-        const syncedAsset = parseRBXMXToForgeAsset(data.rbxmx_content, `${activeAsset.name}.rbxmx`);
-        setActiveAsset({
-          ...syncedAsset,
-          id: activeAsset.id,
-          luau_code: data.luau_content || syncedAsset.luau_code,
-        });
-        setSelectedPart(syncedAsset.parts?.[0] || null);
+        const incomingAsset = parseRBXMXToForgeAsset(data.rbxmx_content, `${activeAsset.name}.rbxmx`);
+        incomingAsset.luau_code = data.luau_content || incomingAsset.luau_code;
+        const diff = computeModelVersionDiff(activeAsset, incomingAsset);
+        setIncomingSyncAsset(incomingAsset);
+        setVersionDiffReport(diff);
         addLog(
           'rojo',
-          `Sincronización bidireccional desde Rojo completada: '${syncedAsset.name}' (${syncedAsset.parts.length} MeshParts, ${syncedAsset.poly_count} tris).`
+          `[Comparador Bidireccional] +${diff.addedCount} nuevas, ~${diff.modifiedCount} modificadas, !${diff.conflictCount} conflictos. Selecciona estrategia para aplicar sincronización incremental.`
         );
       }
     } catch (err: any) {
@@ -948,6 +1139,72 @@ export const Forge3DStudio: React.FC = () => {
       addLog('error', err.message || 'Error en pull-from-rojo');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleApplyIncrementalMerge = async () => {
+    if (!activeAsset || !incomingSyncAsset) return;
+    pushUndoSnapshot(
+      activeAsset,
+      `Sync Incremental (${mergeStrategy})`
+    );
+    const { mergedAsset, summary } = incrementalMergeAssets(
+      activeAsset,
+      incomingSyncAsset,
+      mergeStrategy
+    );
+    setActiveAsset(mergedAsset);
+    setSelectedPart(mergedAsset.parts?.[0] || null);
+    setVersionDiffReport(null);
+    setIncomingSyncAsset(null);
+    addLog(
+      'success',
+      summary
+    );
+  };
+
+  const handleRunAutomatedValidationSuite = async () => {
+    if (!activeAsset) return;
+    setRunningValidationSuite(true);
+    setError(null);
+    addLog(
+      'info',
+      `Ejecutando Suite Automatizada E2E (Geometría, PBR 4 Canales, Roundtrip .RBXMX/.GLTF/.OBJ y Rojo Build) en '${activeAsset.name}'...`
+    );
+    try {
+      const report = runAutomatedValidationAndSelfHeal(activeAsset, pbrBundle);
+      setValidationSuiteReport(report);
+      if (report.autoHealedCount > 0) {
+        pushUndoSnapshot(activeAsset, 'Auto-Recuperación Suite Validación');
+        setActiveAsset(report.healedAsset);
+        setSelectedPart(report.healedAsset.parts?.[0] || null);
+      }
+
+      const rojoRes = await fetch('/api/v1/assets/validate-rojo-build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asset_name: activeAsset.name,
+          auto_heal: true,
+        }),
+      });
+      if (rojoRes.ok) {
+        const rojoData = await rojoRes.json();
+        setRojoBuildChecks(rojoData.checks || []);
+        if (Array.isArray(rojoData.auto_healed_actions) && rojoData.auto_healed_actions.length > 0) {
+          addLog('rojo', `Auto-Recuperación Rojo Build: ${rojoData.auto_healed_actions.join(' | ')}`);
+        }
+      }
+      setInspectorTab('pbr');
+      addLog(
+        'success',
+        `Suite E2E completada: ${report.passedChecks}/${report.totalChecks} pruebas superadas (${report.score}% • ${report.autoHealedCount} auto-reparaciones).`
+      );
+    } catch (err: any) {
+      setError(err.message || 'Error en suite de validación');
+      addLog('error', `Error en validación E2E: ${err.message}`);
+    } finally {
+      setRunningValidationSuite(false);
     }
   };
 
@@ -1285,7 +1542,7 @@ export const Forge3DStudio: React.FC = () => {
                 </div>
 
                 {pbrBundle && (
-                  <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800">
                     <div className="flex flex-col items-center gap-1">
                       <img
                         src={pbrBundle.albedoDataUrl}
@@ -1328,7 +1585,21 @@ export const Forge3DStudio: React.FC = () => {
                         ↓ Roughness.png
                       </a>
                     </div>
-                    <div className="col-span-3 grid grid-cols-1 sm:grid-cols-3 gap-1.5 pt-2 border-t border-slate-800/80">
+                    <div className="flex flex-col items-center gap-1">
+                      <img
+                        src={pbrBundle.metalnessDataUrl}
+                        alt="Metalness Map"
+                        className="w-full aspect-square rounded-lg border border-slate-700 object-cover"
+                      />
+                      <a
+                        href={pbrBundle.metalnessDataUrl}
+                        download={`PBR_${pbrPreset}_MetalnessMap.png`}
+                        className="text-[10px] font-mono text-emerald-400 hover:underline"
+                      >
+                        ↓ Metalness.png
+                      </a>
+                    </div>
+                    <div className="col-span-2 sm:col-span-4 grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-2 border-t border-slate-800/80">
                       <input
                         type="text"
                         value={colorMapAssetId}
@@ -1347,18 +1618,59 @@ export const Forge3DStudio: React.FC = () => {
                         type="text"
                         value={roughnessMapAssetId}
                         onChange={(e) => setRoughnessMapAssetId(e.target.value)}
-                        placeholder="Roughness rbxassetid:// (opcional)"
+                        placeholder="RoughnessMap rbxassetid:// (opcional)"
                         className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-200 placeholder-slate-500"
                       />
+                      <input
+                        type="text"
+                        value={metalnessMapAssetId}
+                        onChange={(e) => setMetalnessMapAssetId(e.target.value)}
+                        placeholder="MetalnessMap rbxassetid:// (opcional)"
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-200 placeholder-slate-500"
+                      />
+                    </div>
+                    <div className="col-span-2 sm:col-span-4 flex flex-wrap items-center justify-between gap-2 pt-1">
+                      <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                        <span className="text-slate-400">Asociación PBR:</span>
+                        <button
+                          type="button"
+                          onClick={() => setPbrApplyScope('selected_part')}
+                          className={`px-2 py-1 rounded border cursor-pointer ${
+                            pbrApplyScope === 'selected_part'
+                              ? 'bg-cyan-950/80 border-cyan-500 text-cyan-300'
+                              : 'bg-slate-950 border-slate-800 text-slate-400'
+                          }`}
+                        >
+                          Solo MeshPart ({selectedPart?.name || 'Activa'})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPbrApplyScope('all_parts')}
+                          className={`px-2 py-1 rounded border cursor-pointer ${
+                            pbrApplyScope === 'all_parts'
+                              ? 'bg-amber-950/80 border-amber-500 text-amber-300'
+                              : 'bg-slate-950 border-slate-800 text-slate-400'
+                          }`}
+                        >
+                          Todo el Modelo
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleAssociatePBRWithParts(pbrApplyScope)}
+                        className="px-2.5 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 text-[10px] font-semibold cursor-pointer"
+                      >
+                        Aplicar PBR 4 Canales en Visor 3D
+                      </button>
                     </div>
                     <button
                       type="button"
                       onClick={handlePublishPBRToRojo}
                       disabled={loading}
-                      className="col-span-3 mt-1 py-2 px-3 rounded-lg bg-amber-600/90 hover:bg-amber-500 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                      className="col-span-2 sm:col-span-4 mt-1 py-2 px-3 rounded-lg bg-amber-600/90 hover:bg-amber-500 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
                     >
                       <Upload className="w-3.5 h-3.5" />
-                      Publicar Texturas PBR + SurfaceAppearance.luau en Rojo
+                      Publicar 4 Mapas PBR + SurfaceAppearance.luau en Rojo
                     </button>
                   </div>
                 )}
@@ -1718,15 +2030,15 @@ export const Forge3DStudio: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Real Mesh Topology Modifiers */}
+                  {/* Real Mesh Topology Modifiers (Pillar A Non-Destructive Editor) */}
                   <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/90 flex flex-col gap-2">
                     <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-                      <span>OPERADORES DE MALLA 3D REAL (VÉRTICES / NORMALES / UVS)</span>
+                      <span>OPERADORES DE MALLA 3D NO DESTRUCTIVOS (UVS Y NORMALES INTACTAS)</span>
                       <span className="text-cyan-300 tabular-nums">
                         {selectedPart.meshData?.vertices?.length || 24} vértices • {selectedPart.meshData?.faces?.length || 12} tris
                       </span>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                       <button
                         type="button"
                         onClick={handleSubdivideSelectedPart}
@@ -1757,12 +2069,69 @@ export const Forge3DStudio: React.FC = () => {
                       </button>
                       <button
                         type="button"
+                        onClick={handleSmartSplitSelectedPart}
+                        className="px-2 py-1.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900/70 border border-indigo-500/40 text-[11px] font-semibold text-indigo-200 transition cursor-pointer"
+                        title="Divide la malla por islas topológicas conectadas o por su plano mediano principal"
+                      >
+                        ✂ División Inteligente
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleValidateAndRepairSelectedPart}
+                        className="px-2 py-1.5 rounded-lg bg-emerald-950/70 hover:bg-emerald-900/70 border border-emerald-500/40 text-[11px] font-semibold text-emerald-200 transition cursor-pointer"
+                        title="Detecta y repara triángulos degenerados de área cero, índices duplicados y vértices huérfanos"
+                      >
+                        ✓ Validar/Reparar Malla
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleAssociatePBRWithParts('selected_part')}
+                        className="px-2 py-1.5 rounded-lg bg-amber-950/70 hover:bg-amber-900/70 border border-amber-500/40 text-[11px] font-semibold text-amber-200 transition cursor-pointer"
+                        title="Asocia los 4 canales PBR actuales exclusivamente a esta MeshPart"
+                      >
+                        🎨 PBR 4-Map a Pieza
+                      </button>
+                      <button
+                        type="button"
                         onClick={handleGroundModelY0}
-                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-blue-300 transition cursor-pointer col-span-2 sm:col-span-1"
+                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-semibold text-blue-300 transition cursor-pointer"
                       >
                         Base Y=0
                       </button>
                     </div>
+
+                    {lastGeometryValidation && (
+                      <div className="p-2 rounded-lg bg-slate-900/90 border border-emerald-500/30 text-[10px] font-mono text-emerald-300 flex items-center justify-between">
+                        <span>{lastGeometryValidation.summary}</span>
+                        <span className="text-slate-400">
+                          {lastGeometryValidation.verticesAfter}v • {lastGeometryValidation.trianglesAfter}f
+                        </span>
+                      </div>
+                    )}
+
+                    {operationHistory.length > 0 && (
+                      <div className="pt-1.5 border-t border-slate-800/80 flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                          <span>HISTORIAL DE OPERACIONES NO DESTRUCTIVO (CLIC PARA REVERTIR)</span>
+                          <span>{operationHistory.length} estados</span>
+                        </div>
+                        <div className="max-h-24 overflow-y-auto flex flex-col gap-1 pr-1">
+                          {operationHistory.map((op) => (
+                            <button
+                              key={op.id}
+                              type="button"
+                              onClick={() => handleRevertToHistoryEntry(op)}
+                              className="w-full text-left px-2 py-1 rounded bg-slate-900/80 hover:bg-slate-800 border border-slate-800 text-[10px] font-mono flex items-center justify-between text-slate-300 cursor-pointer"
+                            >
+                              <span className="truncate text-cyan-300">{op.summary}</span>
+                              <span className="text-slate-400 shrink-0 ml-2">
+                                {op.timestamp} • {op.snapshot.parts?.length || 0}p / {op.triangleAfter}t
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Color Picker + PBR Roughness / Metalness + Apply to All */}
@@ -1937,14 +2306,120 @@ export const Forge3DStudio: React.FC = () => {
 
                   <button
                     type="button"
-                    onClick={handlePullFromRojo}
-                    disabled={loading}
-                    className="w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-cyan-200 font-semibold text-xs flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
-                    title="Sincronización bidireccional: importa los cambios realizados sobre el archivo .rbxmx/.luau en el workspace de Rojo"
+                    onClick={handleRunAutomatedValidationSuite}
+                    disabled={runningValidationSuite}
+                    className="w-full py-2.5 px-3 rounded-xl bg-indigo-600/25 hover:bg-indigo-600/40 border border-indigo-500/50 text-indigo-200 font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
                   >
-                    <Upload className="w-4 h-4 shrink-0" />
-                    <span>Sincronizar Cambios desde Rojo (Pull .RBXMX)</span>
+                    <Sparkles className="w-4 h-4 shrink-0" />
+                    <span>
+                      {runningValidationSuite
+                        ? 'Ejecutando Pruebas Roundtrip...'
+                        : 'Pruebas Automatizadas E2E & Auto-Heal (Rojo Build)'}
+                    </span>
                   </button>
+                </div>
+
+                {/* Pillar C: Bidirectional Sync, Conflict Detection & Version Comparison */}
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-cyan-300 font-mono">
+                      Sincronización Bidireccional Incremental &amp; Comparador de Versiones (v{activeAsset.version || 1})
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={selectedCompareTarget}
+                        onChange={(e) => setSelectedCompareTarget(e.target.value)}
+                        className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-200"
+                      >
+                        <option value="rojo_disk">Disco Rojo (.rbxmx / Studio)</option>
+                        {(activeAsset.version_history || []).map((vh) => (
+                          <option key={`vh-${vh.version}`} value={`v:${vh.version}`}>
+                            Versión Histórica v{vh.version} ({vh.part_count}p • {vh.poly_count}t)
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={handlePullFromRojo}
+                        disabled={loading}
+                        className="px-2.5 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 font-semibold text-[11px] cursor-pointer"
+                      >
+                        Comparar / Detectar Conflictos
+                      </button>
+                    </div>
+                  </div>
+
+                  {versionDiffReport && (
+                    <div className="p-2.5 rounded-lg bg-slate-900/90 border border-cyan-500/30 flex flex-col gap-2 text-[11px]">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-white font-semibold">
+                          Comparación de Piezas ({versionDiffReport.entries.length} analizadas)
+                        </span>
+                        <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300">
+                            +{versionDiffReport.addedCount} nuevas
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-amber-950 text-amber-300">
+                            ~{versionDiffReport.modifiedCount} mod
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-red-950 text-red-300">
+                            !{versionDiffReport.conflictCount} conflictos
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="max-h-28 overflow-y-auto flex flex-col gap-1 pr-1 font-mono text-[10px]">
+                        {versionDiffReport.entries.map((entry) => (
+                          <div
+                            key={entry.partName}
+                            className="px-2 py-1 rounded bg-slate-950 border border-slate-800 flex items-center justify-between"
+                          >
+                            <span className="text-slate-200 font-semibold">{entry.partName}</span>
+                            <span
+                              className={
+                                entry.status === 'conflict'
+                                  ? 'text-red-400'
+                                  : entry.status === 'modified'
+                                  ? 'text-amber-300'
+                                  : entry.status === 'added_in_studio'
+                                  ? 'text-emerald-400'
+                                  : 'text-slate-400'
+                              }
+                            >
+                              {entry.status.toUpperCase()}
+                              {entry.changedFields.length > 0
+                                ? ` (${entry.changedFields.join(', ')})`
+                                : ''}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800">
+                        <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                          <span className="text-slate-400">Estrategia:</span>
+                          <select
+                            value={mergeStrategy}
+                            onChange={(e) => setMergeStrategy(e.target.value as any)}
+                            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white"
+                          >
+                            <option value="smart_merge">
+                              Smart Merge (CFrame/Material de Studio + Geometría/PBR de Forge)
+                            </option>
+                            <option value="accept_studio">Aceptar Todo de Studio / Versión</option>
+                            <option value="keep_forge">Mantener Conflictos de Forge</option>
+                          </select>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleApplyIncrementalMerge}
+                          className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] cursor-pointer"
+                        >
+                          Aplicar Sincronización Incremental (Sin Reemplazar Todo)
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {exportedFilesList.length > 0 && (
@@ -2111,14 +2586,14 @@ export const Forge3DStudio: React.FC = () => {
                 {pbrBundle && (
                   <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col gap-3">
                     <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wider font-mono">
-                      Mapas PBR Activos (SurfaceAppearance: ColorMap, NormalMap, RoughnessMap)
+                      Mapas PBR Activos de 4 Canales (SurfaceAppearance: ColorMap, NormalMap, RoughnessMap, MetalnessMap)
                     </h4>
-                    <div className="grid grid-cols-3 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       <div className="flex flex-col gap-1.5">
                         <img
                           src={pbrBundle.albedoDataUrl}
                           alt="ColorMap"
-                          className="w-full h-32 object-cover rounded-lg border border-slate-700"
+                          className="w-full h-28 object-cover rounded-lg border border-slate-700"
                         />
                         <span className="text-xs font-semibold text-white">Albedo / ColorMap</span>
                       </div>
@@ -2126,7 +2601,7 @@ export const Forge3DStudio: React.FC = () => {
                         <img
                           src={pbrBundle.normalDataUrl}
                           alt="NormalMap"
-                          className="w-full h-32 object-cover rounded-lg border border-slate-700"
+                          className="w-full h-28 object-cover rounded-lg border border-slate-700"
                         />
                         <span className="text-xs font-semibold text-white">NormalMap (Tangent)</span>
                       </div>
@@ -2134,13 +2609,95 @@ export const Forge3DStudio: React.FC = () => {
                         <img
                           src={pbrBundle.roughnessDataUrl}
                           alt="RoughnessMap"
-                          className="w-full h-32 object-cover rounded-lg border border-slate-700"
+                          className="w-full h-28 object-cover rounded-lg border border-slate-700"
                         />
                         <span className="text-xs font-semibold text-white">RoughnessMap</span>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <img
+                          src={pbrBundle.metalnessDataUrl}
+                          alt="MetalnessMap"
+                          className="w-full h-28 object-cover rounded-lg border border-slate-700"
+                        />
+                        <span className="text-xs font-semibold text-white">MetalnessMap</span>
                       </div>
                     </div>
                   </div>
                 )}
+
+                {/* Pillar D: Automated Validation & Self-Heal Suite Report */}
+                <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 className="text-xs font-bold text-cyan-300 uppercase tracking-wider font-mono">
+                        Suite de Automatización, Validación Roundtrip y Auto-Recuperación
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        Pruebas de importación/exportación (.RBXMX, .GLTF, .OBJ), geometría degenerada, 4 canales PBR y Rojo Build
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRunAutomatedValidationSuite}
+                      disabled={runningValidationSuite}
+                      className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs cursor-pointer disabled:opacity-50"
+                    >
+                      {runningValidationSuite ? 'Validando...' : 'Ejecutar Suite Completa Ahora'}
+                    </button>
+                  </div>
+
+                  {validationSuiteReport && (
+                    <div className="flex flex-col gap-2">
+                      <div className="p-2.5 rounded-lg bg-slate-950 border border-emerald-500/40 text-xs font-mono text-emerald-300">
+                        Suite E2E: {validationSuiteReport.passedChecks}/{validationSuiteReport.totalChecks} verificaciones superadas ({validationSuiteReport.score}% • {validationSuiteReport.autoHealedCount} auto-reparaciones)
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {validationSuiteReport.checks.map((chk) => (
+                          <div
+                            key={chk.id}
+                            className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex flex-col gap-1"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-white">{chk.title}</span>
+                              <span
+                                className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                                  chk.passed
+                                    ? 'bg-emerald-950 text-emerald-300'
+                                    : 'bg-red-950 text-red-300'
+                                }`}
+                              >
+                                {chk.passed ? 'PASS' : 'FAIL'}
+                                {chk.autoHealed ? ' • AUTO-HEALED' : ''}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-400">{chk.details}</p>
+                          </div>
+                        ))}
+                        {rojoBuildChecks.map((rchk) => (
+                          <div
+                            key={rchk.id}
+                            className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex flex-col gap-1"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-white">{rchk.title}</span>
+                              <span
+                                className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                                  rchk.passed
+                                    ? 'bg-emerald-950 text-emerald-300'
+                                    : 'bg-red-950 text-red-300'
+                                }`}
+                              >
+                                {rchk.passed ? 'ROJO OK' : 'FAIL'}
+                                {rchk.auto_healed ? ' • AUTO-HEALED' : ''}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-400">{rchk.details}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>

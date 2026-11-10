@@ -958,17 +958,22 @@ app.post('/api/v1/assets/export-roblox-package', (req, res) => {
   }
 });
 
-// Publish browser-synthesized PBR maps (ColorMap, NormalMap, RoughnessMap) + SurfaceAppearance Luau binder to Rojo
+// Publish browser-synthesized 4-channel PBR maps (ColorMap, NormalMap, RoughnessMap, MetalnessMap) + SurfaceAppearance Luau binder to Rojo
 app.post('/api/v1/assets/publish-pbr', (req, res) => {
   try {
     const {
       material_name = 'ForgePBRMaterial',
+      pattern = 'hex_plate',
       albedo_data_url = '',
       normal_data_url = '',
       roughness_data_url = '',
+      metalness_data_url = '',
       roughness = 0.35,
       metalness = 0.75,
       albedo_hex = '#38bdf8',
+      emissive_hex = '#06b6d4',
+      target_asset_id = '',
+      target_part_name = '',
       color_map_asset_id = '',
       normal_map_asset_id = '',
       roughness_map_asset_id = '',
@@ -983,6 +988,7 @@ app.post('/api/v1/assets/publish-pbr', (req, res) => {
       [albedo_data_url, 'ColorMap.png'],
       [normal_data_url, 'NormalMap.png'],
       [roughness_data_url, 'RoughnessMap.png'],
+      [metalness_data_url, 'MetalnessMap.png'],
     ];
 
     for (const [dataUrl, suffix] of mapEntries) {
@@ -996,6 +1002,14 @@ app.post('/api/v1/assets/publish-pbr', (req, res) => {
       }
     }
 
+    const verifiedColor = validatePublishedRobloxMeshId(color_map_asset_id);
+    const verifiedNormal = validatePublishedRobloxMeshId(normal_map_asset_id);
+    const verifiedRough = validatePublishedRobloxMeshId(roughness_map_asset_id);
+    const verifiedMetal = validatePublishedRobloxMeshId(metalness_map_asset_id);
+    const isCloudPublished = Boolean(
+      verifiedColor || verifiedNormal || verifiedRough || verifiedMetal
+    );
+
     const pbrLuau = generatePBRSurfaceAppearanceLuau(
       safeMat,
       textureFolder,
@@ -1003,28 +1017,81 @@ app.post('/api/v1/assets/publish-pbr', (req, res) => {
       Number(metalness),
       String(albedo_hex),
       {
-        colorMapId: String(color_map_asset_id || ''),
-        normalMapId: String(normal_map_asset_id || ''),
-        roughnessMapId: String(roughness_map_asset_id || ''),
-        metalnessMapId: String(metalness_map_asset_id || ''),
+        colorMapId: verifiedColor,
+        normalMapId: verifiedNormal,
+        roughnessMapId: verifiedRough,
+        metalnessMapId: verifiedMetal,
       }
     );
     const luauFileName = `${safeMat}_SurfaceAppearance.luau`;
     const luauSavedPath = writeToRojoWorkspace('src/shared/Assets3D', luauFileName, pbrLuau);
 
+    // Associate published PBR profile with target_asset_id (and optionally specific target_part_name)
+    let updatedAsset: any = null;
+    if (target_asset_id) {
+      const assets = loadAssetsLibrary();
+      const found = assets.find((a: any) => a.id === target_asset_id || a.name === target_asset_id);
+      if (found) {
+        found.pbr_profile = {
+          ...(found.pbr_profile || {}),
+          albedo_hex: String(albedo_hex),
+          emissive_hex: String(emissive_hex),
+          roughness: Number(roughness),
+          metalness: Number(metalness),
+          pattern: String(pattern),
+          albedo_asset_path: savedTextures['ColorMap.png'] || undefined,
+          normal_asset_path: savedTextures['NormalMap.png'] || undefined,
+          roughness_asset_path: savedTextures['RoughnessMap.png'] || undefined,
+          metalness_asset_path: savedTextures['MetalnessMap.png'] || undefined,
+          color_map_asset_id: verifiedColor || undefined,
+          normal_map_asset_id: verifiedNormal || undefined,
+          roughness_map_asset_id: verifiedRough || undefined,
+          metalness_map_asset_id: verifiedMetal || undefined,
+        };
+        if (Array.isArray(found.parts)) {
+          found.parts = found.parts.map((pt: any) => {
+            if (!target_part_name || pt.name === target_part_name) {
+              return {
+                ...pt,
+                roughness: Number(roughness),
+                metalness: Number(metalness),
+                pbrMaterial: {
+                  pattern: String(pattern),
+                  albedoHex: String(albedo_hex),
+                  emissiveHex: String(emissive_hex),
+                  roughness: Number(roughness),
+                  metalness: Number(metalness),
+                  colorMapAssetId: verifiedColor || undefined,
+                  normalMapAssetId: verifiedNormal || undefined,
+                  roughnessMapAssetId: verifiedRough || undefined,
+                  metalnessMapAssetId: verifiedMetal || undefined,
+                },
+              };
+            }
+            return pt;
+          });
+        }
+        updatedAsset = saveAssetToLibrary(found);
+      }
+    }
+
     res.json({
       success: true,
       material_name: safeMat,
-      saved_textures: savedTextures,
-      verified_cloud_ids: {
-        color_map_id: validatePublishedRobloxMeshId(color_map_asset_id) || null,
-        normal_map_id: validatePublishedRobloxMeshId(normal_map_asset_id) || null,
-        roughness_map_id: validatePublishedRobloxMeshId(roughness_map_asset_id) || null,
-        metalness_map_id: validatePublishedRobloxMeshId(metalness_map_asset_id) || null,
+      saved_textures: Object.values(savedTextures),
+      local_files: savedTextures,
+      is_cloud_published: isCloudPublished,
+      verified_cloud_uris: {
+        ColorMap: verifiedColor,
+        NormalMap: verifiedNormal,
+        RoughnessMap: verifiedRough,
+        MetalnessMap: verifiedMetal,
       },
+      luau_binder_path: `src/shared/Assets3D/${luauFileName}`,
       luau_file: `src/shared/Assets3D/${luauFileName}`,
       luau_saved_path: luauSavedPath,
       luau_code: pbrLuau,
+      updated_asset: updatedAsset,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -1090,7 +1157,7 @@ app.get('/api/v1/assets/sync-status', (_req, res) => {
   }
 });
 
-// Phase 4 Bidirectional Sync & Version Recovery
+// Phase 4 Bidirectional Sync & Version Recovery (Roblox Studio / Rojo -> Forge AI Studio)
 app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
   try {
     const { asset_id = '', asset_name = '', restore_version } = req.body;
@@ -1102,6 +1169,8 @@ app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
       return res.status(404).json({ error: 'Asset no encontrado en la biblioteca.' });
     }
 
+    const safeName = String(targetAsset.name || 'Model3D').replace(/[^a-zA-Z0-9_]/g, '') || 'Model3D';
+
     if (restore_version !== undefined && restore_version !== null) {
       const history = Array.isArray(targetAsset.version_history) ? targetAsset.version_history : [];
       const snap = history.find((h: any) => Number(h.version) === Number(restore_version));
@@ -1112,18 +1181,32 @@ app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
       targetAsset.luau_code = snap.luau_code || targetAsset.luau_code || '';
       targetAsset.poly_count = snap.poly_count || targetAsset.poly_count || 0;
       const saved = saveAssetToLibrary(targetAsset);
+      const rbxmxSnap = buildRbxmxFromPartsServer(
+        safeName,
+        saved.parts || [],
+        saved.collision_fidelity || 'Hull',
+        saved.category || '3D Asset',
+        saved.luau_code
+      );
       return res.json({
         success: true,
         source: `version_history_v${restore_version}`,
+        rbxmx_content: rbxmxSnap,
+        luau_content: saved.luau_code,
         asset: saved,
       });
     }
 
-    const safeName = String(targetAsset.name || 'Model3D').replace(/[^a-zA-Z0-9_]/g, '') || 'Model3D';
     const rojoRoot = path.resolve(runtimeRojoPath);
     const assetsDir = path.join(rojoRoot, 'src', 'shared', 'Assets3D');
+    const rbxmxPath = path.join(assetsDir, `${safeName}.rbxmx`);
     const objPath = path.join(assetsDir, targetAsset.obj_file_name || `${safeName}.obj`);
     const luauPath = path.join(assetsDir, targetAsset.file_name || `${safeName}.luau`);
+
+    let rbxmxContent = '';
+    if (fs.existsSync(rbxmxPath)) {
+      rbxmxContent = fs.readFileSync(rbxmxPath, 'utf-8');
+    }
 
     if (fs.existsSync(objPath)) {
       const objText = fs.readFileSync(objPath, 'utf-8');
@@ -1153,11 +1236,295 @@ app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
       targetAsset.luau_code = fs.readFileSync(luauPath, 'utf-8');
     }
 
+    if (!rbxmxContent) {
+      rbxmxContent = buildRbxmxFromPartsServer(
+        safeName,
+        targetAsset.parts || [],
+        targetAsset.collision_fidelity || 'Hull',
+        targetAsset.category || '3D Asset',
+        targetAsset.luau_code
+      );
+    }
+
+    res.json({
+      success: true,
+      source: fs.existsSync(rbxmxPath) ? 'rojo_rbxmx_disk' : 'rojo_workspace_disk',
+      rbxmx_content: rbxmxContent,
+      luau_content: targetAsset.luau_code,
+      asset: targetAsset,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Roblox Studio Plugin -> Forge AI Studio Incremental Live Push
+app.post('/api/v1/assets/studio-push', (req, res) => {
+  try {
+    const {
+      model_name = 'StudioModel',
+      parts = [],
+      rbxmx_content = '',
+      merge_mode = 'incremental',
+    } = req.body;
+
+    const safeName = String(model_name).replace(/[^a-zA-Z0-9_]/g, '') || 'StudioModel';
+    const assets = loadAssetsLibrary();
+    let targetAsset = assets.find((a: any) => a.name === safeName || a.name === model_name);
+
+    const normalizedStudioParts = Array.isArray(parts)
+      ? parts.map((p: any, idx: number) => {
+          const resolvedMesh = extractGeometryFromProcessedMesh(
+            p,
+            `${safeName}.obj`,
+            safeName
+          );
+          return {
+            name: p.name || `MeshPart_${idx + 1}`,
+            shape: 'MeshPart' as const,
+            size: Array.isArray(p.size) ? p.size : [2, 2, 2],
+            position: Array.isArray(p.position) ? p.position : [0, 1, 0],
+            rotation: Array.isArray(p.rotation) ? p.rotation : [0, 0, 0],
+            color: Array.isArray(p.color) ? p.color : [148, 163, 184],
+            material: p.material || 'Metal',
+            roughness: typeof p.roughness === 'number' ? p.roughness : 0.35,
+            metalness: typeof p.metalness === 'number' ? p.metalness : 0.65,
+            transparency: typeof p.transparency === 'number' ? p.transparency : 0,
+            canCollide: p.canCollide !== false,
+            anchored: p.anchored !== false,
+            collisionFidelity: p.collisionFidelity || 'Hull',
+            pbrMaterial: p.pbrMaterial,
+            meshData: resolvedMesh,
+          };
+        })
+      : [];
+
+    if (!targetAsset) {
+      const luauCode = buildStrictLuauFromEditedParts(safeName, normalizedStudioParts, 'Hull');
+      targetAsset = {
+        id: `studio-${Date.now()}`,
+        name: safeName,
+        category: 'Roblox Studio Live Sync',
+        asset_type: 'Model3D',
+        poly_count: normalizedStudioParts.reduce(
+          (s: number, p: any) => s + (p.meshData?.faces?.length || 12),
+          0
+        ),
+        collision_fidelity: 'Hull',
+        rojo_target_folder: 'src/shared/Assets3D',
+        file_name: `${safeName}.luau`,
+        obj_file_name: `${safeName}.obj`,
+        description: `Sincronizado incrementalmente desde Roblox Studio (${normalizedStudioParts.length} MeshParts).`,
+        pbr_profile: {
+          albedo_hex: '#38bdf8',
+          roughness: 0.35,
+          metalness: 0.65,
+          emissive_hex: '#06b6d4',
+          roblox_material: 'Metal',
+          pattern: 'BrushedTitanium',
+        },
+        parts: normalizedStudioParts,
+        luau_code: luauCode,
+      };
+    } else if (merge_mode === 'incremental' && normalizedStudioParts.length > 0) {
+      // Incremental merge: update matching parts by name without wiping untouched parts
+      const studioByName = new Map<string, any>();
+      for (const sp of normalizedStudioParts) studioByName.set(sp.name, sp);
+
+      const mergedParts = (targetAsset.parts || []).map((fp: any) => {
+        const sp = studioByName.get(fp.name);
+        if (!sp) return fp;
+        studioByName.delete(fp.name);
+        const fTris = fp.meshData?.faces?.length || 0;
+        const sTris = sp.meshData?.faces?.length || 0;
+        return {
+          ...fp,
+          ...sp,
+          pbrMaterial: sp.pbrMaterial || fp.pbrMaterial,
+          meshData: sTris >= fTris ? sp.meshData : fp.meshData,
+        };
+      });
+      for (const remainingNewPart of studioByName.values()) {
+        mergedParts.push(remainingNewPart);
+      }
+      targetAsset.parts = mergedParts;
+      targetAsset.poly_count = mergedParts.reduce(
+        (s: number, p: any) => s + (p.meshData?.faces?.length || 12),
+        0
+      );
+      targetAsset.luau_code = buildStrictLuauFromEditedParts(
+        safeName,
+        mergedParts,
+        targetAsset.collision_fidelity || 'Hull'
+      );
+    }
+
+    const rbxmxOut =
+      rbxmx_content && rbxmx_content.trim().length > 0
+        ? rbxmx_content
+        : buildRbxmxFromPartsServer(
+            safeName,
+            targetAsset.parts || [],
+            targetAsset.collision_fidelity || 'Hull',
+            targetAsset.category || '3D Asset',
+            targetAsset.luau_code
+          );
+
+    writeRawAssetToRojoWorkspace('src/shared/Assets3D', `${safeName}.rbxmx`, rbxmxOut);
+    writeToRojoWorkspace('src/shared/Assets3D', `${safeName}.luau`, targetAsset.luau_code);
+
     const saved = saveAssetToLibrary(targetAsset);
     res.json({
       success: true,
-      source: 'rojo_workspace_disk',
+      merge_mode,
+      updated_parts_count: normalizedStudioParts.length,
       asset: saved,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Pillar D: Automated Rojo Build & 5-File Package Validator with Auto-Recovery
+app.post('/api/v1/assets/validate-rojo-build', (req, res) => {
+  try {
+    const { asset, auto_heal = true } = req.body;
+    const rojoRoot = path.resolve(runtimeRojoPath);
+    const projectJsonPath = path.join(rojoRoot, 'default.project.json');
+    const requiredFolders = [
+      path.join(rojoRoot, 'src', 'shared', 'Assets3D'),
+      path.join(rojoRoot, 'src', 'shared', 'Assets3D', 'Textures'),
+      path.join(rojoRoot, 'src', 'server'),
+      path.join(rojoRoot, 'src', 'client'),
+    ];
+
+    const healedActions: string[] = [];
+
+    // 1. Verify or self-heal required Rojo directories
+    for (const dir of requiredFolders) {
+      if (!fs.existsSync(dir)) {
+        if (auto_heal) {
+          fs.mkdirSync(dir, { recursive: true });
+          healedActions.push(`Directorio Rojo creado: ${path.relative(rojoRoot, dir)}`);
+        }
+      }
+    }
+
+    // 2. Verify or self-heal default.project.json
+    let projectJsonValid = false;
+    if (fs.existsSync(projectJsonPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(projectJsonPath, 'utf-8'));
+        projectJsonValid = Boolean(parsed && parsed.name && parsed.tree);
+      } catch {
+        projectJsonValid = false;
+      }
+    }
+    if (!projectJsonValid && auto_heal) {
+      const defaultProject = {
+        name: 'ForgeAIStudioGame',
+        tree: {
+          $className: 'DataModel',
+          ReplicatedStorage: {
+            $className: 'ReplicatedStorage',
+            Shared: {
+              $path: 'src/shared',
+            },
+          },
+          ServerScriptService: {
+            $className: 'ServerScriptService',
+            Server: {
+              $path: 'src/server',
+            },
+          },
+          StarterPlayer: {
+            $className: 'StarterPlayer',
+            StarterPlayerScripts: {
+              $className: 'StarterPlayerScripts',
+              Client: {
+                $path: 'src/client',
+              },
+            },
+          },
+        },
+      };
+      fs.writeFileSync(projectJsonPath, JSON.stringify(defaultProject, null, 2), 'utf-8');
+      projectJsonValid = true;
+      healedActions.push('Archivo default.project.json regenerado con árbol DataModel válido.');
+    }
+
+    // 3. Verify or self-heal all 5 package files for the active asset if provided
+    const verifiedFiles: Record<string, boolean> = {
+      luau: false,
+      rbxmx: false,
+      gltf: false,
+      obj: false,
+      mtl: false,
+    };
+
+    if (asset && asset.name) {
+      const safeName = String(asset.name).replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeModel3D';
+      const targetFolder = asset.rojo_target_folder || 'src/shared/Assets3D';
+      const assetsDir = path.join(rojoRoot, targetFolder);
+
+      const fileMap: Record<string, string> = {
+        luau: path.join(assetsDir, `${safeName}.luau`),
+        rbxmx: path.join(assetsDir, `${safeName}.rbxmx`),
+        gltf: path.join(assetsDir, `${safeName}.gltf`),
+        obj: path.join(assetsDir, `${safeName}.obj`),
+        mtl: path.join(assetsDir, `${safeName}.mtl`),
+      };
+
+      const enrichedParts = (asset.parts || []).map((p: any, idx: number) => ({
+        ...p,
+        name: p.name || `MeshPart_${idx + 1}`,
+        shape: 'MeshPart',
+        meshData: extractGeometryFromProcessedMesh(p, `${safeName}.obj`, safeName),
+      }));
+
+      for (const [ext, fPath] of Object.entries(fileMap)) {
+        const exists = fs.existsSync(fPath) && fs.statSync(fPath).size > 0;
+        if (exists) {
+          verifiedFiles[ext] = true;
+        } else if (auto_heal) {
+          const luauCode = buildStrictLuauFromEditedParts(
+            safeName,
+            enrichedParts,
+            asset.collision_fidelity || 'Hull'
+          );
+          if (ext === 'luau') {
+            writeToRojoWorkspace(targetFolder, `${safeName}.luau`, luauCode);
+          } else if (ext === 'rbxmx') {
+            const xml = buildRbxmxFromPartsServer(
+              safeName,
+              enrichedParts,
+              asset.collision_fidelity || 'Hull',
+              asset.category || '3D Asset',
+              luauCode
+            );
+            writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.rbxmx`, xml);
+          } else if (ext === 'gltf') {
+            const gltf = buildGltfFromPartsServer(safeName, enrichedParts);
+            writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.gltf`, gltf);
+          } else if (ext === 'obj' || ext === 'mtl') {
+            const { obj, mtl } = buildObjAndMtlFromPartsServer(safeName, enrichedParts);
+            writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.obj`, obj);
+            writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.mtl`, mtl);
+          }
+          verifiedFiles[ext] = fs.existsSync(fPath) && fs.statSync(fPath).size > 0;
+          if (verifiedFiles[ext]) {
+            healedActions.push(`Archivo faltante auto-generado en Rojo: ${safeName}.${ext}`);
+          }
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      project_json_valid: projectJsonValid,
+      verified_files: verifiedFiles,
+      all_five_exist: Object.values(verifiedFiles).every(Boolean),
+      healed_actions: healedActions,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });

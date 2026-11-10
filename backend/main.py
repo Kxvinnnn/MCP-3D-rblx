@@ -554,7 +554,24 @@ def save_asset_to_library(asset_data: Dict[str, Any]) -> Dict[str, Any]:
     assets = load_assets_library()
     if not asset_data.get("id"):
         asset_data["id"] = f"asset-{int(time.time() * 1000)}"
-    asset_data["created_at"] = datetime.utcnow().isoformat() + "Z"
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    existing = next((a for a in assets if a.get("id") == asset_data["id"] or a.get("name") == asset_data.get("name")), None)
+    prev_version = int(existing.get("version", 0)) if existing else 0
+    next_version = prev_version + 1
+    history = list(existing.get("version_history", [])) if existing and isinstance(existing.get("version_history"), list) else []
+    if existing and existing.get("parts"):
+        history.insert(0, {
+            "version": prev_version or 1,
+            "timestamp": existing.get("updated_at") or existing.get("created_at") or now_iso,
+            "poly_count": existing.get("poly_count", 0),
+            "part_count": len(existing.get("parts", [])),
+            "parts": existing.get("parts", []),
+            "luau_code": existing.get("luau_code", ""),
+        })
+    asset_data["created_at"] = existing.get("created_at", now_iso) if existing else now_iso
+    asset_data["updated_at"] = now_iso
+    asset_data["version"] = next_version
+    asset_data["version_history"] = history[:15]
     assets = [a for a in assets if a.get("id") != asset_data["id"]]
     assets.insert(0, asset_data)
     get_assets_library_path().write_text(json.dumps(assets, indent=2), encoding="utf-8")
@@ -914,13 +931,15 @@ def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[
 @app.post("/api/v1/assets/publish-pbr")
 def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     """
-    Publishes browser-synthesized PBR texture maps (Albedo, Normal, Roughness PNGs)
+    Publishes browser-synthesized 4-channel PBR texture maps (Albedo, Normal, Roughness, Metalness PNGs)
     into `src/shared/Assets3D/Textures/`, optionally uploads them to Roblox Open Cloud
-    if `roblox_api_key` and `roblox_creator_id` are supplied, and generates a `--!strict`
+    if `roblox_api_key` and `roblox_creator_id` are supplied, associates the PBR material with either
+    a specific `target_part_name` or all MeshParts on the asset, and generates a `--!strict`
     Luau `SurfaceAppearance` + `EditableImage` binder module (never outputting `rbxassetid://0`).
     """
     verify_security_token(x_forge_token)
     material_name = re.sub(r"[^a-zA-Z0-9_]", "", str(payload_body.get("material_name", "ForgePBRMaterial"))) or "ForgePBRMaterial"
+    target_part_name = str(payload_body.get("target_part_name", "") or "").strip() or None
     target_folder = "src/shared/Assets3D/Textures"
     saved_textures: Dict[str, str] = {}
     raw_png_buffers: Dict[str, bytes] = {}
@@ -929,6 +948,7 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
         ("albedo_data_url", "ColorMap.png"),
         ("normal_data_url", "NormalMap.png"),
         ("roughness_data_url", "RoughnessMap.png"),
+        ("metalness_data_url", "MetalnessMap.png"),
     ]:
         data_url = str(payload_body.get(map_key, ""))
         if "," in data_url:
@@ -953,8 +973,16 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
     asset_engine = AssetEngine(get_assets_library_path())
 
     # Optional Roblox Open Cloud Asset API upload when credentials are provided
-    roblox_api_key = str(payload_body.get("roblox_api_key", "") or os.getenv("ROBLOX_OPEN_CLOUD_API_KEY", "")).strip()
-    roblox_creator_id = str(payload_body.get("roblox_creator_id", "") or os.getenv("ROBLOX_CREATOR_ID", "")).strip()
+    roblox_api_key = str(
+        payload_body.get("roblox_api_key")
+        or payload_body.get("roblox_open_cloud_api_key")
+        or os.getenv("ROBLOX_OPEN_CLOUD_API_KEY", "")
+    ).strip()
+    roblox_creator_id = str(
+        payload_body.get("roblox_creator_id")
+        or payload_body.get("creator_user_id")
+        or os.getenv("ROBLOX_CREATOR_ID", "")
+    ).strip()
     cloud_publish_results: Dict[str, Any] = {}
 
     if roblox_api_key and roblox_creator_id:
@@ -962,6 +990,7 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
             ("ColorMap.png", "color"),
             ("NormalMap.png", "normal"),
             ("RoughnessMap.png", "roughness"),
+            ("MetalnessMap.png", "metalness"),
         ]:
             if suffix in raw_png_buffers:
                 pub_res = asset_engine.publish_decal_to_roblox_cloud(
@@ -979,6 +1008,8 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
                         normal_map_id = uri
                     elif attr_name == "roughness" and not roughness_map_id:
                         roughness_map_id = uri
+                    elif attr_name == "metalness" and not metalness_map_id:
+                        metalness_map_id = uri
 
     pbr_luau = asset_engine.generate_pbr_surface_appearance_luau(
         material_name=material_name,
@@ -997,6 +1028,7 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
     return {
         "success": True,
         "material_name": material_name,
+        "target_part_name": target_part_name,
         "saved_textures": saved_textures,
         "verified_cloud_ids": {
             "color_map_id": color_map_id if asset_engine.is_verified_roblox_asset_uri(color_map_id) else None,
@@ -1070,8 +1102,9 @@ def get_assets_bidirectional_sync_status():
 def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     """
     Phase 4 Bidirectional Sync & Version Recovery:
-    Either pulls updated `.obj` / `.luau` geometry from `rojo_workspace/src/shared/Assets3D/`
+    Either pulls updated `.rbxmx` / `.obj` / `.luau` geometry from `rojo_workspace/src/shared/Assets3D/`
     into the active Forge AI Studio asset, or restores a specific historical revision (`restore_version`).
+    Returns `rbxmx_content` so the client can run `computeModelVersionDiff` and `incrementalMergeAssets`.
     """
     verify_security_token(x_forge_token)
     asset_id = str(payload_body.get("asset_id", "")).strip()
@@ -1086,6 +1119,8 @@ def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Op
     if not target_asset:
         raise HTTPException(status_code=404, detail="Asset not found in library.")
 
+    safe_name = re.sub(r"[^a-zA-Z0-9_]", "", str(target_asset.get("name", "Model3D"))) or "Model3D"
+
     if restore_version is not None:
         history = target_asset.get("version_history", [])
         snap = next((h for h in history if int(h.get("version", -1)) == int(restore_version)), None)
@@ -1095,17 +1130,27 @@ def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Op
         target_asset["luau_code"] = snap.get("luau_code", target_asset.get("luau_code", ""))
         target_asset["poly_count"] = snap.get("poly_count", target_asset.get("poly_count", 0))
         saved = save_asset_to_library(target_asset)
+        part_specs = [MeshPart3DSpec(**p) for p in saved.get("parts", [])]
+        rbxmx_content = generation_3d_engine.build_rbxmx_from_parts(
+            safe_name,
+            part_specs,
+            str(saved.get("collision_fidelity", "Hull")),
+            str(saved.get("category", "3D Asset")),
+            str(saved.get("luau_code", "")),
+        )
         return {
             "success": True,
             "source": f"version_history_v{restore_version}",
+            "rbxmx_content": rbxmx_content,
+            "luau_content": saved.get("luau_code", ""),
             "asset": saved,
         }
 
-    safe_name = re.sub(r"[^a-zA-Z0-9_]", "", str(target_asset.get("name", "Model3D"))) or "Model3D"
     rojo_root = Path(RUNTIME_CONFIG["rojo_project_path"]).resolve()
     assets_dir = rojo_root / "src" / "shared" / "Assets3D"
     obj_path = assets_dir / str(target_asset.get("obj_file_name") or f"{safe_name}.obj")
     luau_path = assets_dir / str(target_asset.get("file_name") or f"{safe_name}.luau")
+    rbxmx_path = assets_dir / f"{safe_name}.rbxmx"
 
     if obj_path.is_file():
         obj_text = obj_path.read_text(encoding="utf-8", errors="ignore")
@@ -1128,11 +1173,210 @@ def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Op
     if luau_path.is_file():
         target_asset["luau_code"] = luau_path.read_text(encoding="utf-8", errors="ignore")
 
+    rbxmx_content = ""
+    if rbxmx_path.is_file():
+        rbxmx_content = rbxmx_path.read_text(encoding="utf-8", errors="ignore")
+    else:
+        part_specs = [MeshPart3DSpec(**p) for p in target_asset.get("parts", [])]
+        rbxmx_content = generation_3d_engine.build_rbxmx_from_parts(
+            safe_name,
+            part_specs,
+            str(target_asset.get("collision_fidelity", "Hull")),
+            str(target_asset.get("category", "3D Asset")),
+            str(target_asset.get("luau_code", "")),
+        )
+
     saved = save_asset_to_library(target_asset)
     return {
         "success": True,
         "source": "rojo_workspace_disk",
+        "rbxmx_content": rbxmx_content,
+        "luau_content": saved.get("luau_code", ""),
         "asset": saved,
+    }
+
+
+@app.post("/api/v1/assets/studio-push")
+def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    """
+    Pillar C Bidirectional Sync: Receives incremental part updates directly from the Roblox Studio Plugin
+    (`Selection` or `Workspace` model changes) and updates the asset in `assets_library.json` and Rojo `.rbxmx`/`.luau`
+    without overwriting unmodified geometry buffers or unrelated parts.
+    """
+    verify_security_token(x_forge_token)
+    model_name = str(payload_body.get("model_name") or payload_body.get("name") or "StudioModel").strip()
+    incoming_parts = payload_body.get("parts", [])
+    if not isinstance(incoming_parts, list) or len(incoming_parts) == 0:
+        raise HTTPException(status_code=400, detail="Requires non-empty parts array from Roblox Studio.")
+
+    assets = load_assets_library()
+    safe_name = re.sub(r"[^a-zA-Z0-9_]", "", model_name) or "StudioModel"
+    existing = next((a for a in assets if a.get("name") == model_name or a.get("name") == safe_name), None)
+
+    merged_parts: List[Dict[str, Any]] = []
+    if existing and isinstance(existing.get("parts"), list):
+        existing_by_name = {str(p.get("name")): p for p in existing["parts"]}
+        seen_names = set()
+        for inc in incoming_parts:
+            pname = str(inc.get("name", f"MeshPart_{len(merged_parts)+1}"))
+            seen_names.add(pname)
+            base_part = existing_by_name.get(pname, {})
+            merged_part = {
+                **base_part,
+                "name": pname,
+                "shape": "MeshPart",
+                "size": inc.get("size", base_part.get("size", [2.0, 2.0, 2.0])),
+                "position": inc.get("position", base_part.get("position", [0.0, 1.0, 0.0])),
+                "rotation": inc.get("rotation", base_part.get("rotation", [0.0, 0.0, 0.0])),
+                "color": inc.get("color", base_part.get("color", [148, 163, 184])),
+                "material": inc.get("material", base_part.get("material", "Metal")),
+                "roughness": float(inc.get("roughness", base_part.get("roughness", 0.35))),
+                "metalness": float(inc.get("metalness", base_part.get("metalness", 0.65))),
+                "transparency": float(inc.get("transparency", base_part.get("transparency", 0.0))),
+                "canCollide": bool(inc.get("canCollide", base_part.get("canCollide", True))),
+                "anchored": bool(inc.get("anchored", base_part.get("anchored", True))),
+                "collisionFidelity": str(inc.get("collisionFidelity", base_part.get("collisionFidelity", "Hull"))),
+                "meshData": inc.get("meshData") or base_part.get("meshData"),
+                "pbrMaterial": inc.get("pbrMaterial") or base_part.get("pbrMaterial"),
+            }
+            merged_parts.append(merged_part)
+        # Preserve any parts in Forge that weren't removed unless remove_missing is explicitly true
+        if not payload_body.get("remove_missing", False):
+            for ep in existing["parts"]:
+                if str(ep.get("name")) not in seen_names:
+                    merged_parts.append(ep)
+    else:
+        merged_parts = incoming_parts
+
+    part_specs = [MeshPart3DSpec(**p) for p in merged_parts]
+    enriched_specs = generation_3d_engine.ensure_mesh_data_on_parts(safe_name, part_specs)
+    collision_fidelity = str((existing or {}).get("collision_fidelity", "Hull"))
+    luau_code = generation_3d_engine.build_luau_from_parts(safe_name, enriched_specs, collision_fidelity)
+    rbxmx_content = generation_3d_engine.build_rbxmx_from_parts(
+        safe_name,
+        enriched_specs,
+        collision_fidelity,
+        str((existing or {}).get("category", "Studio Synced Asset")),
+        luau_code,
+    )
+
+    target_folder = str((existing or {}).get("rojo_target_folder", "src/shared/Assets3D"))
+    luau_saved = save_luau_to_rojo(target_folder, f"{safe_name}.luau", luau_code)
+    rbxmx_saved = save_raw_asset_to_rojo(target_folder, f"{safe_name}.rbxmx", rbxmx_content.encode("utf-8"))
+
+    total_tris = sum(len(p.meshData.faces) for p in enriched_specs if p.meshData)
+    asset_payload = {
+        **(existing or {}),
+        "id": (existing or {}).get("id") or f"asset-{int(time.time() * 1000)}",
+        "name": safe_name,
+        "category": (existing or {}).get("category") or "Studio Synced Asset",
+        "asset_type": "Model3D",
+        "poly_count": total_tris,
+        "collision_fidelity": collision_fidelity,
+        "rojo_target_folder": target_folder,
+        "file_name": f"{safe_name}.luau",
+        "parts": [p.model_dump() for p in enriched_specs],
+        "luau_code": luau_code,
+        "saved_path": luau_saved,
+    }
+    saved = save_asset_to_library(asset_payload)
+    return {
+        "success": True,
+        "asset": saved,
+        "luau_saved_path": luau_saved,
+        "rbxmx_saved_path": rbxmx_saved,
+        "updated_part_count": len(enriched_specs),
+    }
+
+
+@app.post("/api/v1/assets/validate-rojo-build")
+def validate_and_self_heal_rojo_build(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    """
+    Pillar D Automated Rojo Build Verification & Self-Healing:
+    Verifies `default.project.json`, required Rojo directory structure, core Luau modules,
+    and optionally verifies/regenerates all 5 package files (`.luau`, `.rbxmx`, `.gltf`, `.obj`, `.mtl`)
+    for the target asset. Automatically heals any missing files or configuration.
+    """
+    verify_security_token(x_forge_token)
+    auto_heal = bool(payload_body.get("auto_heal", True))
+    asset_name = str(payload_body.get("asset_name", "")).strip()
+    rojo_root = get_rojo_root()
+    checks: List[Dict[str, Any]] = []
+    auto_healed_actions: List[str] = []
+
+    # 1. Verify default.project.json
+    proj_file = rojo_root / "default.project.json"
+    proj_valid = False
+    if proj_file.is_file():
+        try:
+            parsed = json.loads(proj_file.read_text(encoding="utf-8"))
+            proj_valid = isinstance(parsed, dict) and "tree" in parsed
+        except Exception:
+            proj_valid = False
+
+    if not proj_valid and auto_heal:
+        configure_rojo_path(RojoConfigRequest(rojo_project_path=str(rojo_root), initialize_if_missing=True))
+        proj_valid = proj_file.is_file()
+        auto_healed_actions.append("Regenerado default.project.json y estructura de carpetas Rojo.")
+
+    checks.append({
+        "id": "rojo_project_json",
+        "title": "Configuración Rojo (default.project.json)",
+        "passed": proj_valid,
+        "auto_healed": len(auto_healed_actions) > 0,
+        "details": f"Ruta verificada: {proj_file}",
+    })
+
+    # 2. Verify Core Shared Modules (Maid, RemoteProvider, GameTypes)
+    audit = audit_project_modules()
+    missing_core = [k for k, v in audit["core_modules_verified"].items() if not v]
+    healed_core = False
+    if missing_core and auto_heal:
+        bootstrap_core_modules()
+        audit = audit_project_modules()
+        missing_core = [k for k, v in audit["core_modules_verified"].items() if not v]
+        healed_core = True
+        auto_healed_actions.append("Instalados módulos base verificados (Maid, RemoteProvider, GameTypes).")
+
+    checks.append({
+        "id": "rojo_core_modules",
+        "title": "Módulos Base Luau (Maid, RemoteProvider, GameTypes)",
+        "passed": len(missing_core) == 0,
+        "auto_healed": healed_core,
+        "details": "100% módulos base presentes." if not missing_core else f"Faltantes: {', '.join(missing_core)}",
+    })
+
+    # 3. Verify 5-file package for active asset if specified
+    if asset_name:
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "", asset_name) or "Model3D"
+        assets_dir = rojo_root / "src" / "shared" / "Assets3D"
+        expected_exts = ["luau", "rbxmx", "gltf", "obj", "mtl"]
+        missing_exts = [ext for ext in expected_exts if not (assets_dir / f"{safe_name}.{ext}").is_file()]
+        healed_pkg = False
+        if missing_exts and auto_heal:
+            assets = load_assets_library()
+            found_asset = next((a for a in assets if a.get("name") == asset_name or a.get("name") == safe_name), None)
+            if found_asset:
+                export_roblox_package({"asset": found_asset, "save_to_rojo": True, "save_to_library": False})
+                missing_exts = [ext for ext in expected_exts if not (assets_dir / f"{safe_name}.{ext}").is_file()]
+                healed_pkg = True
+                auto_healed_actions.append(f"Regenerados archivos de paquete 3D faltantes para {safe_name}.")
+
+        checks.append({
+            "id": "rojo_asset_package_5_files",
+            "title": f"Paquete 5 Archivos en Rojo ({safe_name})",
+            "passed": len(missing_exts) == 0,
+            "auto_healed": healed_pkg,
+            "details": "Los 5 archivos (.luau, .rbxmx, .gltf, .obj, .mtl) existen en disco." if not missing_exts else f"Faltan: {', '.join(missing_exts)}",
+        })
+
+    all_passed = all(c["passed"] for c in checks)
+    return {
+        "success": all_passed,
+        "rojo_project_path": str(rojo_root),
+        "checks": checks,
+        "auto_healed_actions": auto_healed_actions,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 
 

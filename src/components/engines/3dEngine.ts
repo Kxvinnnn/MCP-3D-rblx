@@ -2146,11 +2146,15 @@ export class ThreeDEngineProcessor {
       albedo_data_url: string;
       normal_data_url: string;
       roughness_data_url: string;
+      metalness_data_url?: string;
       target_asset_id?: string;
+      target_part_name?: string;
       color_map_asset_id?: string;
       normal_map_asset_id?: string;
       roughness_map_asset_id?: string;
       metalness_map_asset_id?: string;
+      roblox_open_cloud_api_key?: string;
+      creator_user_id?: string;
     },
     options: FastAPIRequestOptions = {}
   ): Promise<{
@@ -2167,7 +2171,7 @@ export class ThreeDEngineProcessor {
       '/api/v1/assets/publish-pbr',
       'POST',
       'converting_meshpart',
-      `Exportando mapas PBR (ColorMap, NormalMap, RoughnessMap) y SurfaceAppearance para '${pbrPayload.material_name}' a Rojo...`,
+      `Exportando 4 mapas PBR (ColorMap, NormalMap, RoughnessMap, MetalnessMap) y SurfaceAppearance para '${pbrPayload.material_name}' a Rojo...`,
       pbrPayload,
       options
     );
