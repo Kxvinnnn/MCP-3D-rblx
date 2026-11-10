@@ -28,6 +28,7 @@ import {
 } from '../utils/roblox3DEngine.ts';
 import { RobloxWorldViewport3D } from './RobloxWorldViewport3D.tsx';
 import { FloatingTerminalLog, TerminalLogEntry } from './FloatingTerminalLog.tsx';
+import { default3DEngineProcessor } from './engines/3dEngine.ts';
 
 type CreationMode = 'text_to_3d' | 'image_to_3d' | 'heightmap_3d' | 'scene_3d' | 'pbr_studio';
 
@@ -149,7 +150,7 @@ export const Forge3DStudio: React.FC = () => {
     reader.readAsDataURL(file);
   };
 
-  // Convert uploaded 2D image directly to 3D Volumetric Heightmap Geometry
+  // Convert uploaded 2D image directly to 3D Volumetric Heightmap Geometry (preserving real displaced vertices, normals, UVs, and faces)
   const handleConvert2DToHeightmap3D = async () => {
     if (!referenceImagePreview) {
       setError('Sube primero una imagen 2D para extruir su geometría 3D en relieve.');
@@ -159,7 +160,7 @@ export const Forge3DStudio: React.FC = () => {
     setLoading(true);
     addLog(
       'info',
-      `Extruyendo imagen 2D a malla 3D (${gridResolution}x${gridResolution} celdas, relieve ${extrusionDepth} studs)...`
+      `Extruyendo imagen 2D a malla 3D real (${gridResolution}x${gridResolution} celdas, relieve ${extrusionDepth} studs)...`
     );
     try {
       const result = await convertImageTo3DHeightmapMesh(
@@ -169,64 +170,160 @@ export const Forge3DStudio: React.FC = () => {
       );
       setActiveHeightmapUrl(referenceImagePreview);
 
-      const generatedLuau = `--!strict
--- Geometría 3D generada desde Mapa de Alturas 2D (${gridResolution}x${gridResolution} celdas)
-local AssetService = game:GetService("AssetService")
-local Workspace = game:GetService("Workspace")
+      const modelName = `HeightmapTerrain_${gridResolution}`;
+      const rgbColor = hexToRgb(pbrColorHex);
+      const reliefPart: MeshPart3DSpec = {
+        name: `${modelName}_ReliefMesh`,
+        shape: 'MeshPart',
+        size: [14, extrusionDepth, 14],
+        position: [0, extrusionDepth * 0.5, 0],
+        rotation: [0, 0, 0],
+        color: rgbColor,
+        material: 'Slate',
+        roughness: pbrRoughness,
+        metalness: pbrMetalness,
+        transparency: 0,
+        canCollide: true,
+        anchored: true,
+        collisionFidelity: collisionFidelity,
+        meshData: result.meshData,
+      };
 
-local HeightmapBuilder = {}
-
-function HeightmapBuilder.SpawnReliefTerrain(origin: CFrame): Model
-    local container = Instance.new("Model")
-    container.Name = "HeightmapRelief_${gridResolution}x${gridResolution}"
-
-    local baseMesh = Instance.new("Part")
-    baseMesh.Name = "HeightmapSurface"
-    baseMesh.Size = Vector3.new(12, ${extrusionDepth.toFixed(1)}, 12)
-    baseMesh.CFrame = origin
-    baseMesh.Anchored = true
-    baseMesh.Material = Enum.Material.SmoothPlastic
-    baseMesh.Color = Color3.fromHex("${pbrColorHex}")
-    baseMesh.Parent = container
-
-    container.PrimaryPart = baseMesh
-    container.Parent = Workspace
-    return container
-end
-
-return HeightmapBuilder`;
+      let savedRojoPath: string | undefined;
+      if (saveToRojo) {
+        try {
+          const resp = await fetch('/api/v1/assets/process-meshpart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              payload: {
+                modelName,
+                sourceFormat: 'HEIGHTMAP_2D',
+                totalVertices: result.meshData.vertices.length,
+                totalTriangles: result.triangleCount,
+                meshPartCount: 1,
+                scaleFactorApplied: 1,
+                studBoundingBox: [14, extrusionDepth, 14],
+                isRobloxCompliant: result.triangleCount <= 10000,
+                warnings: [],
+                subMeshParts: [
+                  {
+                    name: reliefPart.name,
+                    vertexCount: result.meshData.vertices.length,
+                    triangleCount: result.triangleCount,
+                    hasUVs: true,
+                    hasNormals: true,
+                    studSize: [14, extrusionDepth, 14],
+                    studPosition: [0, extrusionDepth * 0.5, 0],
+                    studRotation: [0, 0, 0],
+                    colorRgb: rgbColor,
+                    robloxMaterial: 'Slate',
+                    roughness: pbrRoughness,
+                    metalness: pbrMetalness,
+                    collisionFidelity,
+                    renderFidelity: 'Automatic',
+                    lodTriangles: [
+                      result.triangleCount,
+                      Math.round(result.triangleCount * 0.65),
+                      Math.round(result.triangleCount * 0.35),
+                    ],
+                    wavefrontObjChunk: result.wavefrontObj,
+                    meshData: result.meshData,
+                  },
+                ],
+                combinedWavefrontObj: result.wavefrontObj,
+                luauMeshPartBuilderCode: result.editableMeshLuau,
+                rojoTargetFolder: 'src/shared/Assets3D',
+                fileName: `${modelName}.luau`,
+                objFileName: `${modelName}.obj`,
+              },
+              save_to_rojo: saveToRojo,
+              save_to_library: saveToLibrary,
+            }),
+          });
+          if (resp.ok) {
+            const syncData = await resp.json();
+            savedRojoPath = syncData.saved_path;
+            addLog(
+              'rojo',
+              `Relieve 3D real sincronizado en Rojo: ${syncData.saved_path} + ${modelName}.obj (${result.meshData.vertices.length} vértices)`
+            );
+            if (saveToLibrary) {
+              fetchAssetLibrary();
+            }
+          }
+        } catch {
+          // Continue with local asset if backend is unreachable
+        }
+      }
 
       const heightmapAsset: Forge3DAsset = {
         id: `heightmap-${Date.now()}`,
-        name: `HeightmapTerrain_${gridResolution}`,
+        name: modelName,
         category: 'Heightmap3D',
         asset_type: 'Model3D',
-        description: `Geometría 3D generada desde mapa de alturas 2D (${gridResolution}x${gridResolution}, extrusión ${extrusionDepth} studs).`,
+        description: `Geometría 3D con relieve real (${result.meshData.vertices.length} vértices desplazados, ${result.triangleCount} triángulos, EditableMesh + OBJ).`,
         poly_count: result.triangleCount,
         collision_fidelity: collisionFidelity,
         rojo_target_folder: 'src/shared/Assets3D',
-        file_name: `HeightmapTerrain_${gridResolution}.luau`,
+        file_name: `${modelName}.luau`,
+        saved_path: savedRojoPath,
         pbr_profile: {
           albedo_hex: pbrColorHex,
           roughness: pbrRoughness,
           metalness: pbrMetalness,
           emissive_hex: pbrAccentHex,
-          roblox_material: 'SmoothPlastic',
+          roblox_material: 'Slate',
           pattern: pbrPreset,
         },
-        parts: [],
-        luau_code: generatedLuau,
+        parts: [reliefPart],
+        luau_code: result.editableMeshLuau,
         created_at: new Date().toISOString(),
       };
       setActiveAsset(heightmapAsset);
+      setSelectedPart(reliefPart);
       setInspectorTab('viewport');
       addLog(
         'success',
-        `Geometría 3D en relieve generada (${result.triangleCount} triángulos) + script Luau listo.`
+        `Geometría 3D en relieve real generada (${result.meshData.vertices.length} vértices, ${result.triangleCount} triángulos) con AssetService:CreateEditableMesh().`
       );
     } catch (err: any) {
       setError(err.message || 'Error al convertir imagen 2D en geometría 3D');
       addLog('error', err.message || 'Error en conversión 2D a 3D');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Publish synthesized PBR Texture Maps + SurfaceAppearance Luau binder to Rojo
+  const handlePublishPBRToRojo = async () => {
+    if (!pbrBundle) return;
+    setLoading(true);
+    setError(null);
+    const matName = activeAsset?.name
+      ? `${activeAsset.name}_${pbrPreset}`
+      : `Forge_${pbrPreset}`;
+    addLog('info', `Publicando mapas PBR (${matName}) y módulo SurfaceAppearance en Rojo...`);
+    try {
+      const res = await default3DEngineProcessor.publishPBRToRojo({
+        material_name: matName,
+        pattern: pbrPreset,
+        albedo_hex: pbrColorHex,
+        emissive_hex: pbrAccentHex,
+        roughness: pbrRoughness,
+        metalness: pbrMetalness,
+        albedo_data_url: pbrBundle.albedoDataUrl,
+        normal_data_url: pbrBundle.normalDataUrl,
+        roughness_data_url: pbrBundle.roughnessDataUrl,
+        target_asset_id: activeAsset?.id,
+      });
+      addLog(
+        'rojo',
+        `PBR SurfaceAppearance publicado en ${res.luau_binder_path || `src/shared/Assets3D/${matName}_SurfaceAppearance.luau`} (+ ColorMap, NormalMap, RoughnessMap PNGs en Textures/)`
+      );
+    } catch (err: any) {
+      setError(err.message || 'Error al publicar mapas PBR en Rojo');
+      addLog('error', err.message || 'Error al publicar PBR en Rojo');
     } finally {
       setLoading(false);
     }
@@ -273,7 +370,7 @@ return HeightmapBuilder`;
 
       if (!response.ok || !response.body) {
         const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Error al conectar con el motor 3D de Forge AI');
+        throw new Error(errData.detail || errData.error || 'Error al conectar con el motor 3D de Forge AI');
       }
 
       const reader = response.body.getReader();
@@ -294,30 +391,36 @@ return HeightmapBuilder`;
           const jsonStr = line.replace(/^data:\s*/, '');
           try {
             const payload = JSON.parse(jsonStr);
-            if (payload.type === 'log') {
+            if (payload.type === 'log' || payload.type === 'stage') {
               addLog('info', payload.message);
             } else if (payload.type === 'chunk') {
-              setStreamingBuffer((prev) => prev + (payload.delta || ''));
+              setStreamingBuffer((prev) => prev + (payload.delta || payload.text || ''));
+              if (payload.message) {
+                addLog('info', payload.message);
+              }
             } else if (payload.type === 'rojo_write') {
               if (payload.saved) {
                 addLog('rojo', `${payload.message} → ${payload.path}`);
               } else {
                 addLog('info', payload.message);
               }
-            } else if (payload.type === 'done') {
-              const result: Forge3DAsset = payload.data;
-              setActiveAsset(result);
-              setSelectedPart(result.parts?.[0] || null);
-              addLog(
-                'success',
-                `Modelo 3D '${result.name}' construido (${result.parts?.length || 0} partes, ${result.poly_count} tris).`
-              );
-              if (saveToLibrary) {
-                fetchAssetLibrary();
+            } else if (payload.type === 'done' || payload.type === 'complete') {
+              const result: Forge3DAsset = payload.data || payload.result;
+              if (result) {
+                setActiveAsset(result);
+                setSelectedPart(result.parts?.[0] || null);
+                addLog(
+                  'success',
+                  `Modelo 3D '${result.name}' construido (${result.parts?.length || 0} partes, ${result.poly_count} tris).`
+                );
+                if (saveToLibrary) {
+                  fetchAssetLibrary();
+                }
               }
             } else if (payload.type === 'error') {
-              addLog('error', payload.message || 'Error en el stream 3D');
-              setError(payload.message || 'Error al generar el asset 3D');
+              const errMsg = payload.message || payload.error || 'Error en el stream 3D';
+              addLog('error', errMsg);
+              setError(errMsg);
             }
           } catch {
             // Ignore partial chunk JSON parse error
@@ -847,6 +950,15 @@ return HeightmapBuilder`;
                         ↓ Roughness.png
                       </a>
                     </div>
+                    <button
+                      type="button"
+                      onClick={handlePublishPBRToRojo}
+                      disabled={loading}
+                      className="col-span-3 mt-1 py-2 px-3 rounded-lg bg-amber-600/90 hover:bg-amber-500 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      Publicar Texturas PBR + SurfaceAppearance.luau en Rojo
+                    </button>
                   </div>
                 )}
               </div>

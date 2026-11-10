@@ -7,10 +7,11 @@ and the Roblox Studio Plugin (via HttpService).
 Capabilities:
 1. Luau Script Generation (--!strict, task library, verified Maid pattern)
 2. ForgeGUI Responsive UI Generation (Scale-only + Studio Instance Tree)
-3. 3D Model, PBR Material & Scene Generation (Text-to-3D, Image-to-3D, GLB/OBJ conversion, Collision & LOD optimization)
-4. Reusable 3D Asset Library persistence
+3. 3D Model, PBR Material & Scene Generation (Text-to-3D, Image-to-3D, GLB/OBJ conversion with real EditableMesh/MeshPart geometry, Collision & LOD optimization)
+4. Reusable 3D Asset Library persistence & PBR Texture publishing to Rojo
 5. Real Rojo Project Management (default.project.json parser, CLI detector, Port 34872 probe, Sync Manifest SHA-256 verification)
-6. Security Hardening (Path traversal protection, module existence auditing, restricted CORS, rate limiting, token protection)
+6. Autonomous 7-Agent Orchestrator with self-review & correction loop
+7. Security Hardening (Path traversal protection, module existence auditing, restricted CORS, rate limiting, token protection)
 """
 
 import base64
@@ -38,16 +39,23 @@ from pydantic import BaseModel, Field
 # Official current Google GenAI SDK (NEVER use deprecated google-generativeai)
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
 
 # Modular Engines (Section 4 Recommended Architecture)
 from engines.rojo_bridge import RojoBridgeEngine
 from engines.luau_engine import LuauEngine
 from engines.ui_engine import UIEngine
-from engines.generation_3d_engine import Generation3DEngine
+from engines.generation_3d_engine import (
+    Generation3DEngine,
+    Generate3DEngineRequest,
+    MeshPart3DSpec,
+    Model3DResponse,
+    PBRProfileSpec,
+    SubMeshGeometrySpec,
+    extract_mesh_geometry_from_processed_submesh,
+)
 from engines.asset_engine import AssetEngine
 from engines.world_engine import WorldEngine
-from engines.agents_engine import AGENT_DEFINITIONS
+from engines.agents_engine import AGENT_DEFINITIONS, AutonomousMultiAgentOrchestrator
 
 # ------------------------------------------------------------------------------
 # 1. Configuration, Security & Initialization
@@ -74,7 +82,7 @@ RUNTIME_CONFIG: Dict[str, Any] = {
     "rate_limit_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "45")),
 }
 
-ALLOWED_EXTENSIONS = {".luau", ".json", ".obj", ".gltf", ".md"}
+ALLOWED_EXTENSIONS = {".luau", ".json", ".obj", ".gltf", ".md", ".png"}
 FORBIDDEN_LUAU_PATTERNS = [
     r"\bloadstring\s*\(",
     r"\bgetfenv\s*\(",
@@ -90,9 +98,12 @@ except Exception as init_err:
     logger.error(f"❌ Failed to initialize Google GenAI Client: {init_err}")
     gemini_client = None
 
+generation_3d_engine = Generation3DEngine(gemini_client, TIER_MODELS)
+autonomous_orchestrator = AutonomousMultiAgentOrchestrator(gemini_client, TIER_MODELS)
+
 app = FastAPI(
     title="Forge AI - Unified Roblox 3D, Luau & Rojo Backend",
-    version="2.0.0",
+    version="2.1.0",
     description="Unified FastAPI backend for React Studio Workbench and Roblox Studio Plugin."
 )
 
@@ -116,14 +127,23 @@ app.add_middleware(
 _rate_limit_Buckets: Dict[str, List[float]] = defaultdict(list)
 
 
+def verify_security_token(provided_token: Optional[str] = None) -> None:
+    configured_token = RUNTIME_CONFIG.get("forge_local_token", "")
+    if configured_token and (provided_token or "") != configured_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Forge-Token header.",
+        )
+
+
 @app.middleware("http")
 async def security_and_rate_limit_middleware(request: Request, call_next):
-    # 1. Payload size guard (Max 15 MB)
+    # 1. Payload size guard (Max 25 MB for 3D meshes & PBR textures)
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > 15 * 1024 * 1024:
+    if content_length and int(content_length) > 25 * 1024 * 1024:
         return JSONResponse(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            content={"error": "Payload exceeds maximum allowed size (15 MB)."}
+            content={"error": "Payload exceeds maximum allowed size (25 MB)."}
         )
 
     # 2. Sliding-window rate limiting per client IP
@@ -169,7 +189,6 @@ def resolve_safe_project_path(rojo_target_folder: str, file_name: str) -> Path:
     rojo_root = get_rojo_root()
     rojo_root.mkdir(parents=True, exist_ok=True)
 
-    # Strip leading slashes and reject parent traversal segments
     clean_folder = rojo_target_folder.strip().lstrip("/\\")
     if ".." in Path(clean_folder).parts or ".." in file_name:
         raise ValueError("Security Violation: Path traversal ('..') is strictly prohibited.")
@@ -213,6 +232,13 @@ def save_luau_to_rojo(rojo_target_folder: str, file_name: str, code: str) -> str
     target_path = resolve_safe_project_path(rojo_target_folder, file_name)
     target_path.write_text(safe_code, encoding="utf-8")
     logger.info(f"💾 Saved validated Luau file to Rojo: {target_path}")
+    return str(target_path)
+
+
+def save_raw_asset_to_rojo(rojo_target_folder: str, file_name: str, content: bytes) -> str:
+    target_path = resolve_safe_project_path(rojo_target_folder, file_name)
+    target_path.write_bytes(content)
+    logger.info(f"💾 Saved binary/3D asset file to Rojo: {target_path}")
     return str(target_path)
 
 
@@ -344,96 +370,8 @@ class LuauUIResponse(BaseModel):
     saved_path: Optional[str] = None
 
 
-class MeshPart3DSpec(BaseModel):
-    name: str = Field(..., description="Descriptive sub-part name, e.g. TurretBase, PlasmaBarrelLeft, CanopyGlass")
-    shape: Literal["Block", "Cylinder", "Ball", "Wedge", "CornerWedge"] = Field(
-        default="Block",
-        description="Roblox primitive or procedural mesh shape"
-    )
-    size: List[float] = Field(..., description="[width, height, depth] in Roblox Studs")
-    position: List[float] = Field(..., description="[x, y, z] relative to model bottom-center pivot in Studs")
-    rotation: List[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], description="[rx, ry, rz] Euler degrees")
-    color: List[int] = Field(..., description="[R, G, B] 0-255 color")
-    material: str = Field(
-        default="Metal",
-        description="Roblox Enum.Material name: Metal, Neon, DiamondPlate, SmoothPlastic, Glass, Slate, Concrete, WoodPlanks, ForceField, CorrodedMetal"
-    )
-    roughness: float = Field(default=0.35, description="PBR surface roughness 0.0 to 1.0")
-    metalness: float = Field(default=0.6, description="PBR surface metalness 0.0 to 1.0")
-    transparency: float = Field(default=0.0, description="0.0 opaque to 1.0 invisible")
-    canCollide: bool = True
-    anchored: bool = True
-    collisionFidelity: Literal["Default", "Box", "Hull", "PreciseConvexDecomposition"] = "Hull"
-
-
-class PBRProfileSpec(BaseModel):
-    albedo_hex: str = "#334155"
-    roughness: float = 0.35
-    metalness: float = 0.75
-    emissive_hex: str = "#06b6d4"
-    roblox_material: str = "Metal"
-    pattern: Literal["BrushedTitanium", "HexGridCarbon", "WeatheredStone", "CyberPanel", "SmoothPolymer"] = "BrushedTitanium"
-
-
-class Generate3DRequest(BaseModel):
-    prompt: str
-    asset_type: Literal["Model3D", "Scene3D", "PBRMaterial"] = "Model3D"
-    category: str = "Sci-Fi Props"
-    reference_image_base64: Optional[str] = None
-    collision_fidelity: Literal["Default", "Box", "Hull", "PreciseConvexDecomposition"] = "Hull"
-    target_poly_budget: int = 2500
-    save_to_rojo: bool = True
-    model_tier: Literal["fast", "pro"] = "fast"
-
-
-class Forge3DAssetResponse(BaseModel):
-    id: Optional[str] = None
-    name: str
-    category: str
-    asset_type: Literal["Model3D", "Scene3D", "PBRMaterial"]
-    poly_count: int
-    collision_fidelity: Literal["Default", "Box", "Hull", "PreciseConvexDecomposition"]
-    rojo_target_folder: str = "src/shared/Assets3D"
-    file_name: str
-    description: str
-    pbr_profile: PBRProfileSpec
-    parts: List[MeshPart3DSpec]
-    luau_code: str
-    saved_path: Optional[str] = None
-
-
 # ------------------------------------------------------------------------------
-# 5. System Prompts
-# ------------------------------------------------------------------------------
-
-LUAU_CORE_STANDARDS = """
-You are the Principal Luau, Rojo 7.x & 3D Geometry Architect for "Forge AI".
-MANDATORY LUAU CODING RULES:
-1. Start EVERY script with `--!strict`.
-2. Use ONLY `task.wait`, `task.spawn`, `task.delay`, `task.defer`. NEVER use `wait()`, `spawn()`, `delay()`.
-3. Manage all connections, tweens, and dynamically spawned instances using the Maid pattern (`:GiveTask()`, `:DoCleaning()`).
-4. Acquire all Roblox services at the top via `game:GetService("...")`.
-5. Only `require()` modules that are confirmed in the VERIFIED ON-DISK ROJO MODULES section.
-"""
-
-FORGE_3D_SYSTEM_PROMPT = f"""{LUAU_CORE_STANDARDS}
-
-TASK: 3D MODEL, PBR & SCENE GENERATION FOR ROBLOX STUDIO
-You generate composite 3D models and scenes composed of 5 to 12 articulated sub-parts across three silhouette scales:
-1. Primary Silhouette (chassis, hull, foundation, trunk, main body)
-2. Secondary Read (turrets, wings, columns, canopy, structural supports)
-3. Accent Details (neon emitters, optic sensors, vents, bevel trims, control terminals)
-
-RULES FOR 3D GEOMETRY (`parts`):
-- Ground the model so the lowest point rests flush at Y = 0 (bottom-center pivot).
-- Vary `roughness` (0.05 to 0.9) and `metalness` (0.05 to 0.98) realistically across parts.
-- Assign authentic Roblox `Enum.Material` values (`Metal`, `Neon`, `DiamondPlate`, `Glass`, `Slate`, `SmoothPlastic`, `Concrete`, `WoodPlanks`).
-- Provide a complete `--!strict` Luau module in `luau_code` that constructs the `Model` (and `SurfaceAppearance` / `PointLight` where appropriate) inside `Workspace` or a `ViewportFrame > WorldModel` and cleans up via `Maid`.
-"""
-
-
-# ------------------------------------------------------------------------------
-# 6. Rojo Project Management & Sync Verification Endpoints
+# 5. Rojo Project Management & Sync Verification Endpoints
 # ------------------------------------------------------------------------------
 
 @app.get("/api/v1/rojo/status")
@@ -447,7 +385,6 @@ def get_rojo_status():
         except Exception:
             project_config = None
 
-    # Check if rojo binary is installed
     rojo_bin = shutil.which("rojo")
     rojo_version = None
     if rojo_bin:
@@ -457,7 +394,6 @@ def get_rojo_status():
         except Exception:
             rojo_version = "Installed"
 
-    # Check if Rojo live server is listening on port 34872
     rojo_port = project_config.get("servePort", 34872) if isinstance(project_config, dict) else 34872
     rojo_server_active = False
     try:
@@ -494,7 +430,16 @@ def configure_rojo_path(req: RojoConfigRequest):
     target = Path(raw_path).resolve()
     if req.initialize_if_missing:
         target.mkdir(parents=True, exist_ok=True)
-        for sub in ["src/server", "src/client", "src/client/UI", "src/shared/Utils", "src/shared/Network", "src/shared/Types", "src/shared/Assets3D"]:
+        for sub in [
+            "src/server",
+            "src/client",
+            "src/client/UI",
+            "src/shared/Utils",
+            "src/shared/Network",
+            "src/shared/Types",
+            "src/shared/Assets3D",
+            "src/shared/Assets3D/Textures",
+        ]:
             (target / sub).mkdir(parents=True, exist_ok=True)
 
         proj_file = target / "default.project.json"
@@ -582,7 +527,7 @@ def bootstrap_core_modules():
 
 
 # ------------------------------------------------------------------------------
-# 7. Reusable 3D Asset Library Endpoints
+# 6. Reusable 3D Asset Library Endpoints
 # ------------------------------------------------------------------------------
 
 def get_assets_library_path() -> Path:
@@ -635,67 +580,56 @@ def delete_asset(asset_id: str):
 
 
 # ------------------------------------------------------------------------------
-# 8. 3D Generation & Conversion Endpoints
+# 7. 3D Generation, Streaming & Real Geometry Conversion Endpoints
 # ------------------------------------------------------------------------------
 
-@app.post("/api/v1/generate-3d", response_model=Forge3DAssetResponse)
-def generate_3d_asset(req: Generate3DRequest) -> Forge3DAssetResponse:
-    if not gemini_client:
+@app.post("/api/v1/generate-3d", response_model=Model3DResponse)
+def generate_3d_asset(
+    req: Generate3DEngineRequest,
+    x_forge_token: Optional[str] = Header(default=None),
+) -> Model3DResponse:
+    verify_security_token(x_forge_token)
+    if not gemini_client and not req.uploaded_mesh_obj and not req.uploaded_sub_meshes:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured.")
 
-    model_name = TIER_MODELS.get(req.model_tier, TIER_MODELS["fast"])
     context_data = load_project_context()
-
-    prompt_text = f"""
-ASSET GENERATION MODE: {req.asset_type}
-CATEGORY: {req.category}
-COLLISION FIDELITY: {req.collision_fidelity}
-TARGET POLYGON BUDGET: {req.target_poly_budget} triangles
-
-USER SPECIFICATION:
-{req.prompt}
-{context_data}
-
-REQUIREMENTS:
-- Build a composite 3D asset with 5 to 12 sub-parts (`parts` array) grounded at Y = 0.
-- Include realistic Roblox `Enum.Material` names, PBR roughness/metalness, and RGB colors.
-- Generate a complete `--!strict` Luau builder module in `luau_code` that constructs the Model in Workspace or a WorldModel.
-"""
-
-    contents: List[Any] = []
-    if req.reference_image_base64:
-        raw_b64 = req.reference_image_base64.strip()
-        mime_type = "image/png"
-        if "," in raw_b64:
-            header, raw_b64 = raw_b64.split(",", 1)
-            if "jpeg" in header or "jpg" in header:
-                mime_type = "image/jpeg"
-            elif "webp" in header:
-                mime_type = "image/webp"
-        contents.append(types.Part.from_bytes(data=base64.b64decode(raw_b64), mime_type=mime_type))
-
-    contents.append(prompt_text)
-
-    response = gemini_client.models.generate_content(
-        model=model_name,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=FORGE_3D_SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            response_schema=Forge3DAssetResponse,
-        )
+    return generation_3d_engine.generate_3d_asset(
+        req=req,
+        context_data=context_data,
+        save_luau_fn=save_luau_to_rojo if req.save_to_rojo else None,
+        save_library_fn=save_asset_to_library if req.save_to_library else None,
     )
 
-    parsed = Forge3DAssetResponse.model_validate_json(response.text or "{}")
-    parsed.id = f"asset-{int(time.time() * 1000)}"
-    if req.save_to_rojo:
-        parsed.saved_path = save_luau_to_rojo(
-            parsed.rojo_target_folder or "src/shared/Assets3D",
-            parsed.file_name,
-            parsed.luau_code
-        )
-    save_asset_to_library(parsed.model_dump())
-    return parsed
+
+@app.post("/api/v1/generate-3d-stream")
+def generate_3d_asset_stream(
+    req: Generate3DEngineRequest,
+    x_forge_token: Optional[str] = Header(default=None),
+):
+    """
+    SSE streaming endpoint for real-time 3D structure generation requested by Forge3DStudio.tsx.
+    Accepts `prompt`, `asset_type`, `category`, `model_tier`, `collision_fidelity`,
+    `target_poly_budget`, `reference_image_base64`, `reference_image_mime_type`,
+    `save_to_rojo`, and `save_to_library`, and streams `stage`/`log`, `chunk`,
+    `rojo_write`, and `done`/`complete` SSE payloads.
+    """
+    verify_security_token(x_forge_token)
+    context_data = load_project_context()
+    generator = generation_3d_engine.stream_3d_asset(
+        req=req,
+        context_data=context_data,
+        save_luau_fn=save_luau_to_rojo if req.save_to_rojo else None,
+        save_library_fn=save_asset_to_library if req.save_to_library else None,
+    )
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/v1/architecture")
@@ -740,6 +674,12 @@ def build_world_scene(payload: Dict[str, Any], x_forge_token: Optional[str] = He
 
 @app.post("/api/v1/assets/process-meshpart")
 def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    """
+    Processes an imported 3D model (.GLB, .GLTF, .OBJ, .FBX, or 2D Heightmap),
+    extracting real vertex, normal, UV, and triangle index buffers (`meshData`) with `shape: "MeshPart"`,
+    attaching `MeshId`/`AssetId` references, saving the Wavefront `.obj` file into `src/shared/Assets3D/`,
+    and generating a `--!strict` Luau `MeshPart` builder module.
+    """
     verify_security_token(x_forge_token)
     payload = payload_body.get("payload", {})
     save_to_rojo = payload_body.get("save_to_rojo", True)
@@ -747,47 +687,92 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
 
     model_name = str(payload.get("modelName", "ImportedMesh3D"))
     sub_meshes = payload.get("subMeshParts", [])
-    luau_code = str(payload.get("luauMeshPartBuilderCode", "--!strict\nreturn {}"))
     target_folder = str(payload.get("rojoTargetFolder", "src/shared/Assets3D"))
     file_name = str(payload.get("fileName", f"{model_name}_MeshPart.luau"))
+    obj_file_name = str(payload.get("objFileName", f"{model_name}.obj"))
+    combined_obj = str(payload.get("combinedWavefrontObj", ""))
+
+    part_specs: List[MeshPart3DSpec] = []
+    parts: List[Dict[str, Any]] = []
+
+    for i, s in enumerate(sub_meshes):
+        part_name = str(s.get("name", f"MeshPart_{i+1}"))
+        extracted_geom = extract_mesh_geometry_from_processed_submesh(s, obj_file_name, model_name)
+        mesh_id = (
+            s.get("meshId")
+            or s.get("mesh_id")
+            or extracted_geom.meshId
+        )
+        asset_id = (
+            s.get("assetId")
+            or s.get("asset_id")
+            or extracted_geom.assetId
+            or mesh_id
+        )
+        extracted_geom.meshId = str(mesh_id)
+        extracted_geom.assetId = str(asset_id)
+        extracted_geom.objFileName = obj_file_name
+
+        spec = MeshPart3DSpec(
+            name=part_name,
+            shape="MeshPart",
+            meshId=str(mesh_id),
+            assetId=str(asset_id),
+            textureId=s.get("textureId") or s.get("texture_id"),
+            size=s.get("studSize", [2.0, 2.0, 2.0]),
+            position=s.get("studPosition", [0.0, 1.0, 0.0]),
+            rotation=s.get("studRotation", [0.0, 0.0, 0.0]),
+            color=s.get("colorRgb", [148, 163, 184]),
+            material=s.get("robloxMaterial", "Metal"),
+            roughness=float(s.get("roughness", 0.35)),
+            metalness=float(s.get("metalness", 0.65)),
+            transparency=0.0,
+            canCollide=True,
+            anchored=True,
+            collisionFidelity=s.get("collisionFidelity", "Hull"),
+            meshData=extracted_geom,
+        )
+        part_specs.append(spec)
+        parts.append(spec.model_dump())
+
+    raw_luau = str(payload.get("luauMeshPartBuilderCode", ""))
+    if "MeshId" in raw_luau and "CreateMeshPartAsync" in raw_luau:
+        luau_code = raw_luau
+    else:
+        luau_code = generation_3d_engine.build_luau_from_parts(
+            model_name,
+            part_specs,
+            part_specs[0].collisionFidelity if part_specs else "Hull",
+        )
 
     saved_path = save_luau_to_rojo(target_folder, file_name, luau_code) if save_to_rojo else None
-    parts = [
-        {
-            "name": s.get("name", f"MeshPart_{i+1}"),
-            "shape": "Block",
-            "size": s.get("studSize", [2, 2, 2]),
-            "position": s.get("studPosition", [0, 1, 0]),
-            "rotation": s.get("studRotation", [0, 0, 0]),
-            "color": s.get("colorRgb", [148, 163, 184]),
-            "material": s.get("robloxMaterial", "Metal"),
-            "roughness": s.get("roughness", 0.35),
-            "metalness": s.get("metalness", 0.65),
-            "transparency": 0.0,
-            "canCollide": True,
-            "anchored": True,
-            "collisionFidelity": s.get("collisionFidelity", "Hull"),
-        }
-        for i, s in enumerate(sub_meshes)
-    ]
+    obj_saved_path = None
+    if save_to_rojo and combined_obj.strip():
+        obj_saved_path = save_raw_asset_to_rojo(target_folder, obj_file_name, combined_obj.encode("utf-8"))
+
+    total_tris = int(payload.get("totalTriangles", 0)) or sum(
+        len(p.meshData.faces) for p in part_specs if p.meshData
+    )
 
     asset_record = {
         "id": f"meshpart-{int(time.time() * 1000)}",
         "name": model_name,
         "category": f"Imported {payload.get('sourceFormat', '3D')}",
         "asset_type": "Model3D",
-        "poly_count": int(payload.get("totalTriangles", 0)),
+        "poly_count": total_tris,
         "collision_fidelity": parts[0]["collisionFidelity"] if parts else "Hull",
         "rojo_target_folder": target_folder,
         "file_name": file_name,
-        "description": f"MeshPart 3D pre-procesado ({len(parts)} sub-mallas, {payload.get('totalTriangles', 0)} tris).",
+        "obj_file_name": obj_file_name,
+        "obj_saved_path": obj_saved_path,
+        "description": f"MeshPart 3D con geometría real y referencias MeshId/AssetId ({len(parts)} sub-mallas, {total_tris} tris, EditableMesh + OBJ).",
         "pbr_profile": {
             "albedo_hex": "#38bdf8",
             "roughness": 0.35,
             "metalness": 0.65,
             "emissive_hex": "#06b6d4",
             "roblox_material": "Metal",
-            "pattern": "hex_plate",
+            "pattern": "BrushedTitanium",
         },
         "parts": parts,
         "luau_code": luau_code,
@@ -800,10 +785,87 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
         "success": True,
         "asset": asset_record,
         "saved_path": saved_path,
+        "obj_saved_path": obj_saved_path,
         "meshpart_count": len(parts),
-        "total_triangles": int(payload.get("totalTriangles", 0)),
+        "total_triangles": total_tris,
         "is_roblox_compliant": bool(payload.get("isRobloxCompliant", True)),
     }
+
+
+@app.post("/api/v1/assets/publish-pbr")
+def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    """
+    Publishes browser-synthesized PBR texture maps (Albedo, Normal, Roughness PNGs)
+    into `src/shared/Assets3D/Textures/` and generates a `--!strict` Luau
+    `SurfaceAppearance` binder module so MeshParts receive real PBR materials in Rojo.
+    """
+    verify_security_token(x_forge_token)
+    material_name = re.sub(r"[^a-zA-Z0-9_]", "", str(payload_body.get("material_name", "ForgePBRMaterial"))) or "ForgePBRMaterial"
+    target_folder = "src/shared/Assets3D/Textures"
+    saved_textures: Dict[str, str] = {}
+
+    for map_key, suffix in [
+        ("albedo_data_url", "ColorMap.png"),
+        ("normal_data_url", "NormalMap.png"),
+        ("roughness_data_url", "RoughnessMap.png"),
+    ]:
+        data_url = str(payload_body.get(map_key, ""))
+        if "," in data_url:
+            _, b64_part = data_url.split(",", 1)
+            try:
+                raw_bytes = base64.b64decode(b64_part)
+                tex_file = f"{material_name}_{suffix}"
+                saved_textures[suffix] = save_raw_asset_to_rojo(target_folder, tex_file, raw_bytes)
+            except Exception as err:
+                logger.warning(f"Failed to decode {map_key}: {err}")
+
+    roughness_val = float(payload_body.get("roughness", 0.35))
+    metalness_val = float(payload_body.get("metalness", 0.75))
+    albedo_hex = str(payload_body.get("albedo_hex", "#38bdf8"))
+
+    asset_engine = AssetEngine()
+    pbr_luau = asset_engine.generate_pbr_surface_appearance_luau(
+        material_name=material_name,
+        color_map_id=f"rbxassetid://0 -- Rojo: {target_folder}/{material_name}_ColorMap.png",
+        normal_map_id=f"rbxassetid://0 -- Rojo: {target_folder}/{material_name}_NormalMap.png",
+        roughness_map_id=f"rbxassetid://0 -- Rojo: {target_folder}/{material_name}_RoughnessMap.png",
+        metalness_map_id=f"rbxassetid://0 -- Roughness={roughness_val:.2f}, Metalness={metalness_val:.2f}, Albedo={albedo_hex}",
+    )
+    luau_file_name = f"{material_name}_SurfaceAppearance.luau"
+    luau_saved_path = save_luau_to_rojo("src/shared/Assets3D", luau_file_name, pbr_luau)
+
+    return {
+        "success": True,
+        "material_name": material_name,
+        "saved_textures": saved_textures,
+        "luau_file": f"src/shared/Assets3D/{luau_file_name}",
+        "luau_saved_path": luau_saved_path,
+        "luau_code": pbr_luau,
+    }
+
+
+@app.post("/api/v1/agents/orchestrate-stream")
+def orchestrate_multi_agent_stream(payload: Dict[str, Any]):
+    """
+    Autonomous 7-Agent Orchestrator endpoint streaming real-time progress and
+    executing prompt-driven 3D synthesis, PBR configuration, world lighting,
+    Luau controller generation, HUD creation, and self-review verification.
+    """
+    prompt = str(payload.get("prompt", "Create an interactive sci-fi system"))
+    model_tier = str(payload.get("model_tier", "fast"))
+    save_to_rojo = bool(payload.get("save_to_rojo", True))
+
+    generator = autonomous_orchestrator.orchestrate_stream(
+        prompt=prompt,
+        model_tier=model_tier,
+        save_to_rojo=save_to_rojo,
+        audit_fn=audit_project_modules,
+        load_context_fn=load_project_context,
+        save_luau_fn=save_luau_to_rojo,
+        save_library_fn=save_asset_to_library,
+        manifest_fn=get_rojo_sync_manifest,
+    )
+    return StreamingResponse(generator, media_type="text/event-stream")
 
 
 @app.get("/api/v1/health")
@@ -811,7 +873,7 @@ def health_check():
     rojo_status = get_rojo_status()
     return {
         "status": "ok",
-        "backend_engine": "FastAPI Unified v2.0 (7 Modular Engines)",
+        "backend_engine": "FastAPI Unified v2.1 (7 Modular Engines + EditableMesh Pipeline)",
         "gemini_connected": gemini_client is not None,
         "configured_models": TIER_MODELS,
         "rojo_project_path": rojo_status["rojo_project_path"],

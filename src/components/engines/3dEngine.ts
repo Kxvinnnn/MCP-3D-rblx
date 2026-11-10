@@ -2,7 +2,12 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
-import { Forge3DAsset, MeshPart3DSpec } from '../../utils/roblox3DEngine.ts';
+import {
+  Forge3DAsset,
+  MeshPart3DSpec,
+  SubMeshGeometryData,
+  generateEditableMeshLuauCode,
+} from '../../utils/roblox3DEngine.ts';
 
 export type RobloxCollisionFidelity =
   | 'Default'
@@ -133,6 +138,7 @@ export interface ProcessedSubMeshDescriptor {
   renderFidelity: RobloxRenderFidelity;
   doubleSided: boolean;
   objChunkPayload: string;
+  meshData: SubMeshGeometryData;
 }
 
 export interface MeshPartExportPayload {
@@ -148,12 +154,14 @@ export interface MeshPartExportPayload {
   luauMeshPartBuilderCode: string;
   rojoTargetFolder: string;
   fileName: string;
+  objFileName: string;
 }
 
 export interface BackendMeshPartSyncResponse {
   success: boolean;
   asset: Forge3DAsset;
   saved_path: string | null;
+  obj_saved_path?: string | null;
   meshpart_count: number;
   total_triangles: number;
   is_roblox_compliant: boolean;
@@ -239,7 +247,7 @@ export abstract class BaseMeshFormatParser {
   ): Promise<THREE.Object3D>;
 
   /**
-   * Ensures every Mesh in the hierarchy has valid buffered positions and vertex normals.
+   * Ensures every Mesh in the hierarchy has valid buffered positions, normals, and UVs.
    */
   protected sanitizeLoadedHierarchy(root: THREE.Object3D): THREE.Object3D {
     let meshIndex = 1;
@@ -249,7 +257,8 @@ export abstract class BaseMeshFormatParser {
         if (!mesh.name || mesh.name.trim() === '') {
           mesh.name = `MeshPart_${meshIndex}`;
         } else {
-          mesh.name = mesh.name.replace(/[^a-zA-Z0-9_]/g, '_') || `MeshPart_${meshIndex}`;
+          mesh.name =
+            mesh.name.replace(/[^a-zA-Z0-9_]/g, '_') || `MeshPart_${meshIndex}`;
         }
         meshIndex += 1;
 
@@ -273,7 +282,10 @@ export class GLBMeshParser extends BaseMeshFormatParser {
   public readonly formatName: SupportedMeshFormat = 'GLB';
   private readonly loader = new GLTFLoader();
 
-  public parseBuffer(buffer: ArrayBuffer, fileName: string): Promise<THREE.Object3D> {
+  public parseBuffer(
+    buffer: ArrayBuffer,
+    fileName: string
+  ): Promise<THREE.Object3D> {
     return new Promise((resolve, reject) => {
       this.loader.parse(
         buffer,
@@ -305,7 +317,10 @@ export class OBJMeshParser extends BaseMeshFormatParser {
   public readonly formatName: SupportedMeshFormat = 'OBJ';
   private readonly loader = new OBJLoader();
 
-  public async parseBuffer(buffer: ArrayBuffer, fileName: string): Promise<THREE.Object3D> {
+  public async parseBuffer(
+    buffer: ArrayBuffer,
+    fileName: string
+  ): Promise<THREE.Object3D> {
     const text = new TextDecoder('utf-8').decode(buffer);
     const group = this.loader.parse(text);
     group.name = fileName.replace(/\.[^/.]+$/, '');
@@ -321,7 +336,10 @@ export class FBXMeshParser extends BaseMeshFormatParser {
   public readonly formatName: SupportedMeshFormat = 'FBX';
   private readonly loader = new FBXLoader();
 
-  public async parseBuffer(buffer: ArrayBuffer, fileName: string): Promise<THREE.Object3D> {
+  public async parseBuffer(
+    buffer: ArrayBuffer,
+    fileName: string
+  ): Promise<THREE.Object3D> {
     const group = this.loader.parse(buffer, '');
     group.name = fileName.replace(/\.[^/.]+$/, '');
     return this.sanitizeLoadedHierarchy(group);
@@ -331,8 +349,9 @@ export class FBXMeshParser extends BaseMeshFormatParser {
 /**
  * Preprocessor that prepares Three.js Object3D hierarchies for Roblox Studio MeshParts:
  * 1. Normalizes scale to Roblox Studs and aligns bottom pivot to Y = 0.
- * 2. Applies optional polygon decimation (LOD) and auto-splits meshes exceeding 10,000 triangles.
- * 3. Extracts per-MeshPart descriptors, Wavefront .OBJ chunks, and a --!strict Luau MeshPart builder.
+ * 2. Performs real spatial vertex-clustering LOD decimation and auto-splits meshes > 10,000 tris.
+ * 3. Extracts per-MeshPart vertex/normal/UV/face buffers, Wavefront .OBJ chunks, and
+ *    a --!strict Luau EditableMesh + MeshPart builder.
  */
 export class RobloxMeshPreprocessor {
   public static readonly ROBLOX_MAX_TRIANGLES_PER_MESHPART = 10000;
@@ -340,7 +359,8 @@ export class RobloxMeshPreprocessor {
 
   private readonly defaultConfig: Required<MeshPreprocessConfig> = {
     targetStudHeight: 6.0,
-    maxTrianglesPerMeshPart: RobloxMeshPreprocessor.ROBLOX_MAX_TRIANGLES_PER_MESHPART,
+    maxTrianglesPerMeshPart:
+      RobloxMeshPreprocessor.ROBLOX_MAX_TRIANGLES_PER_MESHPART,
     decimationRatio: 1.0,
     collisionFidelity: 'Hull',
     renderFidelity: 'Automatic',
@@ -400,6 +420,128 @@ export class RobloxMeshPreprocessor {
   }
 
   /**
+   * Performs real geometric mesh decimation (LOD simplification) via spatial voxel
+   * vertex clustering when `decimationRatio < 1.0`. Merges vertices within the same
+   * spatial cell, discards degenerate triangles, and recomputes vertex normals.
+   */
+  public decimateGeometryReal(
+    geometry: THREE.BufferGeometry,
+    decimationRatio: number
+  ): THREE.BufferGeometry {
+    const ratio = Math.max(0.1, Math.min(1.0, decimationRatio));
+    if (ratio >= 0.99) {
+      return geometry;
+    }
+
+    const nonIndexed = geometry.index
+      ? geometry.toNonIndexed()
+      : geometry.clone();
+    const posAttr = nonIndexed.getAttribute('position');
+    if (!posAttr || posAttr.count < 12) {
+      return geometry;
+    }
+
+    nonIndexed.computeBoundingBox();
+    const bbox = nonIndexed.boundingBox || new THREE.Box3();
+    const bSize = new THREE.Vector3();
+    bbox.getSize(bSize);
+    const maxDim = Math.max(bSize.x, bSize.y, bSize.z, 0.001);
+
+    // Finer grid resolution for higher ratio, coarser grid for stronger decimation
+    const gridCells = Math.max(6, Math.round(64 * Math.pow(ratio, 0.75)));
+    const cellSize = maxDim / gridCells;
+
+    const uvAttr = nonIndexed.getAttribute('uv');
+    const clusterMap = new Map<
+      string,
+      {
+        index: number;
+        sumX: number;
+        sumY: number;
+        sumZ: number;
+        sumU: number;
+        sumV: number;
+        count: number;
+      }
+    >();
+    const vertexClusterIndices = new Int32Array(posAttr.count);
+
+    for (let i = 0; i < posAttr.count; i++) {
+      const vx = posAttr.getX(i);
+      const vy = posAttr.getY(i);
+      const vz = posAttr.getZ(i);
+      const gx = Math.floor((vx - bbox.min.x) / cellSize);
+      const gy = Math.floor((vy - bbox.min.y) / cellSize);
+      const gz = Math.floor((vz - bbox.min.z) / cellSize);
+      const key = `${gx}_${gy}_${gz}`;
+
+      let cluster = clusterMap.get(key);
+      if (!cluster) {
+        cluster = {
+          index: clusterMap.size,
+          sumX: 0,
+          sumY: 0,
+          sumZ: 0,
+          sumU: 0,
+          sumV: 0,
+          count: 0,
+        };
+        clusterMap.set(key, cluster);
+      }
+      cluster.sumX += vx;
+      cluster.sumY += vy;
+      cluster.sumZ += vz;
+      if (uvAttr) {
+        cluster.sumU += uvAttr.getX(i);
+        cluster.sumV += uvAttr.getY(i);
+      }
+      cluster.count += 1;
+      vertexClusterIndices[i] = cluster.index;
+    }
+
+    const clusteredVertices = new Float32Array(clusterMap.size * 3);
+    const clusteredUVs = uvAttr ? new Float32Array(clusterMap.size * 2) : null;
+
+    clusterMap.forEach((c) => {
+      clusteredVertices[c.index * 3] = c.sumX / c.count;
+      clusteredVertices[c.index * 3 + 1] = c.sumY / c.count;
+      clusteredVertices[c.index * 3 + 2] = c.sumZ / c.count;
+      if (clusteredUVs) {
+        clusteredUVs[c.index * 2] = c.sumU / c.count;
+        clusteredUVs[c.index * 2 + 1] = c.sumV / c.count;
+      }
+    });
+
+    const survivingIndices: number[] = [];
+    for (let i = 0; i < posAttr.count; i += 3) {
+      const a = vertexClusterIndices[i];
+      const b = vertexClusterIndices[i + 1];
+      const c = vertexClusterIndices[i + 2];
+      // Keep only non-degenerate triangles where all 3 clustered vertices are distinct
+      if (a !== b && b !== c && a !== c) {
+        survivingIndices.push(a, b, c);
+      }
+    }
+
+    if (survivingIndices.length < 3) {
+      return geometry;
+    }
+
+    const decimated = new THREE.BufferGeometry();
+    decimated.setAttribute(
+      'position',
+      new THREE.BufferAttribute(clusteredVertices, 3)
+    );
+    if (clusteredUVs) {
+      decimated.setAttribute('uv', new THREE.BufferAttribute(clusteredUVs, 2));
+    }
+    decimated.setIndex(survivingIndices);
+    decimated.computeVertexNormals();
+    decimated.computeBoundingBox();
+    return decimated;
+  }
+
+  /**
    * Splits a BufferGeometry into sub-geometries if its triangle count exceeds Roblox's 10,000 limit
    * while preserving vertex positions, normals, and UV texture coordinates.
    */
@@ -407,7 +549,9 @@ export class RobloxMeshPreprocessor {
     geometry: THREE.BufferGeometry,
     maxTriangles: number = RobloxMeshPreprocessor.ROBLOX_MAX_TRIANGLES_PER_MESHPART
   ): THREE.BufferGeometry[] {
-    const nonIndexed = geometry.index ? geometry.toNonIndexed() : geometry.clone();
+    const nonIndexed = geometry.index
+      ? geometry.toNonIndexed()
+      : geometry.clone();
     const posAttr = nonIndexed.getAttribute('position');
     if (!posAttr) return [geometry];
 
@@ -422,7 +566,11 @@ export class RobloxMeshPreprocessor {
     const normAttr = nonIndexed.getAttribute('normal');
     const uvAttr = nonIndexed.getAttribute('uv');
 
-    for (let startVert = 0; startVert < posAttr.count; startVert += vertsPerChunk) {
+    for (
+      let startVert = 0;
+      startVert < posAttr.count;
+      startVert += vertsPerChunk
+    ) {
       const endVert = Math.min(startVert + vertsPerChunk, posAttr.count);
       const count = endVert - startVert;
 
@@ -433,7 +581,10 @@ export class RobloxMeshPreprocessor {
         subPositions[i * 3 + 1] = posAttr.getY(startVert + i);
         subPositions[i * 3 + 2] = posAttr.getZ(startVert + i);
       }
-      subGeom.setAttribute('position', new THREE.BufferAttribute(subPositions, 3));
+      subGeom.setAttribute(
+        'position',
+        new THREE.BufferAttribute(subPositions, 3)
+      );
 
       if (normAttr) {
         const subNormals = new Float32Array(count * 3);
@@ -442,7 +593,10 @@ export class RobloxMeshPreprocessor {
           subNormals[i * 3 + 1] = normAttr.getY(startVert + i);
           subNormals[i * 3 + 2] = normAttr.getZ(startVert + i);
         }
-        subGeom.setAttribute('normal', new THREE.BufferAttribute(subNormals, 3));
+        subGeom.setAttribute(
+          'normal',
+          new THREE.BufferAttribute(subNormals, 3)
+        );
       } else {
         subGeom.computeVertexNormals();
       }
@@ -464,157 +618,192 @@ export class RobloxMeshPreprocessor {
   }
 
   /**
-   * Serializes a single Mesh into a Wavefront .OBJ chunk in world/Stud coordinates,
-   * including texture coordinates (vt) when present.
+   * Extracts real local-space vertex, normal, UV, and triangle face buffers
+   * from a Mesh so its exact 3D topology is preserved in Three.js and Roblox EditableMesh.
    */
-  public serializeMeshToOBJChunk(mesh: THREE.Mesh, objectName: string): string {
+  public extractSubMeshGeometryData(
+    mesh: THREE.Mesh,
+    partCenterWorld: THREE.Vector3
+  ): SubMeshGeometryData {
+    const geom = mesh.geometry;
+    const posAttr = geom.getAttribute('position');
+    if (!posAttr) {
+      return { vertices: [], normals: [], uvs: [], faces: [] };
+    }
+
+    const normAttr = geom.getAttribute('normal');
+    const uvAttr = geom.getAttribute('uv');
+    const indexAttr = geom.getIndex();
+
+    const vertices: number[][] = [];
+    const normals: number[][] = [];
+    const uvs: number[][] = [];
+    const faces: number[][] = [];
+
+    const v = new THREE.Vector3();
+    const n = new THREE.Vector3();
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+
+    for (let i = 0; i < posAttr.count; i++) {
+      v.fromBufferAttribute(posAttr, i)
+        .applyMatrix4(mesh.matrixWorld)
+        .sub(partCenterWorld);
+      vertices.push([
+        Number(v.x.toFixed(4)),
+        Number(v.y.toFixed(4)),
+        Number(v.z.toFixed(4)),
+      ]);
+
+      if (normAttr && i < normAttr.count) {
+        n.fromBufferAttribute(normAttr, i)
+          .applyNormalMatrix(normalMatrix)
+          .normalize();
+        normals.push([
+          Number(n.x.toFixed(4)),
+          Number(n.y.toFixed(4)),
+          Number(n.z.toFixed(4)),
+        ]);
+      }
+
+      if (uvAttr && i < uvAttr.count) {
+        uvs.push([
+          Number(uvAttr.getX(i).toFixed(4)),
+          Number(uvAttr.getY(i).toFixed(4)),
+        ]);
+      }
+    }
+
+    if (indexAttr) {
+      for (let i = 0; i < indexAttr.count; i += 3) {
+        faces.push([
+          indexAttr.getX(i),
+          indexAttr.getX(i + 1),
+          indexAttr.getX(i + 2),
+        ]);
+      }
+    } else {
+      for (let i = 0; i < posAttr.count; i += 3) {
+        if (i + 2 < posAttr.count) {
+          faces.push([i, i + 1, i + 2]);
+        }
+      }
+    }
+
+    return {
+      vertices,
+      normals,
+      uvs,
+      faces,
+    };
+  }
+
+  /**
+   * Serializes a single Mesh into a Wavefront .OBJ chunk in world/Stud coordinates,
+   * including texture coordinates (vt) and vertex normals (vn) when present.
+   */
+  public serializeMeshToOBJChunk(
+    mesh: THREE.Mesh,
+    objectName: string
+  ): string {
     const geom = mesh.geometry;
     const posAttr = geom?.getAttribute('position');
     if (!posAttr) return '';
 
     const uvAttr = geom.getAttribute('uv');
+    const normAttr = geom.getAttribute('normal');
     let out = `o ${objectName}\n`;
     const v = new THREE.Vector3();
+    const n = new THREE.Vector3();
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+
     for (let i = 0; i < posAttr.count; i++) {
       v.fromBufferAttribute(posAttr, i).applyMatrix4(mesh.matrixWorld);
       out += `v ${v.x.toFixed(4)} ${v.y.toFixed(4)} ${v.z.toFixed(4)}\n`;
     }
 
-    if (uvAttr && uvAttr.count === posAttr.count) {
+    const hasMatchingUVs = Boolean(uvAttr && uvAttr.count === posAttr.count);
+    if (hasMatchingUVs && uvAttr) {
       for (let i = 0; i < uvAttr.count; i++) {
-        const u = uvAttr.getX(i);
-        const vtV = uvAttr.getY(i);
-        out += `vt ${u.toFixed(4)} ${vtV.toFixed(4)}\n`;
+        out += `vt ${uvAttr.getX(i).toFixed(4)} ${uvAttr.getY(i).toFixed(4)}\n`;
       }
     }
 
+    const hasMatchingNormals = Boolean(
+      normAttr && normAttr.count === posAttr.count
+    );
+    if (hasMatchingNormals && normAttr) {
+      for (let i = 0; i < normAttr.count; i++) {
+        n.fromBufferAttribute(normAttr, i)
+          .applyNormalMatrix(normalMatrix)
+          .normalize();
+        out += `vn ${n.x.toFixed(4)} ${n.y.toFixed(4)} ${n.z.toFixed(4)}\n`;
+      }
+    }
+
+    const fmtIdx = (idx1Based: number): string => {
+      if (hasMatchingUVs && hasMatchingNormals) {
+        return `${idx1Based}/${idx1Based}/${idx1Based}`;
+      }
+      if (hasMatchingUVs) {
+        return `${idx1Based}/${idx1Based}`;
+      }
+      if (hasMatchingNormals) {
+        return `${idx1Based}//${idx1Based}`;
+      }
+      return `${idx1Based}`;
+    };
+
     const indexAttr = geom.getIndex();
-    const hasMatchingUVs = Boolean(uvAttr && uvAttr.count === posAttr.count);
     if (indexAttr) {
       for (let i = 0; i < indexAttr.count; i += 3) {
         const a = indexAttr.getX(i) + 1;
         const b = indexAttr.getX(i + 1) + 1;
         const c = indexAttr.getX(i + 2) + 1;
-        out += hasMatchingUVs
-          ? `f ${a}/${a} ${b}/${b} ${c}/${c}\n`
-          : `f ${a} ${b} ${c}\n`;
+        out += `f ${fmtIdx(a)} ${fmtIdx(b)} ${fmtIdx(c)}\n`;
       }
     } else {
       for (let i = 0; i < posAttr.count; i += 3) {
-        const a = i + 1;
-        const b = i + 2;
-        const c = i + 3;
-        out += hasMatchingUVs
-          ? `f ${a}/${a} ${b}/${b} ${c}/${c}\n`
-          : `f ${a} ${b} ${c}\n`;
+        out += `f ${fmtIdx(i + 1)} ${fmtIdx(i + 2)} ${fmtIdx(i + 3)}\n`;
       }
     }
     return out;
   }
 
   /**
-   * Builds a complete --!strict Luau module that constructs the MeshPart assembly
-   * with CollisionFidelity, RenderFidelity, SurfaceAppearance, and WeldConstraints.
+   * Builds a complete --!strict Luau module that constructs real Roblox MeshParts
+   * using AssetService:CreateEditableMesh() and AssetService:CreateMeshPartAsync(),
+   * preserving real vertices, normals, UVs, triangles, CollisionFidelity, RenderFidelity,
+   * and SurfaceAppearance.
    */
   public generateRobloxMeshPartLuau(
     modelName: string,
     subMeshes: ProcessedSubMeshDescriptor[]
   ): string {
-    const safeModelName = modelName.replace(/[^a-zA-Z0-9_]/g, '') || 'ImportedMeshModel';
-    const lines: string[] = [
-      '--!strict',
-      `-- Generated by Forge AI ThreeDEngineProcessor: ${safeModelName}`,
-      `-- Sub-MeshParts: ${subMeshes.length} | Verified <10,000 Tris per MeshPart`,
-      'local Workspace = game:GetService("Workspace")',
-      '',
-      'export type MeshPartSpawnOptions = {',
-      '    origin: CFrame?,',
-      '    meshIdMap: { [string]: string }?,',
-      '    colorMapId: string?,',
-      '    normalMapId: string?,',
-      '    roughnessMapId: string?,',
-      '}',
-      '',
-      `local ${safeModelName}MeshAssembler = {}`,
-      '',
-      `function ${safeModelName}MeshAssembler.Spawn(options: MeshPartSpawnOptions?): Model`,
-      '    local opts: MeshPartSpawnOptions = options or {}',
-      '    local baseOrigin = opts.origin or CFrame.new(0, 0, 0)',
-      '    local model = Instance.new("Model")',
-      `    model.Name = "${safeModelName}"`,
-      '',
-      '    local rootPart: BasePart? = nil',
-      '',
-    ];
-
-    subMeshes.forEach((sub, idx) => {
-      const varName = `meshPart_${idx + 1}`;
-      const [sx, sy, sz] = sub.studSize;
-      const [px, py, pz] = sub.studPosition;
-      const [rx, ry, rz] = sub.studRotation;
-      const [cr, cg, cb] = sub.colorRgb;
-
-      lines.push(
-        `    -- Sub-MeshPart #${idx + 1}: ${sub.name} (${sub.triangleCount} triangles, ${sub.vertexCount} vertices, UVs: ${sub.hasUVCoordinates ? 'Yes' : 'No'})`,
-        `    local ${varName} = Instance.new("Part")`,
-        `    ${varName}.Name = "${sub.name}"`,
-        `    ${varName}.Size = Vector3.new(${sx.toFixed(2)}, ${sy.toFixed(2)}, ${sz.toFixed(2)})`,
-        `    ${varName}.CFrame = baseOrigin * CFrame.new(${px.toFixed(2)}, ${py.toFixed(2)}, ${pz.toFixed(2)}) * CFrame.Angles(math.rad(${rx.toFixed(1)}), math.rad(${ry.toFixed(1)}), math.rad(${rz.toFixed(1)}))`,
-        `    ${varName}.Color = Color3.fromRGB(${cr}, ${cg}, ${cb})`,
-        `    ${varName}.Material = Enum.Material.${sub.robloxMaterial}`,
-        `    ${varName}.Anchored = true`,
-        `    ${varName}.CanCollide = true`,
-        `    ${varName}:SetAttribute("CollisionFidelity", "${sub.collisionFidelity}")`,
-        `    ${varName}:SetAttribute("RenderFidelity", "${sub.renderFidelity}")`,
-        `    ${varName}:SetAttribute("DoubleSided", ${sub.doubleSided ? 'true' : 'false'})`,
-        `    ${varName}:SetAttribute("TriangleCount", ${sub.triangleCount})`,
-        `    ${varName}:SetAttribute("VertexCount", ${sub.vertexCount})`,
-        `    ${varName}:SetAttribute("HasUVCoordinates", ${sub.hasUVCoordinates ? 'true' : 'false'})`,
-        `    ${varName}:SetAttribute("Roughness", ${sub.roughness.toFixed(2)})`,
-        `    ${varName}:SetAttribute("Metalness", ${sub.metalness.toFixed(2)})`,
-        '    if opts.colorMapId or opts.normalMapId or opts.roughnessMapId then',
-        '        local surfaceApp = Instance.new("SurfaceAppearance")',
-        '        if opts.colorMapId then surfaceApp.ColorMap = opts.colorMapId end',
-        '        if opts.normalMapId then surfaceApp.NormalMap = opts.normalMapId end',
-        '        if opts.roughnessMapId then surfaceApp.RoughnessMap = opts.roughnessMapId end',
-        `        surfaceApp.Parent = ${varName}`,
-        '    end',
-        `    ${varName}.Parent = model`,
-        ''
-      );
-
-      if (idx === 0) {
-        lines.push(
-          `    rootPart = ${varName}`,
-          `    model.PrimaryPart = ${varName}`,
-          ''
-        );
-      } else {
-        lines.push(
-          '    if rootPart then',
-          '        local weld = Instance.new("WeldConstraint")',
-          '        weld.Part0 = rootPart',
-          `        weld.Part1 = ${varName}`,
-          `        weld.Parent = ${varName}`,
-          '    end',
-          ''
-        );
-      }
-    });
-
-    lines.push(
-      '    model.Parent = Workspace',
-      '    return model',
-      'end',
-      '',
-      `return ${safeModelName}MeshAssembler`
+    return generateEditableMeshLuauCode(
+      modelName,
+      subMeshes.map((sub) => ({
+        name: sub.name,
+        size: sub.studSize,
+        position: sub.studPosition,
+        rotation: sub.studRotation,
+        color: sub.colorRgb,
+        material: sub.robloxMaterial,
+        roughness: sub.roughness,
+        metalness: sub.metalness,
+        collisionFidelity: sub.collisionFidelity,
+        renderFidelity: sub.renderFidelity,
+        doubleSided: sub.doubleSided,
+        meshData: sub.meshData,
+      }))
     );
-
-    return lines.join('\n');
   }
 
   /**
-   * Executes the full preprocessing pipeline on a loaded Three.js Object3D.
+   * Executes the full preprocessing pipeline on a loaded Three.js Object3D:
+   * - Normalizes scale to Roblox Studs
+   * - Applies real geometric LOD decimation when decimationRatio < 1.0
+   * - Splits meshes > 10,000 triangles
+   * - Preserves real vertex/normal/UV/face buffers (`meshData`) and Wavefront .OBJ
    */
   public preprocessObject3D(
     root: THREE.Object3D,
@@ -639,22 +828,32 @@ export class RobloxMeshPreprocessor {
     const worldBox = new THREE.Box3();
     const partSize = new THREE.Vector3();
     const partCenter = new THREE.Vector3();
-    const euler = new THREE.Euler();
 
     normalizedRoot.traverse((child) => {
       if (!(child as THREE.Mesh).isMesh) return;
       const mesh = child as THREE.Mesh;
       if (!mesh.geometry) return;
 
-      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      const mat = Array.isArray(mesh.material)
+        ? mesh.material[0]
+        : mesh.material;
       const stdMat = mat as THREE.MeshStandardMaterial | undefined;
       const color = stdMat?.color ? stdMat.color : new THREE.Color(0x94a3b8);
-      const roughness = typeof stdMat?.roughness === 'number' ? stdMat.roughness : 0.35;
-      const metalness = typeof stdMat?.metalness === 'number' ? stdMat.metalness : 0.65;
+      const roughness =
+        typeof stdMat?.roughness === 'number' ? stdMat.roughness : 0.35;
+      const metalness =
+        typeof stdMat?.metalness === 'number' ? stdMat.metalness : 0.65;
 
+      // 1. Real geometric LOD decimation if decimationRatio < 1.0
+      const lodGeometry =
+        cfg.decimationRatio < 0.99
+          ? this.decimateGeometryReal(mesh.geometry, cfg.decimationRatio)
+          : mesh.geometry;
+
+      // 2. Auto-split oversized meshes exceeding 10,000 triangles
       const geometries = cfg.autoSplitOversizedMeshes
-        ? this.splitOversizedGeometry(mesh.geometry, cfg.maxTrianglesPerMeshPart)
-        : [mesh.geometry];
+        ? this.splitOversizedGeometry(lodGeometry, cfg.maxTrianglesPerMeshPart)
+        : [lodGeometry];
 
       geometries.forEach((geom, chunkIdx) => {
         const posAttr = geom.getAttribute('position');
@@ -664,20 +863,15 @@ export class RobloxMeshPreprocessor {
         const hasUVCoordinates = Boolean(uvAttr && uvAttr.count > 0);
         const vCount = posAttr.count;
         const indexAttr = geom.getIndex();
-        const rawTriCount = indexAttr
+        const triCount = indexAttr
           ? Math.floor(indexAttr.count / 3)
           : Math.floor(vCount / 3);
-        const triCount = Math.max(
-          4,
-          Math.floor(rawTriCount * Math.max(0.1, Math.min(1.0, cfg.decimationRatio)))
-        );
 
         const tempMesh = new THREE.Mesh(geom, mesh.material);
         tempMesh.matrixWorld.copy(mesh.matrixWorld);
         worldBox.setFromObject(tempMesh);
         worldBox.getSize(partSize);
         worldBox.getCenter(partCenter);
-        euler.setFromRotationMatrix(mesh.matrixWorld);
 
         const baseName = (mesh.name || `MeshPart_${partCounter}`).replace(
           /[^a-zA-Z0-9_]/g,
@@ -690,13 +884,17 @@ export class RobloxMeshPreprocessor {
         const objChunk = this.serializeMeshToOBJChunk(tempMesh, finalName);
         objChunks.push(objChunk);
 
+        // Extract real local-space vertices, normals, UVs, and faces relative to partCenter
+        const meshData = this.extractSubMeshGeometryData(tempMesh, partCenter);
+
         const descriptor: ProcessedSubMeshDescriptor = {
           name: finalName,
           vertexCount: vCount,
           triangleCount: triCount,
           hasUVCoordinates,
           exceedsRobloxLimit:
-            triCount > RobloxMeshPreprocessor.ROBLOX_MAX_TRIANGLES_PER_MESHPART,
+            triCount >
+            RobloxMeshPreprocessor.ROBLOX_MAX_TRIANGLES_PER_MESHPART,
           exceedsVertexLimit:
             vCount > RobloxMeshPreprocessor.ROBLOX_MAX_VERTICES_PER_MESHPART,
           studSize: [
@@ -709,11 +907,7 @@ export class RobloxMeshPreprocessor {
             Number(partCenter.y.toFixed(2)),
             Number(partCenter.z.toFixed(2)),
           ],
-          studRotation: [
-            Number(THREE.MathUtils.radToDeg(euler.x).toFixed(1)),
-            Number(THREE.MathUtils.radToDeg(euler.y).toFixed(1)),
-            Number(THREE.MathUtils.radToDeg(euler.z).toFixed(1)),
-          ],
+          studRotation: [0, 0, 0], // World rotation baked into extracted vertex positions
           colorRgb: [
             Math.round(color.r * 255),
             Math.round(color.g * 255),
@@ -726,6 +920,7 @@ export class RobloxMeshPreprocessor {
           renderFidelity: cfg.renderFidelity,
           doubleSided: cfg.doubleSided,
           objChunkPayload: objChunk,
+          meshData,
         };
 
         subMeshParts.push(descriptor);
@@ -737,7 +932,8 @@ export class RobloxMeshPreprocessor {
     const isRobloxCompliant = subMeshParts.every(
       (p) => !p.exceedsRobloxLimit && !p.exceedsVertexLimit
     );
-    const cleanModelName = modelName.replace(/[^a-zA-Z0-9_]/g, '') || 'ImportedMesh3D';
+    const cleanModelName =
+      modelName.replace(/[^a-zA-Z0-9_]/g, '') || 'ImportedMesh3D';
     const luauMeshPartBuilderCode = this.generateRobloxMeshPartLuau(
       cleanModelName,
       subMeshParts
@@ -756,6 +952,7 @@ export class RobloxMeshPreprocessor {
       luauMeshPartBuilderCode,
       rojoTargetFolder: cfg.rojoTargetFolder,
       fileName: `${cleanModelName}_MeshPart.luau`,
+      objFileName: `${cleanModelName}.obj`,
     };
   }
 }
@@ -766,7 +963,8 @@ export class RobloxMeshPreprocessor {
  * Roblox Studio MeshPart standards (vertex limits, <10,000 triangle counts, and UV
  * texture coordinate presence), and provides async interface methods for calling the
  * FastAPI endpoints (/api/v1/assets/process-meshpart, /api/v1/generate-3d,
- * /api/v1/assets/rebuild-luau) that handle conversion to Roblox-compatible MeshPart geometry.
+ * /api/v1/generate-3d-stream, /api/v1/assets/rebuild-luau, /api/v1/assets/publish-pbr)
+ * that handle conversion to real Roblox MeshPart geometry.
  */
 export class ThreeDEngineProcessor {
   public static readonly MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
@@ -811,30 +1009,18 @@ export class ThreeDEngineProcessor {
     }
   }
 
-  /**
-   * Returns a snapshot of the current FastAPI request loading & error state.
-   */
   public getRequestState(): ThreeDEngineRequestState {
     return { ...this.requestState };
   }
 
-  /**
-   * Returns true if a 3D file processing or FastAPI conversion request is currently active.
-   */
   public isLoading(): boolean {
     return this.requestState.isLoading;
   }
 
-  /**
-   * Returns the last error message from a processing or FastAPI request, or null if none.
-   */
   public getLastError(): string | null {
     return this.requestState.error;
   }
 
-  /**
-   * Clears the current error state and resets the processor stage to 'idle'.
-   */
   public clearError(): void {
     this.updateRequestState({
       isLoading: false,
@@ -846,10 +1032,6 @@ export class ThreeDEngineProcessor {
     });
   }
 
-  /**
-   * Subscribes to loading and error state transitions during 3D ingestion and FastAPI requests.
-   * Returns an unsubscribe function.
-   */
   public subscribeToRequestState(
     listener: (state: ThreeDEngineRequestState) => void
   ): () => void {
@@ -860,9 +1042,6 @@ export class ThreeDEngineProcessor {
     };
   }
 
-  /**
-   * Cancels any in-flight FastAPI conversion or 3D generation request.
-   */
   public cancelActiveRequest(): void {
     if (this.activeAbortController) {
       this.activeAbortController.abort();
@@ -895,10 +1074,6 @@ export class ThreeDEngineProcessor {
     return snapshot;
   }
 
-  /**
-   * Parses FastAPI / Express error payloads (including HTTP 422 Pydantic validation arrays)
-   * into a descriptive FastAPIConversionError.
-   */
   private async parseFastAPIErrorResponse(
     response: Response,
     endpoint: string,
@@ -918,7 +1093,9 @@ export class ThreeDEngineProcessor {
       for (const item of rawBody.detail) {
         if (item && typeof item === 'object') {
           const entry = item as { loc?: Array<string | number>; msg?: string };
-          const locPath = Array.isArray(entry.loc) ? entry.loc.join('.') : 'body';
+          const locPath = Array.isArray(entry.loc)
+            ? entry.loc.join('.')
+            : 'body';
           const msg = entry.msg || 'Valor inválido';
           validationErrors.push(`${locPath}: ${msg}`);
         }
@@ -945,10 +1122,6 @@ export class ThreeDEngineProcessor {
     );
   }
 
-  /**
-   * Central FastAPI HTTP client wrapper that manages loading state transitions,
-   * AbortController timeouts, and structured error handling.
-   */
   private async requestFastAPI<TResponse>(
     endpoint: string,
     method: 'GET' | 'POST',
@@ -994,9 +1167,15 @@ export class ThreeDEngineProcessor {
         method,
         headers:
           method === 'POST'
-            ? { 'Content-Type': 'application/json', Accept: 'application/json' }
+            ? {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              }
             : { Accept: 'application/json' },
-        body: method === 'POST' && body !== undefined ? JSON.stringify(body) : undefined,
+        body:
+          method === 'POST' && body !== undefined
+            ? JSON.stringify(body)
+            : undefined,
         signal: controller.signal,
       });
 
@@ -1040,8 +1219,7 @@ export class ThreeDEngineProcessor {
         throw err;
       }
 
-      const isAbort =
-        err instanceof DOMException && err.name === 'AbortError';
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
       const friendlyMessage = isAbort
         ? `Tiempo de espera agotado o petición cancelada hacia ${endpoint} (${Math.round(
             timeoutMs / 1000
@@ -1081,9 +1259,6 @@ export class ThreeDEngineProcessor {
     }
   }
 
-  /**
-   * Resolves the appropriate parser for a given file name or extension.
-   */
   public getParserForFile(fileName: string): BaseMeshFormatParser {
     const ext = fileName.split('.').pop()?.toLowerCase() || '';
     const parser = this.parsers.get(ext);
@@ -1095,19 +1270,12 @@ export class ThreeDEngineProcessor {
     return parser;
   }
 
-  /**
-   * Ingests a 3D file (.GLB, .GLTF, .OBJ, .FBX) and returns the parsed Three.js hierarchy.
-   */
   public async ingestFile(file: File): Promise<THREE.Object3D> {
     const parser = this.getParserForFile(file.name);
     const buffer = await file.arrayBuffer();
     return parser.parseBuffer(buffer, file.name);
   }
 
-  /**
-   * Validates vertex counts across all sub-meshes in the hierarchy against Roblox MeshPart
-   * vertex budget limits (default 20,000 vertices per MeshPart).
-   */
   public validateVertexLimits(
     rootObject: THREE.Object3D,
     maxVerticesPerMeshPart: number = ThreeDEngineProcessor.ROBLOX_MAX_VERTICES_PER_MESHPART
@@ -1164,10 +1332,6 @@ export class ThreeDEngineProcessor {
     };
   }
 
-  /**
-   * Validates triangle counts across all sub-meshes against Roblox Studio's hard
-   * 10,000-triangle limit per MeshPart.
-   */
   public validateTriangleCounts(
     rootObject: THREE.Object3D,
     maxTrianglesPerMeshPart: number = ThreeDEngineProcessor.ROBLOX_MAX_TRIANGLES_PER_MESHPART
@@ -1201,7 +1365,9 @@ export class ThreeDEngineProcessor {
 
         if (tCount <= 0) {
           zeroTriangleMeshes.push(meshName);
-          errors.push(`La sub-malla '${meshName}' no contiene triángulos válidos (0 caras).`);
+          errors.push(
+            `La sub-malla '${meshName}' no contiene triángulos válidos (0 caras).`
+          );
         } else if (tCount > maxTrianglesPerMeshPart) {
           exceedingMeshes.push({
             meshName,
@@ -1231,10 +1397,6 @@ export class ThreeDEngineProcessor {
     };
   }
 
-  /**
-   * Validates texture coordinate (UV) presence and numeric validity across all sub-meshes,
-   * required by Roblox MeshPart TextureID and SurfaceAppearance PBR maps.
-   */
   public validateTextureCoordinates(
     rootObject: THREE.Object3D
   ): TextureCoordinateValidationResult {
@@ -1410,10 +1572,6 @@ export class ThreeDEngineProcessor {
     };
   }
 
-  /**
-   * Validates the mesh structure of an ingested 3D file against Roblox Studio MeshPart requirements,
-   * delegating to validateMeshLimits (vertex counts, triangle limits, and UV coordinate presence).
-   */
   public validateMeshStructure(
     file: File,
     rootObject?: THREE.Object3D
@@ -1424,7 +1582,9 @@ export class ThreeDEngineProcessor {
     const warnings: string[] = [];
 
     if (!parser) {
-      errors.push(`Extensión '.${ext}' no soportada. Se requiere .GLB, .GLTF, .OBJ o .FBX.`);
+      errors.push(
+        `Extensión '.${ext}' no soportada. Se requiere .GLB, .GLTF, .OBJ o .FBX.`
+      );
     }
     if (file.size === 0) {
       errors.push('El archivo 3D está vacío (0 bytes).');
@@ -1452,7 +1612,9 @@ export class ThreeDEngineProcessor {
       box.getSize(size);
       if (size.lengthSq() < 1e-8) {
         hasDegenerateBounds = true;
-        errors.push('La geometría 3D tiene dimensiones degeneradas (bounding box nulo).');
+        errors.push(
+          'La geometría 3D tiene dimensiones degeneradas (bounding box nulo).'
+        );
       }
 
       rootObject.traverse((child) => {
@@ -1467,7 +1629,9 @@ export class ThreeDEngineProcessor {
       });
 
       if (subMeshCount === 0) {
-        errors.push('El archivo 3D no contiene ninguna malla (Mesh) con geometría.');
+        errors.push(
+          'El archivo 3D no contiene ninguna malla (Mesh) con geometría.'
+        );
       } else {
         meshLimitsValidation = this.validateMeshLimits(rootObject);
         vertexValidation = meshLimitsValidation.vertexValidation;
@@ -1507,9 +1671,6 @@ export class ThreeDEngineProcessor {
     };
   }
 
-  /**
-   * Alias for validateMeshStructure to maintain full backward compatibility.
-   */
   public validateGeometryForRoblox(
     file: File,
     rootObject?: THREE.Object3D
@@ -1517,10 +1678,6 @@ export class ThreeDEngineProcessor {
     return this.validateMeshStructure(file, rootObject);
   }
 
-  /**
-   * Ingests a local File (.glb, .gltf, .obj, .fbx), validates its mesh structure,
-   * and executes the Roblox MeshPart Preprocessor while updating loading states.
-   */
   public async processFile(
     file: File,
     config?: MeshPreprocessConfig,
@@ -1585,7 +1742,7 @@ export class ThreeDEngineProcessor {
           isLoading: true,
           stage: 'preprocessing',
           activeEndpoint: null,
-          progressMessage: `Normalizando escala a Studs y preparando sub-mallas MeshPart (${validation.totalTriangles.toLocaleString()} tris)...`,
+          progressMessage: `Normalizando escala a Studs, aplicando LOD y extrayendo geometría real (${validation.totalTriangles.toLocaleString()} tris)...`,
         },
         onStateChange
       );
@@ -1605,7 +1762,7 @@ export class ThreeDEngineProcessor {
           isLoading: false,
           stage: 'completed',
           activeEndpoint: null,
-          progressMessage: `Pre-procesamiento local completado (${exportPayload.subMeshParts.length} MeshParts).`,
+          progressMessage: `Pre-procesamiento completado (${exportPayload.subMeshParts.length} MeshParts con geometría real conservada).`,
           error: null,
           statusCode: 200,
         },
@@ -1640,13 +1797,13 @@ export class ThreeDEngineProcessor {
   }
 
   /**
-   * Converts a preprocessed MeshPartExportPayload into a Forge3DAsset compatible with
-   * the 3D Studio Viewport, Interactive Part Editor, and Reusable Asset Library.
+   * Converts a preprocessed MeshPartExportPayload into a Forge3DAsset while
+   * preserving `shape: 'MeshPart'` and the real `meshData` (vertices, normals, UVs, faces).
    */
   public toForge3DAsset(payload: MeshPartExportPayload): Forge3DAsset {
     const parts: MeshPart3DSpec[] = payload.subMeshParts.map((sub) => ({
       name: sub.name,
-      shape: 'Block',
+      shape: 'MeshPart',
       size: sub.studSize,
       position: sub.studPosition,
       rotation: sub.studRotation,
@@ -1658,6 +1815,9 @@ export class ThreeDEngineProcessor {
       canCollide: true,
       anchored: true,
       collisionFidelity: sub.collisionFidelity,
+      renderFidelity: sub.renderFidelity,
+      doubleSided: sub.doubleSided,
+      meshData: sub.meshData,
     }));
 
     return {
@@ -1670,13 +1830,15 @@ export class ThreeDEngineProcessor {
         payload.subMeshParts[0]?.collisionFidelity || 'Hull',
       rojo_target_folder: payload.rojoTargetFolder,
       file_name: payload.fileName,
-      description: `MeshPart 3D pre-procesado desde ${payload.sourceFormat} (${payload.subMeshParts.length} sub-mallas, ${payload.totalTriangles} tris, escala ${payload.scaleFactorApplied}x a Studs).`,
+      obj_file_name: payload.objFileName,
+      description: `MeshPart 3D con geometría real desde ${payload.sourceFormat} (${payload.subMeshParts.length} MeshParts, ${payload.totalTriangles} tris, ${payload.totalVertices} vértices, escala ${payload.scaleFactorApplied}x a Studs).`,
       pbr_profile: {
         albedo_hex: '#38bdf8',
         roughness: payload.subMeshParts[0]?.roughness ?? 0.35,
         metalness: payload.subMeshParts[0]?.metalness ?? 0.65,
         emissive_hex: '#06b6d4',
-        roblox_material: payload.subMeshParts[0]?.robloxMaterial || 'Metal',
+        roblox_material:
+          payload.subMeshParts[0]?.robloxMaterial || 'Metal',
         pattern: 'hex_plate',
       },
       parts,
@@ -1686,14 +1848,18 @@ export class ThreeDEngineProcessor {
 
   /**
    * API Request Handler: Calls FastAPI POST /api/v1/assets/process-meshpart
-   * to convert preprocessed GLB/OBJ geometry into Roblox-compatible MeshPart descriptions
-   * and persist the generated --!strict Luau module in Rojo.
+   * to persist both the real Wavefront .OBJ geometry and the --!strict EditableMesh/MeshPart
+   * Luau module in Rojo and the Reusable Asset Library.
    */
   public async convertToRobloxMeshParts(
     payload: MeshPartExportPayload,
     options: FastAPIRequestOptions = {}
   ): Promise<BackendMeshPartSyncResponse> {
-    if (!payload || !Array.isArray(payload.subMeshParts) || payload.subMeshParts.length === 0) {
+    if (
+      !payload ||
+      !Array.isArray(payload.subMeshParts) ||
+      payload.subMeshParts.length === 0
+    ) {
       const msg =
         'El payload de exportación MeshPart está vacío o no contiene sub-mallas válidas.';
       this.updateRequestState(
@@ -1719,7 +1885,7 @@ export class ThreeDEngineProcessor {
       '/api/v1/assets/process-meshpart',
       'POST',
       'converting_meshpart',
-      `Enviando ${payload.subMeshParts.length} sub-mallas (${payload.totalTriangles.toLocaleString()} tris) a FastAPI para conversión a Roblox MeshPart...`,
+      `Enviando ${payload.subMeshParts.length} MeshParts (${payload.totalTriangles.toLocaleString()} tris + archivo .OBJ) a FastAPI...`,
       {
         payload,
         save_to_rojo: options.saveToRojo ?? true,
@@ -1729,9 +1895,6 @@ export class ThreeDEngineProcessor {
     );
   }
 
-  /**
-   * Alias for convertToRobloxMeshParts.
-   */
   public async exportToBackendMeshParts(
     payload: MeshPartExportPayload,
     options: FastAPIRequestOptions = {}
@@ -1739,16 +1902,13 @@ export class ThreeDEngineProcessor {
     return this.convertToRobloxMeshParts(payload, options);
   }
 
-  /**
-   * API Request Handler: Calls FastAPI POST /api/v1/generate-3d
-   * to synthesize Roblox-ready 3D MeshPart hierarchies from text or reference images.
-   */
   public async generate3DMeshPartWithFastAPI(
     request: FastAPI3DGenerationRequest,
     options: FastAPIRequestOptions = {}
   ): Promise<Forge3DAsset> {
     if (!request.prompt || !request.prompt.trim()) {
-      const msg = 'Se requiere un prompt descriptivo para generar el modelo 3D en FastAPI.';
+      const msg =
+        'Se requiere un prompt descriptivo para generar el modelo 3D en FastAPI.';
       this.updateRequestState(
         {
           isLoading: false,
@@ -1774,7 +1934,7 @@ export class ThreeDEngineProcessor {
   }
 
   /**
-   * API Request Handler (Streaming NDJSON): Calls FastAPI POST /api/v1/generate-3d-stream
+   * API Request Handler (Streaming SSE / NDJSON): Calls FastAPI POST /api/v1/generate-3d-stream
    * with real-time progress logs, loading state updates, and error handling.
    */
   public async stream3DMeshPartWithFastAPI(
@@ -1787,7 +1947,10 @@ export class ThreeDEngineProcessor {
     const controller = new AbortController();
     this.activeAbortController = controller;
 
-    const timeoutId = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutId = globalThis.setTimeout(
+      () => controller.abort(),
+      timeoutMs
+    );
 
     this.updateRequestState(
       {
@@ -1850,32 +2013,48 @@ export class ThreeDEngineProcessor {
         buffer = lines.pop() || '';
 
         for (const rawLine of lines) {
-          if (!rawLine.trim()) continue;
-          const event = JSON.parse(rawLine) as {
-            type: string;
-            message?: string;
-            data?: Forge3DAsset;
-          };
+          const trimmed = rawLine.trim();
+          if (!trimmed) continue;
+          const jsonStr = trimmed.startsWith('data:')
+            ? trimmed.replace(/^data:\s*/, '')
+            : trimmed;
+          try {
+            const event = JSON.parse(jsonStr) as {
+              type: string;
+              message?: string;
+              data?: Forge3DAsset;
+            };
 
-          if (event.type === 'log' && event.message) {
-            options.onStreamLog?.(event.message);
-            this.updateRequestState(
-              {
-                isLoading: true,
-                stage: 'generating_3d',
-                activeEndpoint: endpoint,
-                progressMessage: event.message,
-              },
-              options.onStateChange
-            );
-          } else if (event.type === 'error') {
-            throw new FastAPIConversionError(
-              event.message || 'Error durante el stream 3D en FastAPI.',
-              500,
-              endpoint
-            );
-          } else if (event.type === 'result' && event.data) {
-            finalAsset = event.data;
+            if (
+              (event.type === 'log' || event.type === 'rojo_write') &&
+              event.message
+            ) {
+              options.onStreamLog?.(event.message);
+              this.updateRequestState(
+                {
+                  isLoading: true,
+                  stage: 'generating_3d',
+                  activeEndpoint: endpoint,
+                  progressMessage: event.message,
+                },
+                options.onStateChange
+              );
+            } else if (event.type === 'error') {
+              throw new FastAPIConversionError(
+                event.message || 'Error durante el stream 3D en FastAPI.',
+                500,
+                endpoint
+              );
+            } else if (
+              (event.type === 'done' || event.type === 'result') &&
+              event.data
+            ) {
+              finalAsset = event.data;
+            }
+          } catch (parseErr) {
+            if (parseErr instanceof FastAPIConversionError) {
+              throw parseErr;
+            }
           }
         }
       }
@@ -1933,10 +2112,6 @@ export class ThreeDEngineProcessor {
     }
   }
 
-  /**
-   * API Request Handler: Calls FastAPI POST /api/v1/assets/rebuild-luau
-   * to recompile and synchronize modified MeshPart sub-meshes with Rojo.
-   */
   public async rebuildMeshPartLuauOnFastAPI(
     asset: Forge3DAsset,
     options: FastAPIRequestOptions = {}
@@ -1956,9 +2131,41 @@ export class ThreeDEngineProcessor {
   }
 
   /**
-   * API Request Handler: Calls FastAPI GET /api/v1/assets/library
-   * to retrieve all reusable 3D MeshPart assets stored in the backend library.
+   * API Request Handler: Calls FastAPI POST /api/v1/assets/publish-pbr
+   * to persist procedural PBR textures (Albedo, Normal, Roughness PNGs) into the Rojo workspace
+   * and generate a --!strict SurfaceAppearance binder module.
    */
+  public async publishPBRToRojo(
+    pbrPayload: {
+      material_name: string;
+      pattern: string;
+      albedo_hex: string;
+      emissive_hex: string;
+      roughness: number;
+      metalness: number;
+      albedo_data_url: string;
+      normal_data_url: string;
+      roughness_data_url: string;
+      target_asset_id?: string;
+    },
+    options: FastAPIRequestOptions = {}
+  ): Promise<{
+    success: boolean;
+    material_name: string;
+    saved_textures: string[];
+    luau_binder_path: string;
+    luau_code: string;
+  }> {
+    return this.requestFastAPI(
+      '/api/v1/assets/publish-pbr',
+      'POST',
+      'converting_meshpart',
+      `Exportando mapas PBR (ColorMap, NormalMap, RoughnessMap) y SurfaceAppearance para '${pbrPayload.material_name}' a Rojo...`,
+      pbrPayload,
+      options
+    );
+  }
+
   public async fetchAssetLibraryFromFastAPI(
     options: FastAPIRequestOptions = {}
   ): Promise<{ assets: Forge3DAsset[] }> {
@@ -1972,10 +2179,6 @@ export class ThreeDEngineProcessor {
     );
   }
 
-  /**
-   * API Request Handler: Calls FastAPI POST /api/v1/world/build-scene
-   * to assemble a complete Roblox 3D World Scene with Lighting, Terrain, and Asset placements.
-   */
   public async buildWorldSceneWithFastAPI(
     sceneRequest: {
       scene_name: string;
@@ -2012,10 +2215,6 @@ export class ThreeDEngineProcessor {
     );
   }
 
-  /**
-   * API Request Handler: Calls FastAPI GET /api/v1/health
-   * to verify backend availability, active Gemini SDK status, and Rojo workspace sync state.
-   */
   public async checkFastAPIHealth(
     options: FastAPIRequestOptions = {}
   ): Promise<{
@@ -2033,11 +2232,6 @@ export class ThreeDEngineProcessor {
     );
   }
 
-  /**
-   * End-to-end method: ingests a GLB/GLTF/OBJ/FBX file, validates its mesh structure,
-   * preprocesses it into Roblox MeshParts, and calls the FastAPI endpoint to persist it
-   * with full loading state and error tracking.
-   */
   public async processAndSyncWithBackend(
     file: File,
     config?: MeshPreprocessConfig,
@@ -2068,4 +2262,3 @@ export class ThreeDEngineProcessor {
 
 export { ThreeDEngineProcessor as Roblox3DEngineProcessor };
 export const default3DEngineProcessor = new ThreeDEngineProcessor();
-
