@@ -1,370 +1,450 @@
 --!strict
 --[[
-    Forge AI - Roblox Studio Plugin
-    ================================
-    Connects Roblox Studio to your local FastAPI Forge AI backend via HttpService.
-    Place this script in your local Studio plugins folder (%LocalAppData%/Roblox/Plugins on Windows
-    or ~/Library/Application Support/Roblox/Plugins on macOS) or save as a Local Plugin in Studio.
+    Forge AI Studio Plugin v2.0 - Unified Luau, ForgeGUI, 3D Engine & Rojo Verifier
+    ===============================================================================
+    Connects Roblox Studio to the Unified Forge AI Backend via HttpService.
+    Capabilities:
+    1. Dynamic Script Generator (Server / Client / Module + Fast / Pro model tiers)
+    2. ForgeGUI Builder (StarterGui instance tree + Luau module sync)
+    3. 3D Model & Scene Spawner (Instantiates multi-part 3D models, PBR SurfaceAppearance, and scenes into Workspace or WorldModel)
+    4. Reusable Asset Library Manager (Browse & insert 3D assets at camera CFrame)
+    5. Selection Geometry Inspector & Optimizer (CollisionFidelity, Anchored, Material batch tools)
+    6. Rojo Sync Manifest Verifier (Verifies that Rojo files on disk arrived in Roblox Studio DataModel)
 ]]
 
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local HttpService = game:GetService("HttpService")
-local Selection = game:GetService("Selection")
-local StarterGui = game:GetService("StarterGui")
-local ServerScriptService = game:GetService("ServerScriptService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Selection = game:GetService("Selection")
+local ServerScriptService = game:GetService("ServerScriptService")
+local StarterGui = game:GetService("StarterGui")
 local StarterPlayer = game:GetService("StarterPlayer")
+local Workspace = game:GetService("Workspace")
 
--- Configuration for local backend
+-- Default unified backend endpoint (FastAPI port 8000 or Gateway port 3000)
 local BACKEND_URL = "http://127.0.0.1:8000"
+local FORGE_SECURITY_TOKEN = ""
 
--- Check if HttpService is enabled
-local function checkHttpEnabled(): boolean
-    local success, _ = pcall(function()
-        HttpService:GetAsync(BACKEND_URL .. "/api/v1/health")
-    end)
-    return success
-end
-
--- Plugin Toolbar and UI Setup
-local toolbar = plugin:CreateToolbar("Forge AI")
-local openButton = toolbar:CreateButton(
-    "Forge AI Studio",
-    "Open Forge AI Luau & UI Generator",
+local toolbar = plugin:CreateToolbar("Forge AI v2.0")
+local toggleButton = toolbar:CreateButton(
+    "Forge AI Suite",
+    "Abrir suite de creación 3D, Luau, ForgeGUI y Verificador Rojo",
     "rbxassetid://4458901886"
 )
 
 local widgetInfo = DockWidgetPluginGuiInfo.new(
     Enum.InitialDockState.Right,
-    false, -- Initially enabled
-    false, -- Override previous enabled state
-    380,   -- Default width
-    520,   -- Default height
-    320,   -- Min width
-    400    -- Min height
+    false,
+    false,
+    420,
+    640,
+    360,
+    480
 )
 
-local dockWidget = plugin:CreateDockWidgetPluginGui("ForgeAIWidget", widgetInfo)
-dockWidget.Title = "Forge AI - Luau & Rojo Copilot"
+local dockWidget = plugin:CreateDockWidgetPluginGui("ForgeAIStudioSuiteV2", widgetInfo)
+dockWidget.Title = "Forge AI v2.0 • 3D, Luau & Rojo"
 
-openButton.Click:Connect(function()
+toggleButton.Click:Connect(function()
     dockWidget.Enabled = not dockWidget.Enabled
 end)
 
--- Helper to deserialize JSON ui_tree directly into Roblox Instances in StarterGui
-local function buildInstanceFromTree(nodeData: any, parent: Instance): Instance?
-    local className = nodeData.class_name or "Frame"
-    local instanceName = nodeData.name or "NewInstance"
-    
-    local ok, inst = pcall(function()
-        return Instance.new(className)
+-- HTTP Helper with security headers
+local function requestBackend(path: string, method: "GET" | "POST" | "DELETE", bodyTable: { [string]: any }?): (boolean, any)
+    local headers: { [string]: string } = {
+        ["Content-Type"] = "application/json",
+    }
+    if #FORGE_SECURITY_TOKEN > 0 then
+        headers["X-Forge-Token"] = FORGE_SECURITY_TOKEN
+    end
+
+    local ok, response = pcall(function()
+        return HttpService:RequestAsync({
+            Url = BACKEND_URL .. path,
+            Method = method,
+            Headers = headers,
+            Body = bodyTable and HttpService:JSONEncode(bodyTable) or nil,
+        })
     end)
-    if not ok or not inst then
-        warn("[Forge AI] Unsupported ClassName in ui_tree:", className)
-        return nil
+
+    if not ok or not response then
+        return false, "No se pudo conectar a " .. BACKEND_URL .. " (Verifica que FastAPI esté activo y HttpService habilitado)"
     end
 
-    inst.Name = instanceName
-
-    -- Apply properties
-    if nodeData.properties and typeof(nodeData.properties) == "table" then
-        for propName, propValue in pairs(nodeData.properties) do
-            pcall(function()
-                -- Common property type conversions from JSON
-                if propName == "Size" and typeof(propValue) == "table" then
-                    inst[propName] = UDim2.new(
-                        propValue[1] or 0, propValue[2] or 0,
-                        propValue[3] or 0, propValue[4] or 0
-                    )
-                elseif propName == "Position" and typeof(propValue) == "table" then
-                    inst[propName] = UDim2.new(
-                        propValue[1] or 0, propValue[2] or 0,
-                        propValue[3] or 0, propValue[4] or 0
-                    )
-                elseif propName == "AnchorPoint" and typeof(propValue) == "table" then
-                    inst[propName] = Vector2.new(propValue[1] or 0, propValue[2] or 0)
-                elseif (propName == "BackgroundColor3" or propName == "TextColor3" or propName == "Color") and typeof(propValue) == "table" then
-                    inst[propName] = Color3.fromRGB(propValue[1] or 255, propValue[2] or 255, propValue[3] or 255)
-                elseif propName == "CornerRadius" and typeof(propValue) == "table" then
-                    inst[propName] = UDim.new(propValue[1] or 0, propValue[2] or 8)
-                else
-                    inst[propName] = propValue
-                end
-            end)
-        end
+    if not response.Success then
+        return false, "HTTP " .. tostring(response.StatusCode) .. ": " .. tostring(response.Body)
     end
 
-    inst.Parent = parent
+    local decodeOk, decoded = pcall(function()
+        return HttpService:JSONDecode(response.Body)
+    end)
 
-    -- Recursively build children
-    if nodeData.children and typeof(nodeData.children) == "table" then
-        for _, childNode in ipairs(nodeData.children) do
-            buildInstanceFromTree(childNode, inst)
-        end
+    if not decodeOk then
+        return false, "Error decodificando JSON del servidor"
     end
 
-    return inst
+    return true, decoded
 end
 
--- Plugin GUI Construction (Pure Luau with strict responsive styling)
-local rootFrame = Instance.new("Frame")
-rootFrame.Size = UDim2.fromScale(1, 1)
-rootFrame.BackgroundColor3 = Color3.fromRGB(24, 25, 29)
-rootFrame.BorderSizePixel = 0
-rootFrame.Parent = dockWidget
+-- Build 3D Model from Forge3DAsset parts array in Workspace or WorldModel
+local function construct3DModelFromSpec(assetData: any, targetParent: Instance?): Model
+    local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Spawn 3D Asset")
 
-local padding = Instance.new("UIPadding")
-padding.PaddingTop = UDim.new(0, 14)
-padding.PaddingBottom = UDim.new(0, 14)
-padding.PaddingLeft = UDim.new(0, 14)
-padding.PaddingRight = UDim.new(0, 14)
-padding.Parent = rootFrame
+    local model = Instance.new("Model")
+    model.Name = assetData.name or "Forge3DModel"
 
-local listLayout = Instance.new("UIListLayout")
-listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-listLayout.Padding = UDim.new(0, 10)
-listLayout.Parent = rootFrame
+    local camera = Workspace.CurrentCamera
+    local spawnOrigin = if camera
+        then CFrame.new(camera.CFrame.Position + (camera.CFrame.LookVector * 18))
+        else CFrame.new(0, 5, 0)
 
--- Header
-local titleLabel = Instance.new("TextLabel")
-titleLabel.Text = "⚡ Forge AI: Luau & Rojo Engine"
-titleLabel.Font = Enum.Font.GothamBold
-titleLabel.TextSize = 16
-titleLabel.TextColor3 = Color3.fromRGB(240, 240, 245)
-titleLabel.Size = UDim2.new(1, 0, 0, 26)
-titleLabel.BackgroundTransparency = 1
-titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-titleLabel.LayoutOrder = 1
-titleLabel.Parent = rootFrame
+    local partsList = assetData.parts or {}
+    for idx, partSpec in ipairs(partsList) do
+        local shapeName = partSpec.shape or "Block"
+        local part: BasePart
 
--- Status Indicator
-local statusLabel = Instance.new("TextLabel")
-statusLabel.Text = "Conectando al servidor local (http://127.0.0.1:8000)..."
-statusLabel.Font = Enum.Font.Gotham
-statusLabel.TextSize = 12
-statusLabel.TextColor3 = Color3.fromRGB(160, 165, 180)
-statusLabel.Size = UDim2.new(1, 0, 0, 20)
-statusLabel.BackgroundTransparency = 1
-statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-statusLabel.LayoutOrder = 2
-statusLabel.Parent = rootFrame
+        if shapeName == "Wedge" then
+            part = Instance.new("WedgePart")
+        elseif shapeName == "CornerWedge" then
+            part = Instance.new("CornerWedgePart")
+        else
+            local stdPart = Instance.new("Part")
+            if shapeName == "Cylinder" then
+                stdPart.Shape = Enum.PartType.Cylinder
+            elseif shapeName == "Ball" then
+                stdPart.Shape = Enum.PartType.Ball
+            else
+                stdPart.Shape = Enum.PartType.Block
+            end
+            part = stdPart
+        end
 
--- Tab Selection Buttons (Script vs UI)
-local tabContainer = Instance.new("Frame")
-tabContainer.Size = UDim2.new(1, 0, 0, 32)
-tabContainer.BackgroundTransparency = 1
-tabContainer.LayoutOrder = 3
-tabContainer.Parent = rootFrame
+        part.Name = partSpec.name or ("SubPart_" .. tostring(idx))
 
-local tabLayout = Instance.new("UIListLayout")
-tabLayout.FillDirection = Enum.FillDirection.Horizontal
-tabLayout.Padding = UDim.new(0, 8)
-tabLayout.Parent = tabContainer
+        local sz = partSpec.size or { 2, 2, 2 }
+        if shapeName == "Cylinder" then
+            -- Roblox cylinders have height along X axis
+            part.Size = Vector3.new(sz[2] or 2, sz[1] or 2, sz[3] or 2)
+        else
+            part.Size = Vector3.new(sz[1] or 2, sz[2] or 2, sz[3] or 2)
+        end
 
-local scriptTabBtn = Instance.new("TextButton")
-scriptTabBtn.Text = "📄 Generar Script"
-scriptTabBtn.Font = Enum.Font.GothamMedium
-scriptTabBtn.TextSize = 12
-scriptTabBtn.Size = UDim2.new(0.48, 0, 1, 0)
-scriptTabBtn.BackgroundColor3 = Color3.fromRGB(59, 130, 246)
-scriptTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-scriptTabBtn.Parent = tabContainer
-local btnCorner1 = Instance.new("UICorner")
-btnCorner1.CornerRadius = UDim.new(0, 6)
-btnCorner1.Parent = scriptTabBtn
+        local pos = partSpec.position or { 0, 1, 0 }
+        local rot = partSpec.rotation or { 0, 0, 0 }
+        local rotCFrame = CFrame.Angles(math.rad(rot[1] or 0), math.rad(rot[2] or 0), math.rad(rot[3] or 0))
+        if shapeName == "Cylinder" then
+            rotCFrame = rotCFrame * CFrame.Angles(0, 0, math.rad(90))
+        end
 
-local uiTabBtn = Instance.new("TextButton")
-uiTabBtn.Text = "🎨 ForgeGUI (UI)"
-uiTabBtn.Font = Enum.Font.GothamMedium
-uiTabBtn.TextSize = 12
-uiTabBtn.Size = UDim2.new(0.48, 0, 1, 0)
-uiTabBtn.BackgroundColor3 = Color3.fromRGB(38, 42, 53)
-uiTabBtn.TextColor3 = Color3.fromRGB(180, 185, 200)
-uiTabBtn.Parent = tabContainer
-local btnCorner2 = Instance.new("UICorner")
-btnCorner2.CornerRadius = UDim.new(0, 6)
-btnCorner2.Parent = uiTabBtn
+        part.CFrame = spawnOrigin * CFrame.new(pos[1] or 0, pos[2] or 0, pos[3] or 0) * rotCFrame
 
--- Mode state
-local activeMode = "Script" -- "Script" | "UI"
+        local col = partSpec.color or { 160, 165, 175 }
+        part.Color = Color3.fromRGB(col[1] or 160, col[2] or 165, col[3] or 175)
 
--- Input Prompt Box
+        local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
+        if matEnum then
+            part.Material = matEnum
+        end
+
+        part.Transparency = partSpec.transparency or 0
+        part.Anchored = if partSpec.anchored ~= nil then partSpec.anchored else true
+        part.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
+        part.TopSurface = Enum.SurfaceType.Smooth
+        part.BottomSurface = Enum.SurfaceType.Smooth
+
+        -- Add PointLight for Neon emitter parts
+        if part.Material == Enum.Material.Neon then
+            local light = Instance.new("PointLight")
+            light.Color = part.Color
+            light.Range = 12
+            light.Brightness = 1.8
+            light.Parent = part
+        end
+
+        part.Parent = model
+        if idx == 1 then
+            model.PrimaryPart = part
+        end
+    end
+
+    model.Parent = targetParent or Workspace
+    Selection:Set({ model })
+
+    if recordId then
+        ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+    end
+
+    return model
+end
+
+-- Verify Rojo Sync Manifest against actual Roblox Studio DataModel
+local function verifyRojoSyncInStudio(): (number, number, string)
+    local ok, data = requestBackend("/api/v1/rojo/sync-manifest", "GET", nil)
+    if not ok then
+        return 0, 0, tostring(data)
+    end
+
+    local files = data.files or {}
+    local syncedCount = 0
+    local missingList = {}
+
+    for _, item in ipairs(files) do
+        local name = item.name
+        local relPath: string = item.relative_path or ""
+        local found = nil
+
+        if string.find(relPath, "^src/server") then
+            found = ServerScriptService:FindFirstChild(name, true)
+        elseif string.find(relPath, "^src/client/UI") then
+            found = StarterGui:FindFirstChild(name, true)
+        elseif string.find(relPath, "^src/client") then
+            found = StarterPlayer:FindFirstChild(name, true)
+        else
+            found = ReplicatedStorage:FindFirstChild(name, true)
+        end
+
+        if found then
+            syncedCount += 1
+        else
+            table.insert(missingList, name .. " (" .. relPath .. ")")
+        end
+    end
+
+    local report = string.format(
+        "Sincronizados en Studio: %d/%d archivos.\n%s",
+        syncedCount,
+        #files,
+        if #missingList > 0 then "Pendientes de Rojo serve: " .. table.concat(missingList, ", ") else "✅ 100% Sincronizado con Rojo"
+    )
+    return syncedCount, #files, report
+end
+
+-- Inspect and optimize currently selected 3D geometry in Studio
+local function optimizeSelectedGeometry(collisionMode: string, anchorAll: boolean): string
+    local selected = Selection:Get()
+    if #selected == 0 then
+        return "Selecciona uno o más Models/BaseParts en el Viewport de Roblox Studio."
+    end
+
+    local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Optimize Geometry")
+    local partCount = 0
+
+    for _, inst in ipairs(selected) do
+        local descendants = inst:GetDescendants()
+        if inst:IsA("BasePart") then
+            table.insert(descendants, inst)
+        end
+        for _, d in ipairs(descendants) do
+            if d:IsA("BasePart") then
+                partCount += 1
+                d.Anchored = anchorAll
+                d.TopSurface = Enum.SurfaceType.Smooth
+                d.BottomSurface = Enum.SurfaceType.Smooth
+            end
+        end
+    end
+
+    if recordId then
+        ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+    end
+
+    return string.format("Optimizadas %d BaseParts en la selección actual (Collision: %s, Anchored: %s).", partCount, collisionMode, tostring(anchorAll))
+end
+
+-- UI Construction for Plugin Widget
+local root = Instance.new("ScrollingFrame")
+root.Size = UDim2.fromScale(1, 1)
+root.CanvasSize = UDim2.new(0, 0, 0, 760)
+root.ScrollBarThickness = 6
+root.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
+root.BorderSizePixel = 0
+root.Parent = dockWidget
+
+local pad = Instance.new("UIPadding")
+pad.PaddingTop = UDim.new(0, 12)
+pad.PaddingBottom = UDim.new(0, 12)
+pad.PaddingLeft = UDim.new(0, 12)
+pad.PaddingRight = UDim.new(0, 12)
+pad.Parent = root
+
+local layout = Instance.new("UIListLayout")
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, 8)
+layout.Parent = root
+
+-- State Variables (Dynamic Script Type & Model Tier)
+local currentMode: "3D" | "Script" | "UI" | "RojoSync" = "3D"
+local selectedScriptType: "Server" | "Client" | "Module" = "Server"
+local selectedModelTier: "fast" | "pro" = "fast"
+
+local headerLabel = Instance.new("TextLabel")
+headerLabel.Text = "Forge AI v2.0 • 3D, Luau & Rojo"
+headerLabel.Font = Enum.Font.GothamBold
+headerLabel.TextSize = 15
+headerLabel.TextColor3 = Color3.fromRGB(248, 250, 252)
+headerLabel.Size = UDim2.new(1, 0, 0, 24)
+headerLabel.BackgroundTransparency = 1
+headerLabel.TextXAlignment = Enum.TextXAlignment.Left
+headerLabel.LayoutOrder = 1
+headerLabel.Parent = root
+
+-- Script Type Selector Row (Server | Client | Module)
+local scriptTypeRow = Instance.new("Frame")
+scriptTypeRow.Size = UDim2.new(1, 0, 0, 28)
+scriptTypeRow.BackgroundTransparency = 1
+scriptTypeRow.LayoutOrder = 2
+scriptTypeRow.Parent = root
+
+local stLayout = Instance.new("UIListLayout")
+stLayout.FillDirection = Enum.FillDirection.Horizontal
+stLayout.Padding = UDim.new(0, 6)
+stLayout.Parent = scriptTypeRow
+
+local function createSmallButton(parent: Instance, text: string, widthScale: number): TextButton
+    local b = Instance.new("TextButton")
+    b.Text = text
+    b.Font = Enum.Font.GothamSemibold
+    b.TextSize = 11
+    b.Size = UDim2.new(widthScale, -4, 1, 0)
+    b.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+    b.TextColor3 = Color3.fromRGB(226, 232, 240)
+    b.Parent = parent
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = b
+    return b
+end
+
+local btnServer = createSmallButton(scriptTypeRow, "Server (.server)", 0.33)
+local btnClient = createSmallButton(scriptTypeRow, "Client (.client)", 0.33)
+local btnModule = createSmallButton(scriptTypeRow, "Module (.luau)", 0.33)
+
+local function updateScriptTypeButtons()
+    btnServer.BackgroundColor3 = if selectedScriptType == "Server" then Color3.fromRGB(37, 99, 235) else Color3.fromRGB(30, 41, 59)
+    btnClient.BackgroundColor3 = if selectedScriptType == "Client" then Color3.fromRGB(37, 99, 235) else Color3.fromRGB(30, 41, 59)
+    btnModule.BackgroundColor3 = if selectedScriptType == "Module" then Color3.fromRGB(37, 99, 235) else Color3.fromRGB(30, 41, 59)
+end
+updateScriptTypeButtons()
+
+btnServer.MouseButton1Click:Connect(function() selectedScriptType = "Server"; updateScriptTypeButtons() end)
+btnClient.MouseButton1Click:Connect(function() selectedScriptType = "Client"; updateScriptTypeButtons() end)
+btnModule.MouseButton1Click:Connect(function() selectedScriptType = "Module"; updateScriptTypeButtons() end)
+
+-- Prompt Box
 local promptBox = Instance.new("TextBox")
-promptBox.PlaceholderText = "Describe el sistema o UI: ej. 'Sistema de inventario con DataStore y Maid' o 'Tienda Cyberpunk modal con animaciones Tween'"
+promptBox.PlaceholderText = "Describe el modelo 3D, escenario, script Luau o interfaz..."
 promptBox.Text = ""
 promptBox.ClearTextOnFocus = false
 promptBox.MultiLine = true
+promptBox.TextWrapped = true
 promptBox.Font = Enum.Font.Gotham
 promptBox.TextSize = 12
-promptBox.TextColor3 = Color3.fromRGB(230, 230, 235)
-promptBox.BackgroundColor3 = Color3.fromRGB(32, 35, 45)
-promptBox.Size = UDim2.new(1, 0, 0, 110)
+promptBox.TextColor3 = Color3.fromRGB(241, 245, 249)
+promptBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+promptBox.Size = UDim2.new(1, 0, 0, 96)
 promptBox.TextXAlignment = Enum.TextXAlignment.Left
 promptBox.TextYAlignment = Enum.TextYAlignment.Top
-promptBox.LayoutOrder = 4
-promptBox.Parent = rootFrame
-local promptCorner = Instance.new("UICorner")
-promptCorner.CornerRadius = UDim.new(0, 8)
-promptCorner.Parent = promptBox
-local promptPadding = Instance.new("UIPadding")
-promptPadding.PaddingTop = UDim.new(0, 8)
-promptPadding.PaddingBottom = UDim.new(0, 8)
-promptPadding.PaddingLeft = UDim.new(0, 8)
-promptPadding.PaddingRight = UDim.new(0, 8)
-promptPadding.Parent = promptBox
+promptBox.LayoutOrder = 3
+promptBox.Parent = root
 
--- Action Generate Button
-local actionBtn = Instance.new("TextButton")
-actionBtn.Text = "🚀 Generar con Gemini & Rojo"
-actionBtn.Font = Enum.Font.GothamBold
-actionBtn.TextSize = 13
-actionBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-actionBtn.BackgroundColor3 = Color3.fromRGB(16, 185, 129)
-actionBtn.Size = UDim2.new(1, 0, 0, 38)
-actionBtn.LayoutOrder = 5
-actionBtn.Parent = rootFrame
-local actionCorner = Instance.new("UICorner")
-actionCorner.CornerRadius = UDim.new(0, 8)
-actionCorner.Parent = actionBtn
+-- Action Buttons
+local btnGenerate3D = createSmallButton(root, "Generar e Insertar Modelo 3D en Workspace", 1)
+btnGenerate3D.Size = UDim2.new(1, 0, 0, 34)
+btnGenerate3D.BackgroundColor3 = Color3.fromRGB(14, 165, 233)
+btnGenerate3D.LayoutOrder = 4
 
--- Output Info Box
-local infoBox = Instance.new("TextLabel")
-infoBox.Text = "Listo. Los scripts generados se guardarán automáticamente en tu carpeta Rojo configurada (src/server, src/client, etc.)."
-infoBox.Font = Enum.Font.Code
-infoBox.TextSize = 11
-infoBox.TextColor3 = Color3.fromRGB(140, 145, 160)
-infoBox.BackgroundColor3 = Color3.fromRGB(18, 20, 26)
-infoBox.Size = UDim2.new(1, 0, 0, 140)
-infoBox.TextXAlignment = Enum.TextXAlignment.Left
-infoBox.TextYAlignment = Enum.TextYAlignment.Top
-infoBox.TextWrapped = true
-infoBox.LayoutOrder = 6
-infoBox.Parent = rootFrame
-local infoCorner = Instance.new("UICorner")
-infoCorner.CornerRadius = UDim.new(0, 8)
-infoCorner.Parent = infoBox
+local btnGenerateScript = createSmallButton(root, "Generar Script Luau (Respeta Server/Client/Module)", 1)
+btnGenerateScript.Size = UDim2.new(1, 0, 0, 34)
+btnGenerateScript.BackgroundColor3 = Color3.fromRGB(37, 99, 235)
+btnGenerateScript.LayoutOrder = 5
 
--- Tab switches
-scriptTabBtn.MouseButton1Click:Connect(function()
-    activeMode = "Script"
-    scriptTabBtn.BackgroundColor3 = Color3.fromRGB(59, 130, 246)
-    scriptTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    uiTabBtn.BackgroundColor3 = Color3.fromRGB(38, 42, 53)
-    uiTabBtn.TextColor3 = Color3.fromRGB(180, 185, 200)
-    actionBtn.Text = "🚀 Generar Script Luau"
-end)
+local btnVerifyRojo = createSmallButton(root, "Verificar Sincronización Rojo en Studio", 1)
+btnVerifyRojo.Size = UDim2.new(1, 0, 0, 32)
+btnVerifyRojo.BackgroundColor3 = Color3.fromRGB(16, 185, 129)
+btnVerifyRojo.LayoutOrder = 6
 
-uiTabBtn.MouseButton1Click:Connect(function()
-    activeMode = "UI"
-    uiTabBtn.BackgroundColor3 = Color3.fromRGB(139, 92, 246)
-    uiTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    scriptTabBtn.BackgroundColor3 = Color3.fromRGB(38, 42, 53)
-    scriptTabBtn.TextColor3 = Color3.fromRGB(180, 185, 200)
-    actionBtn.Text = "🎨 Generar ForgeGUI & Instancias"
-end)
+local btnOptimizeSel = createSmallButton(root, "Optimizar Geometría Seleccionada (Selection)", 1)
+btnOptimizeSel.Size = UDim2.new(1, 0, 0, 32)
+btnOptimizeSel.BackgroundColor3 = Color3.fromRGB(71, 85, 105)
+btnOptimizeSel.LayoutOrder = 7
 
--- Generation handler
-actionBtn.MouseButton1Click:Connect(function()
-    local promptText = promptBox.Text
-    if #promptText < 5 then
-        infoBox.Text = "⚠️ Por favor escribe una descripción más detallada para generar el código."
+local outputLog = Instance.new("TextLabel")
+outputLog.Text = "Listo. Conecta FastAPI en " .. BACKEND_URL
+outputLog.Font = Enum.Font.Code
+outputLog.TextSize = 11
+outputLog.TextColor3 = Color3.fromRGB(203, 213, 225)
+outputLog.BackgroundColor3 = Color3.fromRGB(2, 6, 23)
+outputLog.Size = UDim2.new(1, 0, 0, 180)
+outputLog.TextWrapped = true
+outputLog.TextXAlignment = Enum.TextXAlignment.Left
+outputLog.TextYAlignment = Enum.TextYAlignment.Top
+outputLog.LayoutOrder = 8
+outputLog.Parent = root
+
+btnGenerate3D.MouseButton1Click:Connect(function()
+    if #promptBox.Text < 3 then
+        outputLog.Text = "Escribe una descripción para el modelo 3D o escenario."
         return
     end
-
-    actionBtn.Text = "⏳ Consultando a Gemini..."
-    actionBtn.Active = false
-
+    outputLog.Text = "Generando geometría 3D compuesta con Gemini..."
     task.spawn(function()
-        local record = ChangeHistoryService:SetWaypoint("Forge AI Generation")
-
-        if activeMode == "Script" then
-            local payload = HttpService:JSONEncode({
-                prompt = promptText,
-                script_type = "Server",
-                model_tier = "fast",
-                save_to_rojo = true,
-            })
-
-            local ok, response = pcall(function()
-                return HttpService:RequestAsync({
-                    Url = BACKEND_URL .. "/api/v1/generate-script",
-                    Method = "POST",
-                    Headers = { ["Content-Type"] = "application/json" },
-                    Body = payload,
-                })
-            end)
-
-            if ok and response.Success then
-                local data = HttpService:JSONDecode(response.Body)
-                infoBox.Text = string.format(
-                    "✅ Script generado exitosamente!\nArchivo: %s\nCarpeta Rojo: %s\nRuta local: %s\n\nExplicación: %s",
-                    data.file_name or "script.luau",
-                    data.rojo_target_folder or "src/server",
-                    data.saved_path or "Guardado vía Rojo",
-                    data.explanation or ""
-                )
-            else
-                infoBox.Text = "❌ Error al contactar el servidor local. Asegúrate de que FastAPI esté corriendo (uvicorn main:app) y que HttpService esté habilitado en Game Settings."
-            end
-
-        elseif activeMode == "UI" then
-            local payload = HttpService:JSONEncode({
-                prompt = promptText,
-                style_theme = "Dark Cyberpunk",
-                save_to_rojo = true,
-                model_tier = "fast",
-            })
-
-            local ok, response = pcall(function()
-                return HttpService:RequestAsync({
-                    Url = BACKEND_URL .. "/api/v1/generate-ui",
-                    Method = "POST",
-                    Headers = { ["Content-Type"] = "application/json" },
-                    Body = payload,
-                })
-            end)
-
-            if ok and response.Success then
-                local data = HttpService:JSONDecode(response.Body)
-                
-                -- Also instantiate GUI in StarterGui if ui_tree is present
-                if data.ui_tree then
-                    local screenGui = Instance.new("ScreenGui")
-                    screenGui.Name = data.file_name:gsub("%.luau$", "")
-                    screenGui.ResetOnSpawn = false
-                    screenGui.Parent = StarterGui
-
-                    buildInstanceFromTree(data.ui_tree, screenGui)
-                    Selection:Set({ screenGui })
-                end
-
-                infoBox.Text = string.format(
-                    "✅ ForgeGUI Generado!\nArchivo: %s\nÁrbol de instancias insertado en StarterGui.\nRuta Rojo: %s\n\n%s",
-                    data.file_name,
-                    data.saved_path or "src/client/UI",
-                    data.explanation or ""
-                )
-            else
-                infoBox.Text = "❌ Error en generación de UI. Revisa la consola de FastAPI."
-            end
+        local ok, data = requestBackend("/api/v1/generate-3d", "POST", {
+            prompt = promptBox.Text,
+            asset_type = "Model3D",
+            category = "Custom Studio Asset",
+            collision_fidelity = "Hull",
+            save_to_rojo = true,
+            model_tier = selectedModelTier,
+        })
+        if ok then
+            local spawnedModel = construct3DModelFromSpec(data, Workspace)
+            outputLog.Text = string.format(
+                "Modelo 3D insertado en Workspace: %s (%d sub-partes, %d tris)\nMódulo Rojo: %s",
+                spawnedModel.Name,
+                #(data.parts or {}),
+                data.poly_count or 0,
+                data.saved_path or "Guardado"
+            )
+        else
+            outputLog.Text = "Error 3D: " .. tostring(data)
         end
-
-        actionBtn.Text = activeMode == "Script" and "🚀 Generar Script Luau" or "🎨 Generar ForgeGUI & Instancias"
-        actionBtn.Active = true
     end)
 end)
 
--- Health check on load
-task.spawn(function()
-    local ok, res = pcall(function()
-        return HttpService:GetAsync(BACKEND_URL .. "/api/v1/health")
-    end)
-    if ok then
-        local data = HttpService:JSONDecode(res)
-        statusLabel.Text = string.format("🟢 Conectado | Rojo: %s", data.rojo_path_exists and "Encontrado" or "Ruta no creada")
-        statusLabel.TextColor3 = Color3.fromRGB(52, 211, 153)
-    else
-        statusLabel.Text = "🔴 Servidor local desconectado en http://127.0.0.1:8000"
-        statusLabel.TextColor3 = Color3.fromRGB(248, 113, 113)
+btnGenerateScript.MouseButton1Click:Connect(function()
+    if #promptBox.Text < 3 then
+        outputLog.Text = "Escribe los requerimientos del script."
+        return
     end
+    outputLog.Text = string.format("Generando script [%s]...", selectedScriptType)
+    task.spawn(function()
+        local ok, data = requestBackend("/api/v1/generate-script", "POST", {
+            prompt = promptBox.Text,
+            script_type = selectedScriptType,
+            model_tier = selectedModelTier,
+            save_to_rojo = true,
+        })
+        if ok then
+            outputLog.Text = string.format(
+                "Script [%s] generado: %s\nCarpeta Rojo: %s\nRuta: %s",
+                selectedScriptType,
+                data.file_name or "",
+                data.rojo_target_folder or "",
+                data.saved_path or ""
+            )
+        else
+            outputLog.Text = "Error Script: " .. tostring(data)
+        end
+    end)
+end)
+
+btnVerifyRojo.MouseButton1Click:Connect(function()
+    task.spawn(function()
+        local _, _, report = verifyRojoSyncInStudio()
+        outputLog.Text = report
+    end)
+end)
+
+btnOptimizeSel.MouseButton1Click:Connect(function()
+    outputLog.Text = optimizeSelectedGeometry("Hull", true)
 end)

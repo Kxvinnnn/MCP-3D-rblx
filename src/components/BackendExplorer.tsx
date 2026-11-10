@@ -38,11 +38,23 @@ export const BackendExplorer: React.FC = () => {
   };
 
   const fileDescriptions: Record<string, string> = {
-    'main.py': 'FastAPI backend con Structured Outputs (Pydantic), Google GenAI SDK, y guardado automático para Rojo.',
+    'README.md': 'Documentación principal del repositorio: arquitectura de 7 motores, capacidades 3D, roadmap P0-P3 y despliegue.',
+    'docs/ARCHITECTURE.md': 'Diseño profundo de los 7 motores modulares, visor 3D WebGL (Three.js) y flujo multi-agente P3.',
+    'docs/API_REFERENCE.md': 'Especificación técnica completa de todos los endpoints REST y Server-Sent Events (SSE).',
+    'docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md': 'Manual de integración con Rojo 7.x y uso del plugin ForgeAIStudioPlugin.server.luau v2.0.',
+    'main.py': 'Orquestador central FastAPI que coordina los 7 motores independientes y el plugin de Roblox Studio.',
+    'engines/rojo_bridge.py': 'Motor Rojo Bridge: sandboxing de rutas, default.project.json, manifiesto SHA-256 y auditoría de módulos.',
+    'engines/generation_3d_engine.py': 'Motor 3D Generation: síntesis de modelos 3D compuestos en Studs desde texto e imagen.',
+    'engines/asset_engine.py': 'Motor Asset Engine: texturas PBR SurfaceAppearance, optimización LOD/colisiones y Biblioteca.',
+    'engines/world_engine.py': 'Motor World Engine: escenarios completos, biomas de iluminación, atmósfera y posicionamiento.',
+    'engines/luau_engine.py': 'Motor Luau Engine: arquitectura de scripts Server/Client/Module --!strict y ciclo de vida Maid.',
+    'engines/ui_engine.py': 'Motor UI Engine: interfaces ScreenGui responsive (UDim2.fromScale), ViewportFrame y TweenService.',
+    'engines/agents_engine.py': 'Motor de Agentes Especializados (P3): pipeline autónomo de 7 agentes colaborativos.',
+    'src/components/engines/3dEngine.ts': 'Jerarquía de clases (GLBMeshParser, OBJMeshParser, RobloxMeshPreprocessor, Roblox3DEngineProcessor) para exportar a Roblox MeshParts.',
     'requirements.txt': 'Dependencias Python 3.11+: fastapi, uvicorn, pydantic, python-dotenv, google-genai.',
     '.env.example': 'Configuración de entorno para GEMINI_API_KEY, ROJO_PROJECT_PATH y tiers de modelos.',
     'project_context.md': 'Plantilla de contexto local con mapeo Rojo, estándares Luau, Maid pattern y tokens de UI.',
-    'roblox_plugin/ForgeAIStudioPlugin.server.luau': 'Plugin oficial de Roblox Studio con interfaz gráfica y consumo vía HttpService.',
+    'roblox_plugin/ForgeAIStudioPlugin.server.luau': 'Plugin oficial de Roblox Studio v2.0 con importador 3D, optimizador y verificación Rojo.',
   };
 
   return (
