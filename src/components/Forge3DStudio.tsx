@@ -75,9 +75,14 @@ export const Forge3DStudio: React.FC = () => {
   const [pbrRoughness, setPbrRoughness] = useState<number>(0.28);
   const [pbrMetalness, setPbrMetalness] = useState<number>(0.82);
   const [pbrBundle, setPbrBundle] = useState<PBRTextureSet | null>(null);
+  const [colorMapAssetId, setColorMapAssetId] = useState<string>('');
+  const [normalMapAssetId, setNormalMapAssetId] = useState<string>('');
+  const [roughnessMapAssetId, setRoughnessMapAssetId] = useState<string>('');
 
-  // Active 3D Asset & Part Inspector
+  // Active 3D Asset, Undo/Redo History & Part Inspector
   const [activeAsset, setActiveAsset] = useState<Forge3DAsset | null>(null);
+  const [undoStack, setUndoStack] = useState<Forge3DAsset[]>([]);
+  const [redoStack, setRedoStack] = useState<Forge3DAsset[]>([]);
   const [selectedPart, setSelectedPart] = useState<MeshPart3DSpec | null>(null);
   const [inspectorTab, setInspectorTab] = useState<'viewport' | 'luau' | 'pbr'>('viewport');
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
@@ -327,11 +332,21 @@ export const Forge3DStudio: React.FC = () => {
         normal_data_url: pbrBundle.normalDataUrl,
         roughness_data_url: pbrBundle.roughnessDataUrl,
         target_asset_id: activeAsset?.id,
+        color_map_asset_id: colorMapAssetId.trim() || undefined,
+        normal_map_asset_id: normalMapAssetId.trim() || undefined,
+        roughness_map_asset_id: roughnessMapAssetId.trim() || undefined,
       });
       addLog(
         'rojo',
-        `PBR SurfaceAppearance publicado en ${res.luau_binder_path || `src/shared/Assets3D/${matName}_SurfaceAppearance.luau`} (+ ColorMap, NormalMap, RoughnessMap PNGs en Textures/)`
+        `PBR SurfaceAppearance publicado en ${res.luau_binder_path || `src/shared/Assets3D/${matName}_SurfaceAppearance.luau`} (${
+          res.is_cloud_published
+            ? 'AssetIds verificados de Roblox Cloud asociados'
+            : 'PNGs locales en Textures/ + EditableImage runtime'
+        })`
       );
+      if (activeAsset) {
+        fetchAssetLibrary();
+      }
     } catch (err: any) {
       setError(err.message || 'Error al publicar mapas PBR en Rojo');
       addLog('error', err.message || 'Error al publicar PBR en Rojo');
@@ -545,8 +560,45 @@ export const Forge3DStudio: React.FC = () => {
     }, 0);
   };
 
+  const pushUndoSnapshot = (snapshot: Forge3DAsset) => {
+    const cloned = JSON.parse(JSON.stringify(snapshot)) as Forge3DAsset;
+    setUndoStack((prev) => [...prev.slice(-19), cloned]);
+    setRedoStack([]);
+  };
+
+  const handleUndo = () => {
+    if (undoStack.length === 0 || !activeAsset) return;
+    const previous = undoStack[undoStack.length - 1];
+    const currentClone = JSON.parse(JSON.stringify(activeAsset)) as Forge3DAsset;
+    setRedoStack((prev) => [...prev.slice(-19), currentClone]);
+    setUndoStack((prev) => prev.slice(0, -1));
+    setActiveAsset(previous);
+    const matchingPart =
+      previous.parts?.find((p) => p.name === selectedPart?.name) ||
+      previous.parts?.[0] ||
+      null;
+    setSelectedPart(matchingPart);
+    addLog('info', `Editor 3D: Deshacer aplicado (${previous.parts?.length || 0} piezas, ${previous.poly_count} tris).`);
+  };
+
+  const handleRedo = () => {
+    if (redoStack.length === 0 || !activeAsset) return;
+    const nextState = redoStack[redoStack.length - 1];
+    const currentClone = JSON.parse(JSON.stringify(activeAsset)) as Forge3DAsset;
+    setUndoStack((prev) => [...prev.slice(-19), currentClone]);
+    setRedoStack((prev) => prev.slice(0, -1));
+    setActiveAsset(nextState);
+    const matchingPart =
+      nextState.parts?.find((p) => p.name === selectedPart?.name) ||
+      nextState.parts?.[0] ||
+      null;
+    setSelectedPart(matchingPart);
+    addLog('info', `Editor 3D: Rehacer aplicado (${nextState.parts?.length || 0} piezas, ${nextState.poly_count} tris).`);
+  };
+
   const handleUpdateSelectedPart = (updater: (part: MeshPart3DSpec) => MeshPart3DSpec) => {
     if (!activeAsset || !selectedPart) return;
+    pushUndoSnapshot(activeAsset);
     const nextPart = updater(selectedPart);
     setSelectedPart(nextPart);
     const updatedParts = (activeAsset.parts || []).map((p) =>
@@ -561,6 +613,7 @@ export const Forge3DStudio: React.FC = () => {
 
   const handleAddSubPart = () => {
     if (!activeAsset) return;
+    pushUndoSnapshot(activeAsset);
     const idx = (activeAsset.parts?.length || 0) + 1;
     const rawPart: MeshPart3DSpec = {
       name: `CustomMesh_${idx}`,
@@ -597,6 +650,7 @@ export const Forge3DStudio: React.FC = () => {
   const handleDeleteSelectedPart = () => {
     if (!activeAsset || !selectedPart) return;
     if ((activeAsset.parts?.length || 0) <= 1) return;
+    pushUndoSnapshot(activeAsset);
     const remaining = activeAsset.parts.filter((p) => p.name !== selectedPart.name);
     setActiveAsset({
       ...activeAsset,
@@ -657,6 +711,7 @@ export const Forge3DStudio: React.FC = () => {
 
   const handleGroundModelY0 = () => {
     if (!activeAsset) return;
+    pushUndoSnapshot(activeAsset);
     const grounded = snapAssetToGroundY0(activeAsset);
     setActiveAsset(grounded);
     if (selectedPart) {
@@ -668,6 +723,7 @@ export const Forge3DStudio: React.FC = () => {
 
   const handleApplyMaterialToAllParts = () => {
     if (!activeAsset || !selectedPart) return;
+    pushUndoSnapshot(activeAsset);
     const updatedParts = (activeAsset.parts || []).map((p) => ({
       ...p,
       material: selectedPart.material,
@@ -759,7 +815,7 @@ export const Forge3DStudio: React.FC = () => {
 
   const handleDownloadGLTF = () => {
     if (!activeAsset) return;
-    const gltf = exportAssetToGLTF(activeAsset);
+    const gltf = exportAssetToGLTF(activeAsset, pbrBundle || undefined);
     const blob = new Blob([gltf], { type: 'model/gltf+json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -769,7 +825,7 @@ export const Forge3DStudio: React.FC = () => {
     URL.revokeObjectURL(url);
     addLog(
       'success',
-      `Archivo estándar '${activeAsset.name}.gltf' (glTF 2.0) exportado con buffers binarios de vértices, normales, UVs y materiales PBR.`
+      `Archivo estándar '${activeAsset.name}.gltf' (glTF 2.0) exportado con buffers binarios de vértices, normales, UVs y mapas de textura PBR embebidos.`
     );
   };
 
@@ -804,12 +860,12 @@ export const Forge3DStudio: React.FC = () => {
     setError(null);
     try {
       const rbxmxContent = exportAssetToRBXMX(activeAsset);
-      const gltfContent = exportAssetToGLTF(activeAsset);
+      const gltfContent = exportAssetToGLTF(activeAsset, pbrBundle || undefined);
       const { obj: objContent, mtl: mtlContent } = exportAssetToOBJWithMTL(activeAsset);
 
       addLog(
         'info',
-        `Exportando paquete completo Roblox Studio (.rbxmx + .gltf + .obj + .mtl + .luau) para '${activeAsset.name}'...`
+        `Exportando y verificando paquete de 5 archivos Roblox Studio (.rbxmx + .gltf + .obj + .mtl + .luau) para '${activeAsset.name}'...`
       );
       const res = await fetch('/api/v1/assets/export-roblox-package', {
         method: 'POST',
@@ -820,18 +876,35 @@ export const Forge3DStudio: React.FC = () => {
           gltf_content: gltfContent,
           obj_content: objContent,
           mtl_content: mtlContent,
+          pbr_textures: pbrBundle
+            ? {
+                albedo_data_url: pbrBundle.albedoDataUrl,
+                normal_data_url: pbrBundle.normalDataUrl,
+                roughness_data_url: pbrBundle.roughnessDataUrl,
+              }
+            : undefined,
           save_to_rojo: true,
           save_to_library: true,
         }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || data.error || 'Error al exportar paquete 3D a Rojo');
+      }
       if (data.asset) {
         setActiveAsset(data.asset);
-        setExportedFilesList(data.saved_files || []);
+        const savedDict = data.saved_files || {};
+        const verifiedDict = data.verified_files || {};
+        const fileEntries: string[] = Array.isArray(savedDict)
+          ? savedDict
+          : Object.entries(savedDict)
+              .filter(([ext, p]) => Boolean(p) && verifiedDict[ext] !== false)
+              .map(([ext]) => `${data.asset.name}.${ext}`);
+        setExportedFilesList(fileEntries);
         fetchAssetLibrary();
         addLog(
           'rojo',
-          `Paquete 3D completo sincronizado en Rojo: ${(data.saved_files || []).join(', ')}`
+          `Paquete 3D verificado en disco (${data.verified_files_count ?? fileEntries.length}/5 archivos): ${fileEntries.join(', ')}`
         );
       }
     } catch (err: any) {
@@ -839,6 +912,42 @@ export const Forge3DStudio: React.FC = () => {
       addLog('error', `Error en exportación a Rojo: ${err.message}`);
     } finally {
       setExportingPackage(false);
+    }
+  };
+
+  const handlePullFromRojo = async () => {
+    if (!activeAsset) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/v1/assets/pull-from-rojo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asset_name: activeAsset.name }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || data.error || 'No se pudo sincronizar el archivo .rbxmx desde Rojo');
+      }
+      if (data.rbxmx_content) {
+        pushUndoSnapshot(activeAsset);
+        const syncedAsset = parseRBXMXToForgeAsset(data.rbxmx_content, `${activeAsset.name}.rbxmx`);
+        setActiveAsset({
+          ...syncedAsset,
+          id: activeAsset.id,
+          luau_code: data.luau_content || syncedAsset.luau_code,
+        });
+        setSelectedPart(syncedAsset.parts?.[0] || null);
+        addLog(
+          'rojo',
+          `Sincronización bidireccional desde Rojo completada: '${syncedAsset.name}' (${syncedAsset.parts.length} MeshParts, ${syncedAsset.poly_count} tris).`
+        );
+      }
+    } catch (err: any) {
+      setError(err.message || 'Error al sincronizar cambios desde Rojo');
+      addLog('error', err.message || 'Error en pull-from-rojo');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -1219,6 +1328,29 @@ export const Forge3DStudio: React.FC = () => {
                         ↓ Roughness.png
                       </a>
                     </div>
+                    <div className="col-span-3 grid grid-cols-1 sm:grid-cols-3 gap-1.5 pt-2 border-t border-slate-800/80">
+                      <input
+                        type="text"
+                        value={colorMapAssetId}
+                        onChange={(e) => setColorMapAssetId(e.target.value)}
+                        placeholder="ColorMap rbxassetid:// (opcional)"
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-200 placeholder-slate-500"
+                      />
+                      <input
+                        type="text"
+                        value={normalMapAssetId}
+                        onChange={(e) => setNormalMapAssetId(e.target.value)}
+                        placeholder="NormalMap rbxassetid:// (opcional)"
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-200 placeholder-slate-500"
+                      />
+                      <input
+                        type="text"
+                        value={roughnessMapAssetId}
+                        onChange={(e) => setRoughnessMapAssetId(e.target.value)}
+                        placeholder="Roughness rbxassetid:// (opcional)"
+                        className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-200 placeholder-slate-500"
+                      />
+                    </div>
                     <button
                       type="button"
                       onClick={handlePublishPBRToRojo}
@@ -1381,7 +1513,25 @@ export const Forge3DStudio: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleUndo}
+                    disabled={undoStack.length === 0}
+                    className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-mono text-slate-300 disabled:opacity-40 cursor-pointer"
+                    title="Deshacer último cambio geométrico o de material"
+                  >
+                    ↶ Deshacer ({undoStack.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRedo}
+                    disabled={redoStack.length === 0}
+                    className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] font-mono text-slate-300 disabled:opacity-40 cursor-pointer"
+                    title="Rehacer cambio geométrico o de material"
+                  >
+                    ↷ Rehacer ({redoStack.length})
+                  </button>
                   <button
                     type="button"
                     onClick={handleAddSubPart}
@@ -1770,23 +1920,36 @@ export const Forge3DStudio: React.FC = () => {
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleExportFullPackageToRojo}
-                  disabled={exportingPackage}
-                  className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
-                >
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>
-                    {exportingPackage
-                      ? 'Sincronizando Paquete Completo en Rojo...'
-                      : 'Sincronizar Paquete Completo en Rojo (.rbxmx + .gltf + .obj + .mtl + .luau)'}
-                  </span>
-                </button>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleExportFullPackageToRojo}
+                    disabled={exportingPackage}
+                    className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
+                  >
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>
+                      {exportingPackage
+                        ? 'Verificando 5 Archivos en Rojo...'
+                        : 'Exportar Paquete 5 Archivos a Rojo (.rbxmx/.gltf/.obj/.mtl/.luau)'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handlePullFromRojo}
+                    disabled={loading}
+                    className="w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-cyan-200 font-semibold text-xs flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
+                    title="Sincronización bidireccional: importa los cambios realizados sobre el archivo .rbxmx/.luau en el workspace de Rojo"
+                  >
+                    <Upload className="w-4 h-4 shrink-0" />
+                    <span>Sincronizar Cambios desde Rojo (Pull .RBXMX)</span>
+                  </button>
+                </div>
 
                 {exportedFilesList.length > 0 && (
                   <div className="p-2.5 rounded-xl bg-slate-950 border border-emerald-500/30 text-[11px] font-mono text-emerald-300">
-                    Archivos listos en <span className="text-white">rojo_workspace/src/shared/Assets3D/</span>:{' '}
+                    Verificados en disco (<span className="text-white">{exportedFilesList.length}/5</span>) en <span className="text-white">rojo_workspace/src/shared/Assets3D/</span>:{' '}
                     {exportedFilesList.join(' • ')}
                   </div>
                 )}

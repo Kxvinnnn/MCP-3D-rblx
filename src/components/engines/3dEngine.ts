@@ -2147,12 +2147,19 @@ export class ThreeDEngineProcessor {
       normal_data_url: string;
       roughness_data_url: string;
       target_asset_id?: string;
+      color_map_asset_id?: string;
+      normal_map_asset_id?: string;
+      roughness_map_asset_id?: string;
+      metalness_map_asset_id?: string;
     },
     options: FastAPIRequestOptions = {}
   ): Promise<{
     success: boolean;
     material_name: string;
     saved_textures: string[];
+    local_files?: Record<string, string | null>;
+    verified_cloud_uris?: Record<string, string>;
+    is_cloud_published?: boolean;
     luau_binder_path: string;
     luau_code: string;
   }> {

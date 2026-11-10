@@ -1,58 +1,74 @@
 """
 3D Generation Engine (backend/engines/generation_3d_engine.py)
 Synthesizes multi-part 3D Roblox models from text, reference images, or uploaded 3D meshes,
-extracting real vertex, triangle index, normal, and UV buffers instead of fallback 'Block'
-parts, and generating `--!strict` Luau scripts that instantiate true `MeshPart` objects
-with valid `rbxassetid://` `MeshId` references and `EditableMesh` geometry buffers.
+extracting real vertex, triangle index, normal, and UV buffers, automatically splitting
+oversized meshes into sub-meshes (<10,000 triangles) without truncating geometry, and
+generating:
+- `--!strict` Luau scripts using `AssetService:CreateEditableMesh()` + `AssetService:CreateMeshPartAsync()`
+  (never assigning read-only `MeshPart.MeshId` or inventing fictional `rbxassetid://` hashes)
+- Native Roblox Studio `.rbxmx` XML models with auto-executing `ForgeAutoReconstructRunner` Script
+- Standard `.gltf` 2.0 files with embedded binary geometry buffers and embedded PBR texture maps
+- Paired Wavefront `.obj` and `.mtl` files
 """
 
 import base64
-import hashlib
 import json
 import math
+import struct
 import time
-from typing import Any, Callable, Dict, Generator, List, Literal, Optional
+import xml.sax.saxutils as saxutils
+from typing import Any, Callable, Dict, Generator, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
 from google import genai
 from google.genai import types
 
 
-def compute_deterministic_mesh_asset_id(
-    model_name: str,
-    part_name: str,
-    vertex_count: int = 0,
-    face_count: int = 0,
-) -> str:
-    """
-    Generates a deterministic, valid `rbxassetid://<10-digit-id>` reference from the
-    mesh's identity and topology when an explicit cloud asset ID is not supplied.
-    """
-    seed = f"{model_name}:{part_name}:{vertex_count}:{face_count}".encode("utf-8")
-    digest_int = int(hashlib.sha256(seed).hexdigest()[:12], 16)
-    numeric_id = 1000000000 + (digest_int % 8999999999)
-    return f"rbxassetid://{numeric_id}"
+ROBLOX_MAX_VERTICES_PER_SUBMESH = 9000
+ROBLOX_MAX_TRIANGLES_PER_SUBMESH = 9500
+
+ROBLOX_MATERIAL_ENUM_TOKENS: Dict[str, int] = {
+    "Plastic": 256,
+    "SmoothPlastic": 272,
+    "Neon": 288,
+    "Wood": 512,
+    "WoodPlanks": 528,
+    "Marble": 784,
+    "Slate": 800,
+    "Concrete": 816,
+    "Granite": 832,
+    "Brick": 848,
+    "Pebble": 864,
+    "Cobblestone": 880,
+    "CorrodedMetal": 1040,
+    "DiamondPlate": 1056,
+    "Foil": 1072,
+    "Metal": 1088,
+    "Grass": 1280,
+    "Sand": 1296,
+    "Fabric": 1312,
+    "Ice": 1536,
+    "Glass": 1568,
+    "ForceField": 1584,
+}
 
 
-def normalize_valid_mesh_id(
-    candidate: Optional[str],
-    model_name: str,
-    part_name: str,
-    vertex_count: int = 0,
-    face_count: int = 0,
-) -> str:
+def validate_published_roblox_mesh_id(candidate: Optional[str]) -> str:
     """
-    Ensures the returned MeshId is always a valid non-zero `rbxassetid://<digits>` or
-    `rbxasset://...` URI suitable for Roblox `MeshPart` creation.
+    Validates whether `candidate` is an explicitly provided, published Roblox asset URI
+    (`rbxassetid://<positive_integer>` or `rbxasset://...`).
+    Never invents fictional hash-based `rbxassetid://` numbers and rejects `rbxassetid://0`.
+    Returns `""` when no published Roblox asset ID is bound, signaling direct `EditableMesh` construction.
     """
-    if candidate:
-        trimmed = candidate.strip()
-        if trimmed.startswith("rbxassetid://"):
-            rest = trimmed.replace("rbxassetid://", "").split()[0].strip()
-            if rest.isdigit() and int(rest) > 0:
-                return f"rbxassetid://{rest}"
-        elif trimmed.startswith("rbxasset://"):
-            return trimmed
-    return compute_deterministic_mesh_asset_id(model_name, part_name, vertex_count, face_count)
+    if not candidate:
+        return ""
+    trimmed = str(candidate).strip()
+    if trimmed.startswith("rbxassetid://"):
+        rest = trimmed.replace("rbxassetid://", "").split()[0].strip()
+        if rest.isdigit() and int(rest) > 0:
+            return f"rbxassetid://{rest}"
+    elif trimmed.startswith("rbxasset://") and len(trimmed) > len("rbxasset://"):
+        return trimmed
+    return ""
 
 
 class SubMeshGeometrySpec(BaseModel):
@@ -86,19 +102,19 @@ class SubMeshGeometrySpec(BaseModel):
     )
     meshId: Optional[str] = Field(
         default=None,
-        description="Valid Roblox MeshId URI (e.g., rbxassetid://...)",
+        description="Optional published Roblox MeshId URI (rbxassetid://<published_id>) if uploaded to Roblox Cloud",
     )
     assetId: Optional[str] = Field(
         default=None,
-        description="Valid Roblox AssetId reference for the processed MeshPart",
+        description="Optional published Roblox AssetId reference if uploaded to Roblox Cloud",
     )
 
 
 def parse_wavefront_obj_geometry(obj_text: str, obj_file_name: Optional[str] = None) -> SubMeshGeometrySpec:
     """
     Extracts real vertex (`v`), normal (`vn`), UV (`vt`), and triangle index (`f`) data
-    directly from an uploaded Wavefront .OBJ mesh or sub-mesh chunk, computing face normals
-    automatically if `vn` records are omitted.
+    directly from an uploaded Wavefront .OBJ mesh or sub-mesh chunk, computing smooth
+    vertex normals automatically if `vn` records are omitted.
     """
     vertices: List[List[float]] = []
     raw_normals: List[List[float]] = []
@@ -151,7 +167,6 @@ def parse_wavefront_obj_geometry(obj_text: str, obj_file_name: Optional[str] = N
             for i in range(1, len(face_v_indices) - 1):
                 faces.append([face_v_indices[0], face_v_indices[i], face_v_indices[i + 1]])
 
-    # Compute geometric vertex normals from triangle faces when vn records are absent
     computed_normals: List[List[float]] = [[0.0, 0.0, 0.0] for _ in range(len(vertices))]
     if not raw_normals and vertices and faces:
         for tri in faces:
@@ -213,7 +228,6 @@ def extract_mesh_geometry_from_processed_submesh(
     3. Or parses the Wavefront `.obj` chunk (`wavefrontObjChunk` / `objChunk`) to recover exact geometry.
     4. Synthesizes tessellated `MeshPart` vertex/index/normal buffers if only dimensions were provided.
     """
-    part_name = str(sub_mesh.get("name") or "MeshPart_1")
     obj_file = sub_mesh.get("objFileName") or default_obj_file or f"{model_name}.obj"
     raw_mesh_id = sub_mesh.get("meshId") or sub_mesh.get("mesh_id")
     raw_asset_id = sub_mesh.get("assetId") or sub_mesh.get("asset_id") or raw_mesh_id
@@ -231,12 +245,8 @@ def extract_mesh_geometry_from_processed_submesh(
                 for i in range(0, len(raw_indices) - 2, 3)
             ]
         flat_indices = [idx for tri in faces for idx in tri]
-        valid_id = normalize_valid_mesh_id(
-            mesh_data.get("meshId") or raw_mesh_id or raw_asset_id,
-            model_name,
-            part_name,
-            len(verts),
-            len(faces),
+        valid_id = validate_published_roblox_mesh_id(
+            mesh_data.get("meshId") or raw_mesh_id or raw_asset_id
         )
         return SubMeshGeometrySpec(
             vertices=verts,
@@ -246,8 +256,8 @@ def extract_mesh_geometry_from_processed_submesh(
             indices=flat_indices,
             vertexColors=mesh_data.get("vertexColors"),
             objFileName=mesh_data.get("objFileName") or obj_file,
-            meshId=valid_id,
-            assetId=valid_id,
+            meshId=valid_id or None,
+            assetId=valid_id or None,
         )
 
     if isinstance(sub_mesh.get("vertices"), list) and len(sub_mesh["vertices"]) > 0:
@@ -262,7 +272,7 @@ def extract_mesh_geometry_from_processed_submesh(
                 for i in range(0, len(raw_indices) - 2, 3)
             ]
         flat_indices = [idx for tri in faces for idx in tri]
-        valid_id = normalize_valid_mesh_id(raw_mesh_id or raw_asset_id, model_name, part_name, len(verts), len(faces))
+        valid_id = validate_published_roblox_mesh_id(raw_mesh_id or raw_asset_id)
         return SubMeshGeometrySpec(
             vertices=verts,
             normals=norms,
@@ -270,44 +280,33 @@ def extract_mesh_geometry_from_processed_submesh(
             faces=faces,
             indices=flat_indices,
             objFileName=obj_file,
-            meshId=valid_id,
-            assetId=valid_id,
+            meshId=valid_id or None,
+            assetId=valid_id or None,
         )
 
     obj_chunk = sub_mesh.get("wavefrontObjChunk") or sub_mesh.get("objChunk")
     if isinstance(obj_chunk, str) and "v " in obj_chunk:
         parsed_obj = parse_wavefront_obj_geometry(obj_chunk, obj_file)
         if len(parsed_obj.vertices) > 0 and len(parsed_obj.faces) > 0:
-            valid_id = normalize_valid_mesh_id(
-                raw_mesh_id or raw_asset_id,
-                model_name,
-                part_name,
-                len(parsed_obj.vertices),
-                len(parsed_obj.faces),
-            )
-            parsed_obj.meshId = valid_id
-            parsed_obj.assetId = valid_id
+            valid_id = validate_published_roblox_mesh_id(raw_mesh_id or raw_asset_id)
+            parsed_obj.meshId = valid_id or None
+            parsed_obj.assetId = valid_id or None
             return parsed_obj
 
     stud_size = sub_mesh.get("studSize") or sub_mesh.get("size") or [2.0, 2.0, 2.0]
     synth = synthesize_procedural_mesh_data(sub_mesh.get("shape", "MeshPart"), stud_size)
-    valid_id = normalize_valid_mesh_id(
-        raw_mesh_id or raw_asset_id,
-        model_name,
-        part_name,
-        len(synth.vertices),
-        len(synth.faces),
-    )
+    valid_id = validate_published_roblox_mesh_id(raw_mesh_id or raw_asset_id)
     synth.objFileName = obj_file
-    synth.meshId = valid_id
-    synth.assetId = valid_id
+    synth.meshId = valid_id or None
+    synth.assetId = valid_id or None
     return synth
+
 
 def synthesize_procedural_mesh_data(shape: str = "MeshPart", size: Optional[List[float]] = None) -> SubMeshGeometrySpec:
     """
     Generates indexed triangle mesh buffers (vertices, normals, UVs, faces, and flat 0-based
     triangle `indices`) in local Stud coordinates so every sub-part is serialized as a true
-    Roblox `MeshPart` with real multi-faceted topology (never defaulting to an 8-vertex 'Block').
+    Roblox `MeshPart` with real multi-faceted topology.
     """
     dims = (size or [2.0, 2.0, 2.0]) + [2.0, 2.0, 2.0]
     sx, sy, sz = float(dims[0]), float(dims[1]), float(dims[2])
@@ -438,8 +437,6 @@ def synthesize_procedural_mesh_data(shape: str = "MeshPart", size: Optional[List
             indices=[idx for tri in faces for idx in tri],
         )
 
-    # Default MeshPart topology: Chamfered 3-ring Octagonal Hull Mesh (26 vertices, 48 triangles)
-    # Never defaults to an 8-vertex primitive 'Block' cuboid.
     segments = 8
     bevel_scale = 0.82
     ring_levels = [
@@ -503,23 +500,23 @@ class MeshPart3DSpec(BaseModel):
     name: str = Field(description="Sub-part name in PascalCase")
     shape: Literal["MeshPart", "Cylinder", "Ball", "Wedge", "CornerWedge"] = Field(
         default="MeshPart",
-        description="Roblox MeshPart geometry descriptor (never defaults to Block)",
+        description="Roblox MeshPart geometry descriptor",
     )
     meshId: Optional[str] = Field(
         default=None,
-        description="Valid Roblox MeshId URI reference (rbxassetid://<id>)",
+        description="Optional published Roblox MeshId URI reference (rbxassetid://<published_id>)",
     )
     assetId: Optional[str] = Field(
         default=None,
-        description="Valid Roblox AssetId reference (rbxassetid://<id>)",
+        description="Optional published Roblox AssetId reference (rbxassetid://<published_id>)",
     )
     textureId: Optional[str] = Field(
         default=None,
-        description="Optional Roblox TextureID URI reference (rbxassetid://<id>)",
+        description="Optional published Roblox TextureID URI reference (rbxassetid://<published_id>)",
     )
     size: List[float] = Field(
         default_factory=lambda: [2.0, 2.0, 2.0],
-        description="[X, Y, Z] bounding box reference in Studs used when tessellating procedural MeshData",
+        description="[X, Y, Z] bounding box reference in Studs",
     )
     position: List[float] = Field(description="[X, Y, Z] position offset in Studs")
     rotation: List[float] = Field(
@@ -548,6 +545,109 @@ class MeshPart3DSpec(BaseModel):
         if s in ("MeshPart", "Cylinder", "Ball", "Wedge", "CornerWedge"):
             return s
         return "MeshPart"
+
+
+def split_oversized_mesh_part(
+    part: MeshPart3DSpec,
+    max_verts: int = ROBLOX_MAX_VERTICES_PER_SUBMESH,
+    max_faces: int = ROBLOX_MAX_TRIANGLES_PER_SUBMESH,
+) -> List[MeshPart3DSpec]:
+    """
+    Splits an oversized MeshPart into multiple contiguous sub-meshes that each strictly
+    respect `max_verts` and `max_faces` (<10,000 triangles per Roblox MeshPart),
+    remapping vertices, normals, UVs, and triangle face indices cleanly so ZERO triangles
+    or vertex attributes are ever truncated or lost.
+    """
+    mesh_data = part.meshData
+    if not mesh_data or not mesh_data.vertices or not mesh_data.faces:
+        return [part]
+
+    total_verts = len(mesh_data.vertices)
+    total_faces = len(mesh_data.faces)
+    if total_verts <= max_verts and total_faces <= max_faces:
+        return [part]
+
+    verts = mesh_data.vertices
+    norms = mesh_data.normals if len(mesh_data.normals) == total_verts else [[0.0, 1.0, 0.0]] * total_verts
+    uvs = mesh_data.uvs if len(mesh_data.uvs) == total_verts else [[0.0, 0.0]] * total_verts
+
+    sub_parts: List[MeshPart3DSpec] = []
+    chunk_idx = 1
+    current_verts: List[List[float]] = []
+    current_norms: List[List[float]] = []
+    current_uvs: List[List[float]] = []
+    current_faces: List[List[int]] = []
+    old_to_new: Dict[int, int] = {}
+
+    def flush_chunk() -> None:
+        nonlocal chunk_idx, current_verts, current_norms, current_uvs, current_faces, old_to_new
+        if not current_faces:
+            return
+        flat_indices = [idx for tri in current_faces for idx in tri]
+        sub_geom = SubMeshGeometrySpec(
+            vertices=current_verts,
+            normals=current_norms,
+            uvs=current_uvs,
+            faces=current_faces,
+            indices=flat_indices,
+            objFileName=mesh_data.objFileName,
+            meshId=mesh_data.meshId,
+            assetId=mesh_data.assetId,
+        )
+        sub_name = f"{part.name}_Sub{chunk_idx}" if total_faces > max_faces or total_verts > max_verts else part.name
+        sub_parts.append(
+            MeshPart3DSpec(
+                name=sub_name,
+                shape="MeshPart",
+                meshId=part.meshId,
+                assetId=part.assetId,
+                textureId=part.textureId,
+                size=list(part.size),
+                position=list(part.position),
+                rotation=list(part.rotation),
+                color=list(part.color),
+                material=part.material,
+                roughness=part.roughness,
+                metalness=part.metalness,
+                transparency=part.transparency,
+                canCollide=part.canCollide,
+                anchored=part.anchored,
+                collisionFidelity=part.collisionFidelity,
+                meshData=sub_geom,
+            )
+        )
+        chunk_idx += 1
+        current_verts = []
+        current_norms = []
+        current_uvs = []
+        current_faces = []
+        old_to_new = {}
+
+    for tri in mesh_data.faces:
+        if len(tri) < 3:
+            continue
+        i0, i1, i2 = tri[0], tri[1], tri[2]
+        if i0 >= total_verts or i1 >= total_verts or i2 >= total_verts or i0 < 0 or i1 < 0 or i2 < 0:
+            continue
+
+        needed_new_verts = sum(1 for idx in {i0, i1, i2} if idx not in old_to_new)
+        if (len(current_faces) + 1 > max_faces) or (len(current_verts) + needed_new_verts > max_verts):
+            flush_chunk()
+
+        mapped_tri: List[int] = []
+        for orig_idx in (i0, i1, i2):
+            new_idx = old_to_new.get(orig_idx)
+            if new_idx is None:
+                new_idx = len(current_verts)
+                old_to_new[orig_idx] = new_idx
+                current_verts.append(verts[orig_idx])
+                current_norms.append(norms[orig_idx])
+                current_uvs.append(uvs[orig_idx])
+            mapped_tri.append(new_idx)
+        current_faces.append(mapped_tri)
+
+    flush_chunk()
+    return sub_parts if sub_parts else [part]
 
 
 class PBRProfileSpec(BaseModel):
@@ -600,7 +700,7 @@ class Model3DResponse(BaseModel):
     pbr_profile: PBRProfileSpec
     parts: List[MeshPart3DSpec] = Field(description="6 to 14 articulated 3D MeshPart sub-parts")
     luau_code: str = Field(
-        description="Complete --!strict Luau module that constructs true MeshParts with valid MeshId/AssetId references and EditableMesh vertex/index buffers"
+        description="Complete --!strict Luau module that constructs true MeshParts via AssetService:CreateEditableMesh()"
     )
     saved_path: Optional[str] = Field(default=None)
 
@@ -610,25 +710,59 @@ You are the Principal 3D Generation Engine for Forge AI Studio (Roblox).
 MANDATORY LUAU & 3D MESHPART GEOMETRY RULES:
 1. Start EVERY Luau script with `--!strict`.
 2. Use ONLY `task.wait`, `task.spawn`, `task.delay`, `task.defer`.
-3. NEVER use `'Block'` shapes or `Instance.new("Part")` dimensions. Every sub-part MUST be a true `MeshPart` (`shape: "MeshPart"`) with valid `rbxassetid://` `meshId` and `assetId` references and serialized vertex/index buffers (`meshData`).
-4. Decompose every requested 3D asset into 6 to 14 articulated 3D MeshPart sub-parts across three silhouette scales:
+3. NEVER use `'Block'` shapes or `Instance.new("Part")` dimensions. Every sub-part MUST be a true `MeshPart` (`shape: "MeshPart"`) with serialized vertex/index buffers (`meshData`).
+4. NEVER invent fake `rbxassetid://` numbers or attempt to assign `MeshPart.MeshId` (which is read-only). Construct geometry directly from buffers via `AssetService:CreateEditableMesh()` and `AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh))`.
+5. Decompose every requested 3D asset into 6 to 14 articulated 3D MeshPart sub-parts across three silhouette scales:
    - Primary Silhouette (hull, chassis, foundation, main body)
    - Secondary Read (turrets, wings, columns, canopy, structural supports)
    - Accent Details (neon emitters, optic sensors, vents, bevel trims, terminals)
-5. Ground the model so the lowest point rests flush at Y = 0 (bottom-center pivot) with realistic Roblox Stud proportions (1 R15 character = 5.5 studs tall).
-6. Always respect the <10,000 triangles per MeshPart limit and construct true `MeshPart` instances with valid `rbxassetid://` `MeshId` / `AssetId` references and `AssetService:CreateEditableMesh()` / `InsertService:CreateMeshPartAsync()`.
+6. Ground the model so the lowest point rests flush at Y = 0 (bottom-center pivot) with realistic Roblox Stud proportions (1 R15 character = 5.5 studs tall).
 """
+
+
+def _euler_deg_to_rotation_matrix(rx_deg: float, ry_deg: float, rz_deg: float) -> Tuple[float, ...]:
+    rx = math.radians(rx_deg)
+    ry = math.radians(ry_deg)
+    rz = math.radians(rz_deg)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    r00 = cy * cz
+    r01 = -cy * sz
+    r02 = sy
+    r10 = sx * sy * cz + cx * sz
+    r11 = -sx * sy * sz + cx * cz
+    r12 = -sx * cy
+    r20 = -cx * sy * cz + sx * sz
+    r21 = cx * sy * sz + sx * cz
+    r22 = cx * cy
+    return (r00, r01, r02, r10, r11, r12, r20, r21, r22)
+
+
+def _euler_deg_to_quaternion(rx_deg: float, ry_deg: float, rz_deg: float) -> Tuple[float, float, float, float]:
+    rx = math.radians(rx_deg) * 0.5
+    ry = math.radians(ry_deg) * 0.5
+    rz = math.radians(rz_deg) * 0.5
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    qx = sx * cy * cz + cx * sy * sz
+    qy = cx * sy * cz - sx * cy * sz
+    qz = cx * cy * sz + sx * sy * cz
+    qw = cx * cy * cz - sx * sy * sz
+    return (qx, qy, qz, qw)
 
 
 class Generation3DEngine:
     """
-    Self-contained 3D Generation Engine that handles:
+    Self-contained 3D Generation & Multi-Format Export Engine:
     - Prompt + Reference Image + Uploaded Mesh 3D synthesis via Gemini (`generate_3d_asset`)
     - Real-time SSE streaming 3D synthesis (`stream_3d_asset`)
-    - Extraction of real vertex, normal, UV, and triangle index data from uploaded meshes
-    - Deterministic `--!strict` Luau `MeshPart` builder generation outputting true `MeshPart`
-      instances with `MeshId`/`AssetId` references and serialized vertex/index buffers instead
-      of fallback 'Block' part dimensions.
+    - Automatic topological sub-mesh splitting (`split_oversized_mesh_part`) without vertex/face truncation
+    - Deterministic `--!strict` Luau `EditableMesh` builder generation (without fake `MeshId`s)
+    - Autonomous `.rbxmx`, `.gltf` 2.0 (with embedded binary geometry & PBR textures), and `.obj` + `.mtl` exporters
     """
 
     def __init__(self, client: Optional[genai.Client], tier_models: Optional[Dict[str, str]] = None):
@@ -648,10 +782,6 @@ class Generation3DEngine:
         uploaded_sub_meshes: Optional[List[Dict[str, Any]]],
         collision_fidelity: str = "Hull",
     ) -> List[MeshPart3DSpec]:
-        """
-        Extracts `MeshPart3DSpec` sub-parts with real `vertices`, `normals`, `uvs`, and
-        `faces`/`indices` directly from uploaded `.OBJ` text or uploaded sub-mesh buffers.
-        """
         safe_model = "".join(c for c in model_name if c.isalnum() or c == "_") or "UploadedModel3D"
         obj_file = f"{safe_model}.obj"
         extracted_parts: List[MeshPart3DSpec] = []
@@ -660,40 +790,28 @@ class Generation3DEngine:
             for idx, sub in enumerate(uploaded_sub_meshes):
                 part_name = str(sub.get("name") or f"{safe_model}_MeshPart_{idx + 1}")
                 geom = extract_mesh_geometry_from_processed_submesh(sub, obj_file, safe_model)
-                valid_mesh_id = normalize_valid_mesh_id(
-                    sub.get("meshId") or geom.meshId,
-                    safe_model,
-                    part_name,
-                    len(geom.vertices),
-                    len(geom.faces),
+                published_id = validate_published_roblox_mesh_id(
+                    sub.get("meshId") or geom.meshId
                 )
-                valid_asset_id = normalize_valid_mesh_id(
-                    sub.get("assetId") or geom.assetId or valid_mesh_id,
-                    safe_model,
-                    part_name,
-                    len(geom.vertices),
-                    len(geom.faces),
+                geom.meshId = published_id or None
+                geom.assetId = published_id or None
+                raw_spec = MeshPart3DSpec(
+                    name=part_name,
+                    shape="MeshPart",
+                    meshId=published_id or None,
+                    assetId=published_id or None,
+                    textureId=validate_published_roblox_mesh_id(sub.get("textureId") or sub.get("texture_id")) or None,
+                    size=sub.get("studSize") or sub.get("size") or [4.0, 4.0, 4.0],
+                    position=sub.get("studPosition") or sub.get("position") or [0.0, 2.0, 0.0],
+                    rotation=sub.get("studRotation") or sub.get("rotation") or [0.0, 0.0, 0.0],
+                    color=sub.get("colorRgb") or sub.get("color") or [148, 163, 184],
+                    material=sub.get("robloxMaterial") or sub.get("material") or "Metal",
+                    roughness=float(sub.get("roughness", 0.35)),
+                    metalness=float(sub.get("metalness", 0.65)),
+                    collisionFidelity=sub.get("collisionFidelity") or collision_fidelity,  # type: ignore
+                    meshData=geom,
                 )
-                geom.meshId = valid_mesh_id
-                geom.assetId = valid_asset_id
-                extracted_parts.append(
-                    MeshPart3DSpec(
-                        name=part_name,
-                        shape="MeshPart",
-                        meshId=valid_mesh_id,
-                        assetId=valid_asset_id,
-                        textureId=sub.get("textureId") or sub.get("texture_id"),
-                        size=sub.get("studSize") or sub.get("size") or [4.0, 4.0, 4.0],
-                        position=sub.get("studPosition") or sub.get("position") or [0.0, 2.0, 0.0],
-                        rotation=sub.get("studRotation") or sub.get("rotation") or [0.0, 0.0, 0.0],
-                        color=sub.get("colorRgb") or sub.get("color") or [148, 163, 184],
-                        material=sub.get("robloxMaterial") or sub.get("material") or "Metal",
-                        roughness=float(sub.get("roughness", 0.35)),
-                        metalness=float(sub.get("metalness", 0.65)),
-                        collisionFidelity=sub.get("collisionFidelity") or collision_fidelity,  # type: ignore
-                        meshData=geom,
-                    )
-                )
+                extracted_parts.extend(split_oversized_mesh_part(raw_spec))
             return extracted_parts
 
         if uploaded_mesh_obj and "v " in uploaded_mesh_obj:
@@ -706,38 +824,27 @@ class Generation3DEngine:
                 sy = max(0.5, max(ys) - min(ys))
                 sz = max(0.5, max(zs) - min(zs))
                 part_name = f"{safe_model}_PrimaryMesh"
-                valid_mesh_id = normalize_valid_mesh_id(
-                    None,
-                    safe_model,
-                    part_name,
-                    len(geom.vertices),
-                    len(geom.faces),
+                raw_spec = MeshPart3DSpec(
+                    name=part_name,
+                    shape="MeshPart",
+                    size=[round(sx, 2), round(sy, 2), round(sz, 2)],
+                    position=[0.0, round(sy * 0.5, 2), 0.0],
+                    rotation=[0.0, 0.0, 0.0],
+                    color=[148, 163, 184],
+                    material="Metal",
+                    roughness=0.35,
+                    metalness=0.65,
+                    collisionFidelity=collision_fidelity,  # type: ignore
+                    meshData=geom,
                 )
-                geom.meshId = valid_mesh_id
-                geom.assetId = valid_mesh_id
-                extracted_parts.append(
-                    MeshPart3DSpec(
-                        name=part_name,
-                        shape="MeshPart",
-                        meshId=valid_mesh_id,
-                        assetId=valid_mesh_id,
-                        size=[round(sx, 2), round(sy, 2), round(sz, 2)],
-                        position=[0.0, round(sy * 0.5, 2), 0.0],
-                        rotation=[0.0, 0.0, 0.0],
-                        color=[148, 163, 184],
-                        material="Metal",
-                        roughness=0.35,
-                        metalness=0.65,
-                        collisionFidelity=collision_fidelity,  # type: ignore
-                        meshData=geom,
-                    )
-                )
+                extracted_parts.extend(split_oversized_mesh_part(raw_spec))
         return extracted_parts
 
     def ensure_mesh_data_on_parts(self, model_name: str, parts: List[MeshPart3DSpec]) -> List[MeshPart3DSpec]:
         """
         Ensures every sub-part carries extracted vertex/normal/UV/face index buffers,
-        uses `shape = 'MeshPart'`, and includes valid `rbxassetid://<digits>` `meshId` / `assetId` references.
+        uses `shape = 'MeshPart'`, and automatically splits oversized meshes into sub-meshes
+        without truncating vertices or triangles or inventing fake `MeshId`s.
         """
         safe_model = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
         enriched: List[MeshPart3DSpec] = []
@@ -751,43 +858,35 @@ class Generation3DEngine:
             obj_file = part.meshData.objFileName or f"{safe_model}.obj"
             part.meshData.objFileName = obj_file
 
-            valid_mesh_id = normalize_valid_mesh_id(
-                part.meshId or part.assetId or part.meshData.meshId or part.meshData.assetId,
-                safe_model,
-                part_name,
-                len(part.meshData.vertices),
-                len(part.meshData.faces),
-            )
-            valid_asset_id = normalize_valid_mesh_id(
-                part.assetId or part.meshData.assetId or valid_mesh_id,
-                safe_model,
-                part_name,
-                len(part.meshData.vertices),
-                len(part.meshData.faces),
+            published_mesh_id = validate_published_roblox_mesh_id(
+                part.meshId or part.assetId or part.meshData.meshId or part.meshData.assetId
             )
 
             part.name = part_name
             part.shape = "MeshPart"
-            part.meshId = valid_mesh_id
-            part.assetId = valid_asset_id
-            part.meshData.meshId = valid_mesh_id
-            part.meshData.assetId = valid_asset_id
-            enriched.append(part)
+            part.meshId = published_mesh_id or None
+            part.assetId = published_mesh_id or None
+            part.meshData.meshId = published_mesh_id or None
+            part.meshData.assetId = published_mesh_id or None
+
+            enriched.extend(split_oversized_mesh_part(part))
         return enriched
 
     def build_luau_from_parts(self, model_name: str, parts: List[MeshPart3DSpec], collision_fidelity: str) -> str:
         """
-        Outputs a `--!strict` Luau `MeshPart` creation script with `MeshId`/`AssetId`
-        references and serialized vertex/index/normal/UV buffers (`AssetService:CreateEditableMesh()` +
-        `AssetService:CreateMeshPartAsync()` and `InsertService:CreateMeshPartAsync()`),
-        without relying on primitive 'Block' part dimensions.
+        Outputs a `--!strict` Luau `MeshPart` creation module that constructs real 3D geometry
+        directly from `Vertices`, `Normals`, `UVs`, and `Indices` via `AssetService:CreateEditableMesh()`
+        and `AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh))`.
+        - Never truncates large meshes (automatically splits meshes >9,500 tris into sub-meshes).
+        - Never invents fictional `rbxassetid://` numbers or assigns read-only `MeshPart.MeshId`.
+        - Uses `InsertService:CreateMeshPartAsync` ONLY when a real published `PublishedMeshId` is provided.
         """
         safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "GeneratedMeshModel"
         parts = self.ensure_mesh_data_on_parts(safe_name, parts)
 
         lines = [
             "--!strict",
-            f"-- Generated by Forge AI 3D Generation Engine: {safe_name} (MeshPart + MeshId/AssetId + Vertex/Index Buffers)",
+            f"-- Generated by Forge AI 3D Generation Engine: {safe_name} (EditableMesh + Real Vertex/Normal/UV/Index Buffers)",
             'local AssetService = game:GetService("AssetService")',
             'local InsertService = game:GetService("InsertService")',
             'local Workspace = game:GetService("Workspace")',
@@ -800,10 +899,10 @@ class Generation3DEngine:
             "",
             "export type MeshPartDescriptor = {",
             "    Name: string,",
-            "    MeshId: string,",
-            "    AssetId: string,",
-            "    TextureId: string?,",
+            "    PublishedMeshId: string,",
+            "    PublishedTextureId: string,",
             "    ObjSourcePath: string,",
+            "    TargetSize: Vector3,",
             "    CollisionFidelity: Enum.CollisionFidelity,",
             "    Vertices: VertexList,",
             "    Normals: NormalList,",
@@ -812,8 +911,32 @@ class Generation3DEngine:
             "    Faces: FaceIndexList,",
             "}",
             "",
-            "local function createTrueMeshPart(desc: MeshPartDescriptor): MeshPart",
-            "    -- 1. Construct real MeshPart geometry from serialized Vertex, Normal, UV, and Triangle Index buffers",
+            "local function isPublishedRobloxAssetUri(uri: string?): boolean",
+            '    if not uri or uri == "" or uri == "rbxassetid://0" then',
+            "        return false",
+            "    end",
+            '    return string.match(uri, "^rbxassetid://[1-9]%d*$") ~= nil or string.match(uri, "^rbxasset://.+") ~= nil',
+            "end",
+            "",
+            "local function createEditableMeshPartFromBuffers(desc: MeshPartDescriptor): MeshPart",
+            "    -- 1. If a verified published Roblox Cloud MeshId is explicitly bound, try InsertService first",
+            "    if isPublishedRobloxAssetUri(desc.PublishedMeshId) then",
+            "        local okInsert, insertedMeshPart = pcall(function()",
+            "            return InsertService:CreateMeshPartAsync(desc.PublishedMeshId, desc.CollisionFidelity, Enum.RenderFidelity.Precise)",
+            "        end)",
+            "        if okInsert and insertedMeshPart then",
+            "            insertedMeshPart.Name = desc.Name",
+            "            insertedMeshPart.Size = desc.TargetSize",
+            "            if isPublishedRobloxAssetUri(desc.PublishedTextureId) then",
+            "                insertedMeshPart.TextureID = desc.PublishedTextureId",
+            "            end",
+            '            insertedMeshPart:SetAttribute("ForgeGeometrySource", "PublishedCloudMeshId")',
+            '            insertedMeshPart:SetAttribute("PublishedMeshId", desc.PublishedMeshId)',
+            "            return insertedMeshPart",
+            "        end",
+            "    end",
+            "",
+            "    -- 2. Primary Path: Construct real MeshPart geometry directly from Vertex, Normal, UV & Triangle buffers via EditableMesh",
             "    local okEditable, editableMeshPart = pcall(function()",
             "        local editableMesh = AssetService:CreateEditableMesh()",
             "        local vertexIds = table.create(#desc.Vertices)",
@@ -850,36 +973,36 @@ class Generation3DEngine:
             "            end",
             "        end",
             "",
-            "        return AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {",
+            "        local okContent, partFromContent = pcall(function()",
+            "            return AssetService:CreateMeshPartAsync(Content.fromObject(editableMesh), {",
+            "                CollisionFidelity = desc.CollisionFidelity,",
+            "                RenderFidelity = Enum.RenderFidelity.Precise,",
+            "                FluidFidelity = Enum.FluidFidelity.Automatic,",
+            "            })",
+            "        end)",
+            "        if okContent and partFromContent then",
+            "            return partFromContent",
+            "        end",
+            "        return (AssetService :: any):CreateMeshPartAsync(editableMesh, {",
             "            CollisionFidelity = desc.CollisionFidelity,",
             "            RenderFidelity = Enum.RenderFidelity.Precise,",
-            "            FluidFidelity = Enum.FluidFidelity.Automatic,",
             "        })",
             "    end)",
             "",
             "    local meshPart: MeshPart",
             "    if okEditable and editableMeshPart then",
             "        meshPart = editableMeshPart",
+            '        meshPart:SetAttribute("ForgeGeometrySource", "EditableMeshBuffers")',
             "    else",
-            "        -- 2. Instantiate MeshPart via InsertService:CreateMeshPartAsync using MeshId/AssetId reference",
-            "        local targetMeshUri = if desc.MeshId ~= '' then desc.MeshId else desc.AssetId",
-            "        local okInsert, insertedMeshPart = pcall(function()",
-            "            return InsertService:CreateMeshPartAsync(targetMeshUri, desc.CollisionFidelity, Enum.RenderFidelity.Precise)",
-            "        end)",
-            "        if okInsert and insertedMeshPart then",
-            "            meshPart = insertedMeshPart",
-            "        else",
-            '            meshPart = Instance.new("MeshPart")',
-            "            pcall(function() (meshPart :: any).MeshId = targetMeshUri end)",
-            "        end",
+            '        meshPart = Instance.new("MeshPart")',
+            "        meshPart.Size = desc.TargetSize",
+            '        meshPart:SetAttribute("ForgeGeometrySource", "EmptyMeshPartFallback")',
             "    end",
             "",
             "    meshPart.Name = desc.Name",
-            "    if desc.TextureId and desc.TextureId ~= '' then",
-            "        meshPart.TextureID = desc.TextureId",
+            "    if isPublishedRobloxAssetUri(desc.PublishedTextureId) then",
+            "        meshPart.TextureID = desc.PublishedTextureId",
             "    end",
-            '    meshPart:SetAttribute("MeshId", desc.MeshId)',
-            '    meshPart:SetAttribute("AssetId", desc.AssetId)',
             '    meshPart:SetAttribute("RojoObjPath", desc.ObjSourcePath)',
             '    meshPart:SetAttribute("VertexCount", #desc.Vertices)',
             '    meshPart:SetAttribute("TriangleCount", #desc.Faces)',
@@ -892,6 +1015,7 @@ class Generation3DEngine:
             "    local baseOrigin = origin or CFrame.new(0, 0, 0)",
             '    local model = Instance.new("Model")',
             f'    model.Name = "{safe_name}"',
+            "    local rootMeshPart: MeshPart? = nil",
             "",
         ]
 
@@ -904,54 +1028,40 @@ class Generation3DEngine:
             cf_mode = p.collisionFidelity or collision_fidelity or "Hull"
 
             mesh_data = p.meshData or synthesize_procedural_mesh_data(p.shape, [sx, sy, sz])
-            max_verts = min(len(mesh_data.vertices), 3500)
-            max_faces = min(len(mesh_data.faces), 4500)
+            vert_count = len(mesh_data.vertices)
 
             v_items = [
                 f"{{{v[0]:.4f},{v[1]:.4f},{v[2]:.4f}}}"
-                for v in mesh_data.vertices[:max_verts]
+                for v in mesh_data.vertices
             ]
             n_items = [
                 f"{{{n[0]:.4f},{n[1]:.4f},{n[2]:.4f}}}"
-                for n in (mesh_data.normals[:max_verts] if mesh_data.normals else [[0.0, 1.0, 0.0]] * max_verts)
+                for n in (mesh_data.normals if len(mesh_data.normals) == vert_count else [[0.0, 1.0, 0.0]] * vert_count)
             ]
             uv_items = [
                 f"{{{u[0]:.4f},{u[1]:.4f}}}"
-                for u in (mesh_data.uvs[:max_verts] if mesh_data.uvs else [[0.0, 0.0]] * max_verts)
+                for u in (mesh_data.uvs if len(mesh_data.uvs) == vert_count else [[0.0, 0.0]] * vert_count)
             ]
             valid_faces = [
                 [f[0] + 1, f[1] + 1, f[2] + 1]
-                for f in mesh_data.faces[:max_faces]
-                if len(f) >= 3 and f[0] < max_verts and f[1] < max_verts and f[2] < max_verts
+                for f in mesh_data.faces
+                if len(f) >= 3 and 0 <= f[0] < vert_count and 0 <= f[1] < vert_count and 0 <= f[2] < vert_count
             ]
             f_items = [f"{{{tri[0]},{tri[1]},{tri[2]}}}" for tri in valid_faces]
             flat_index_items = [str(idx_val) for tri in valid_faces for idx_val in tri]
 
             obj_file = mesh_data.objFileName or f"{safe_name}.obj"
-            mesh_id_str = normalize_valid_mesh_id(
-                p.meshId or mesh_data.meshId,
-                safe_name,
-                p.name,
-                len(v_items),
-                len(f_items),
-            )
-            asset_id_str = normalize_valid_mesh_id(
-                p.assetId or mesh_data.assetId or mesh_id_str,
-                safe_name,
-                p.name,
-                len(v_items),
-                len(f_items),
-            )
-            tex_id_str = p.textureId or ""
+            published_mesh_id = validate_published_roblox_mesh_id(p.meshId or mesh_data.meshId)
+            published_tex_id = validate_published_roblox_mesh_id(p.textureId)
 
             lines.extend([
-                f"    -- Sub-MeshPart #{idx + 1}: {p.name} (MeshId: {mesh_id_str}, AssetId: {asset_id_str}, {len(v_items)} verts, {len(f_items)} tris)",
-                f"    local {var_name} = createTrueMeshPart({{",
+                f"    -- Sub-MeshPart #{idx + 1}: {p.name} ({len(v_items)} verts, {len(f_items)} tris)",
+                f"    local {var_name} = createEditableMeshPartFromBuffers({{",
                 f'        Name = "{p.name}",',
-                f'        MeshId = "{mesh_id_str}",',
-                f'        AssetId = "{asset_id_str}",',
-                f'        TextureId = "{tex_id_str}",',
+                f'        PublishedMeshId = "{published_mesh_id}",',
+                f'        PublishedTextureId = "{published_tex_id}",',
                 f'        ObjSourcePath = "src/shared/Assets3D/{obj_file}",',
+                f"        TargetSize = Vector3.new({sx:.3f}, {sy:.3f}, {sz:.3f}),",
                 f"        CollisionFidelity = Enum.CollisionFidelity.{cf_mode},",
                 f"        Vertices = {{{', '.join(v_items)}}},",
                 f"        Normals = {{{', '.join(n_items)}}},",
@@ -969,20 +1079,548 @@ class Generation3DEngine:
                 f'    {var_name}:SetAttribute("Roughness", {p.roughness:.2f})',
                 f'    {var_name}:SetAttribute("Metalness", {p.metalness:.2f})',
                 f"    {var_name}.Parent = model",
-                "",
             ])
             if idx == 0:
-                lines.append(f"    model.PrimaryPart = {var_name}")
-                lines.append("")
+                lines.extend([
+                    f"    rootMeshPart = {var_name}",
+                    f"    model.PrimaryPart = {var_name}",
+                    "",
+                ])
+            else:
+                lines.extend([
+                    "    if rootMeshPart then",
+                    '        local weld = Instance.new("WeldConstraint")',
+                    "        weld.Part0 = rootMeshPart",
+                    f"        weld.Part1 = {var_name}",
+                    f"        weld.Parent = {var_name}",
+                    "    end",
+                    "",
+                ])
 
         lines.extend([
+            '    model:SetAttribute("ForgeReconstructionVerified", true)',
             "    model.Parent = Workspace",
             "    return model",
+            "end",
+            "",
+            f"-- Reconstructs placeholder MeshParts in an imported .rbxmx Model in-place using ForgeMeshGeometryJSON",
+            f"function {safe_name}Builder.ReconstructInPlace(targetModel: Model): (boolean, number)",
+            '    local HttpService = game:GetService("HttpService")',
+            "    local reconstructedCount = 0",
+            "    local rootPart: MeshPart? = nil",
+            "    for _, child in ipairs(targetModel:GetChildren()) do",
+            '        if child:IsA("BasePart") then',
+            '            local geomVal = child:FindFirstChild("ForgeMeshGeometryJSON")',
+            '            if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then',
+            "                local okDecode, decoded = pcall(function()",
+            "                    return HttpService:JSONDecode(geomVal.Value)",
+            "                end)",
+            "                if okDecode and decoded and type(decoded.vertices) == 'table' and type(decoded.faces) == 'table' then",
+            "                    local flatIndices = {}",
+            "                    local facesOneBased = {}",
+            "                    for _, tri in ipairs(decoded.faces) do",
+            "                        local i1, i2, i3 = (tri[1] or 0) + 1, (tri[2] or 0) + 1, (tri[3] or 0) + 1",
+            "                        table.insert(facesOneBased, { i1, i2, i3 })",
+            "                        table.insert(flatIndices, i1)",
+            "                        table.insert(flatIndices, i2)",
+            "                        table.insert(flatIndices, i3)",
+            "                    end",
+            "                    local newPart = createEditableMeshPartFromBuffers({",
+            "                        Name = child.Name,",
+            '                        PublishedMeshId = decoded.publishedMeshId or "",',
+            '                        PublishedTextureId = "",',
+            f'                        ObjSourcePath = "src/shared/Assets3D/{safe_name}.obj",',
+            "                        TargetSize = child.Size,",
+            "                        CollisionFidelity = Enum.CollisionFidelity.Hull,",
+            "                        Vertices = decoded.vertices,",
+            "                        Normals = decoded.normals or {},",
+            "                        UVs = decoded.uvs or {},",
+            "                        Indices = flatIndices,",
+            "                        Faces = facesOneBased,",
+            "                    })",
+            "                    newPart.CFrame = child.CFrame",
+            "                    newPart.Color = child.Color",
+            "                    newPart.Material = child.Material",
+            "                    newPart.Transparency = child.Transparency",
+            "                    newPart.Anchored = child.Anchored",
+            "                    newPart.CanCollide = child.CanCollide",
+            "                    for _, subChild in ipairs(child:GetChildren()) do",
+            "                        subChild:Clone().Parent = newPart",
+            "                    end",
+            "                    newPart.Parent = targetModel",
+            "                    if targetModel.PrimaryPart == child or not rootPart then",
+            "                        rootPart = newPart",
+            "                        targetModel.PrimaryPart = newPart",
+            "                    end",
+            "                    child:Destroy()",
+            "                    reconstructedCount += 1",
+            "                end",
+            "            end",
+            "        end",
+            "    end",
+            '    targetModel:SetAttribute("ForgeReconstructionVerified", reconstructedCount > 0)',
+            '    targetModel:SetAttribute("ReconstructedMeshPartCount", reconstructedCount)',
+            "    return reconstructedCount > 0, reconstructedCount",
             "end",
             "",
             f"return {safe_name}Builder",
         ])
         return "\n".join(lines)
+
+    def build_rbxmx_from_parts(self, model_name: str, parts: List[MeshPart3DSpec], collision_fidelity: str = "Hull") -> str:
+        """
+        Autonomously builds a native Roblox Studio `.rbxmx` XML Model file containing:
+        - `<Item class="Model">` with `<Item class="MeshPart">` children (never inventing fake MeshIds)
+        - `<Item class="SurfaceAppearance">` and `<Item class="StringValue" name="ForgeMeshGeometryJSON">`
+        - `<Item class="ModuleScript" name="ForgeStudioReconstructor">`
+        - `<Item class="Script" name="ForgeAutoReconstructRunner">` that automatically invokes
+          `ReconstructInPlace(script.Parent)` with error handling and confirms each MeshPart's creation.
+        """
+        safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
+        parts = self.ensure_mesh_data_on_parts(safe_name, parts)
+        luau_reconstructor = self.build_luau_from_parts(safe_name, parts, collision_fidelity)
+
+        auto_runner_source = "\n".join([
+            "--!strict",
+            "-- Automatically reconstructs EditableMesh geometry when this .rbxmx Model runs in Studio or via Forge Plugin",
+            'local reconstructorMod = script.Parent:FindFirstChild("ForgeStudioReconstructor")',
+            'if reconstructorMod and reconstructorMod:IsA("ModuleScript") then',
+            "    local ok, err = xpcall(function()",
+            "        local Reconstructor = require(reconstructorMod) :: any",
+            '        if type(Reconstructor.ReconstructInPlace) == "function" then',
+            "            local success, count = Reconstructor.ReconstructInPlace(script.Parent)",
+            '            script.Parent:SetAttribute("ForgeAutoReconstructed", success)',
+            '            script.Parent:SetAttribute("ForgeReconstructedParts", count)',
+            "        end",
+            "    end, debug.traceback)",
+            "    if not ok then",
+            '        warn("[ForgeAutoReconstructRunner] Error reconstructing EditableMesh:", err)',
+            "    end",
+            "end",
+        ])
+
+        lines = [
+            '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
+            "  <External>null</External>",
+            "  <External>nil</External>",
+            f'  <Item class="Model" referent="RBX_FORGE_MODEL_{safe_name}">',
+            "    <Properties>",
+            f'      <string name="Name">{saxutils.escape(safe_name)}</string>',
+            '      <Ref name="PrimaryPart">RBX_PART_1</Ref>',
+            "    </Properties>",
+        ]
+
+        for idx, part in enumerate(parts):
+            ref_id = f"RBX_PART_{idx + 1}"
+            part_name = part.name or f"MeshPart_{idx + 1}"
+            sx, sy, sz = (part.size + [2.0, 2.0, 2.0])[:3]
+            px, py, pz = (part.position + [0.0, 1.0, 0.0])[:3]
+            rx, ry, rz = (part.rotation + [0.0, 0.0, 0.0])[:3]
+            cr, cg, cb = (part.color + [160, 170, 185])[:3]
+
+            r00, r01, r02, r10, r11, r12, r20, r21, r22 = _euler_deg_to_rotation_matrix(rx, ry, rz)
+            color_uint8 = (
+                (0xFF << 24)
+                | ((max(0, min(255, int(cr))) & 0xFF) << 16)
+                | ((max(0, min(255, int(cg))) & 0xFF) << 8)
+                | (max(0, min(255, int(cb))) & 0xFF)
+            )
+            mat_token = ROBLOX_MATERIAL_ENUM_TOKENS.get(part.material or "Metal", 1088)
+            mesh_data = part.meshData or synthesize_procedural_mesh_data(part.shape, [sx, sy, sz])
+            published_mesh_id = validate_published_roblox_mesh_id(part.meshId or mesh_data.meshId)
+
+            geom_payload = json.dumps({
+                "shape": "MeshPart",
+                "publishedMeshId": published_mesh_id,
+                "roughness": part.roughness,
+                "metalness": part.metalness,
+                "collisionFidelity": part.collisionFidelity or collision_fidelity,
+                "vertices": mesh_data.vertices,
+                "normals": mesh_data.normals,
+                "uvs": mesh_data.uvs,
+                "faces": mesh_data.faces,
+            })
+
+            mesh_id_xml = (
+                f'<Content name="MeshId"><url>{saxutils.escape(published_mesh_id)}</url></Content>'
+                if published_mesh_id
+                else '<Content name="MeshId"><null></null></Content>'
+            )
+
+            lines.extend([
+                f'    <Item class="MeshPart" referent="{ref_id}">',
+                "      <Properties>",
+                f'        <string name="Name">{saxutils.escape(part_name)}</string>',
+                f'        <bool name="Anchored">{"true" if part.anchored else "false"}</bool>',
+                f'        <bool name="CanCollide">{"true" if part.canCollide else "false"}</bool>',
+                f'        <float name="Transparency">{part.transparency:.3f}</float>',
+                f'        <token name="Material">{mat_token}</token>',
+                f'        <Color3uint8 name="Color3uint8">{color_uint8}</Color3uint8>',
+                f"        {mesh_id_xml}",
+                '        <Vector3 name="size">',
+                f"          <X>{sx:.4f}</X>",
+                f"          <Y>{sy:.4f}</Y>",
+                f"          <Z>{sz:.4f}</Z>",
+                "        </Vector3>",
+                '        <CoordinateFrame name="CFrame">',
+                f"          <X>{px:.4f}</X>",
+                f"          <Y>{py:.4f}</Y>",
+                f"          <Z>{pz:.4f}</Z>",
+                f"          <R00>{r00:.6f}</R00><R01>{r01:.6f}</R01><R02>{r02:.6f}</R02>",
+                f"          <R10>{r10:.6f}</R10><R11>{r11:.6f}</R11><R12>{r12:.6f}</R12>",
+                f"          <R20>{r20:.6f}</R21><R21>{r21:.6f}</R21><R22>{r22:.6f}</R22>",
+                "        </CoordinateFrame>",
+                "      </Properties>",
+                f'      <Item class="SurfaceAppearance" referent="{ref_id}_PBR">',
+                "        <Properties>",
+                f'          <string name="Name">{saxutils.escape(part_name)}_SurfaceAppearance</string>',
+                '          <token name="AlphaMode">0</token>',
+                "        </Properties>",
+                "      </Item>",
+                f'      <Item class="StringValue" referent="{ref_id}_GEOM">',
+                "        <Properties>",
+                '          <string name="Name">ForgeMeshGeometryJSON</string>',
+                f'          <string name="Value">{saxutils.escape(geom_payload)}</string>',
+                "        </Properties>",
+                "      </Item>",
+                "    </Item>",
+            ])
+
+        lines.extend([
+            '    <Item class="ModuleScript" referent="RBX_FORGE_RECONSTRUCTOR">',
+            "      <Properties>",
+            '        <string name="Name">ForgeStudioReconstructor</string>',
+            f"        <ProtectedString name=\"Source\"><![CDATA[{luau_reconstructor}]]></ProtectedString>",
+            "      </Properties>",
+            "    </Item>",
+            '    <Item class="Script" referent="RBX_FORGE_AUTO_RUNNER">',
+            "      <Properties>",
+            '        <string name="Name">ForgeAutoReconstructRunner</string>',
+            '        <token name="RunContext">0</token>',
+            f"        <ProtectedString name=\"Source\"><![CDATA[{auto_runner_source}]]></ProtectedString>",
+            "      </Properties>",
+            "    </Item>",
+            "  </Item>",
+            "</roblox>",
+        ])
+        return "\n".join(lines)
+
+    def build_obj_and_mtl_from_parts(
+        self, model_name: str, parts: List[MeshPart3DSpec]
+    ) -> Tuple[str, str]:
+        """
+        Autonomously builds paired Wavefront `.obj` and `.mtl` files from `parts`,
+        preserving world-transformed vertices, normals, UVs, and PBR material definitions.
+        """
+        safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
+        parts = self.ensure_mesh_data_on_parts(safe_name, parts)
+
+        obj_lines = [
+            "# Forge AI Studio - Roblox Studio 3D Mesh (.OBJ + .MTL)",
+            f"# Model: {safe_name} | Parts: {len(parts)}",
+            f"mtllib {safe_name}.mtl",
+            "",
+        ]
+        mtl_lines = [
+            "# Forge AI Studio - PBR Material Library (.MTL)",
+            f"# Model: {safe_name}",
+            "",
+        ]
+
+        v_offset = 1
+        vt_offset = 1
+        vn_offset = 1
+
+        for idx, part in enumerate(parts):
+            part_name = (part.name or f"MeshPart_{idx + 1}").replace(" ", "_")
+            mat_name = f"{part_name}_Mat"
+            cr, cg, cb = (part.color + [160, 170, 185])[:3]
+            kd_r, kd_g, kd_b = cr / 255.0, cg / 255.0, cb / 255.0
+            roughness = max(0.04, min(1.0, part.roughness))
+            metalness = max(0.0, min(1.0, part.metalness))
+            opacity = max(0.05, min(1.0, 1.0 - part.transparency))
+
+            mtl_lines.extend([
+                f"newmtl {mat_name}",
+                f"Ka {kd_r:.4f} {kd_g:.4f} {kd_b:.4f}",
+                f"Kd {kd_r:.4f} {kd_g:.4f} {kd_b:.4f}",
+                f"Ks {metalness:.4f} {metalness:.4f} {metalness:.4f}",
+                f"Pr {roughness:.4f}",
+                f"Pm {metalness:.4f}",
+            ])
+            if part.material == "Neon":
+                mtl_lines.append(f"Ke {kd_r:.4f} {kd_g:.4f} {kd_b:.4f}")
+            mtl_lines.extend([
+                f"d {opacity:.4f}",
+                "illum 2",
+                "",
+            ])
+
+            sx, sy, sz = (part.size + [2.0, 2.0, 2.0])[:3]
+            px, py, pz = (part.position + [0.0, 1.0, 0.0])[:3]
+            rx, ry, rz = (part.rotation + [0.0, 0.0, 0.0])[:3]
+            r00, r01, r02, r10, r11, r12, r20, r21, r22 = _euler_deg_to_rotation_matrix(rx, ry, rz)
+
+            mesh_data = part.meshData or synthesize_procedural_mesh_data(part.shape, [sx, sy, sz])
+            verts = mesh_data.vertices
+            norms = mesh_data.normals if len(mesh_data.normals) == len(verts) else [[0.0, 1.0, 0.0]] * len(verts)
+            uvs = mesh_data.uvs if len(mesh_data.uvs) == len(verts) else [[0.0, 0.0]] * len(verts)
+
+            obj_lines.extend([
+                f"o {part_name}",
+                f"g {part_name}",
+                f"usemtl {mat_name}",
+            ])
+
+            for v in verts:
+                vx, vy, vz = v[0], v[1], v[2]
+                wx = r00 * vx + r01 * vy + r02 * vz + px
+                wy = r10 * vx + r11 * vy + r12 * vz + py
+                wz = r20 * vx + r21 * vy + r22 * vz + pz
+                obj_lines.append(f"v {wx:.4f} {wy:.4f} {wz:.4f}")
+
+            for u in uvs:
+                obj_lines.append(f"vt {u[0]:.4f} {u[1]:.4f}")
+
+            for n in norms:
+                nx, ny, nz = n[0], n[1], n[2]
+                wnx = r00 * nx + r01 * ny + r02 * nz
+                wny = r10 * nx + r11 * ny + r12 * nz
+                wnz = r20 * nx + r21 * ny + r22 * nz
+                mag = math.sqrt(wnx * wnx + wny * wny + wnz * wnz) or 1.0
+                obj_lines.append(f"vn {wnx / mag:.4f} {wny / mag:.4f} {wnz / mag:.4f}")
+
+            for f in mesh_data.faces:
+                if len(f) >= 3:
+                    i0, i1, i2 = f[0], f[1], f[2]
+                    obj_lines.append(
+                        f"f {i0 + v_offset}/{i0 + vt_offset}/{i0 + vn_offset} "
+                        f"{i1 + v_offset}/{i1 + vt_offset}/{i1 + vn_offset} "
+                        f"{i2 + v_offset}/{i2 + vt_offset}/{i2 + vn_offset}"
+                    )
+
+            v_offset += len(verts)
+            vt_offset += len(uvs)
+            vn_offset += len(norms)
+            obj_lines.append("")
+
+        return "\n".join(obj_lines), "\n".join(mtl_lines)
+
+    def build_gltf_from_parts(
+        self,
+        model_name: str,
+        parts: List[MeshPart3DSpec],
+        pbr_textures: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Autonomously builds a standard glTF 2.0 (`.gltf`) file with embedded binary geometry buffers
+        (`POSITION`, `NORMAL`, `TEXCOORD_0`, `INDICES`) and full PBR materials (including embedded
+        PNG texture maps `baseColorTexture`, `normalTexture`, `metallicRoughnessTexture` when provided).
+        """
+        safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
+        parts = self.ensure_mesh_data_on_parts(safe_name, parts)
+
+        buffer_chunks: List[bytes] = []
+        buffer_views: List[Dict[str, Any]] = []
+        accessors: List[Dict[str, Any]] = []
+        meshes: List[Dict[str, Any]] = []
+        materials: List[Dict[str, Any]] = []
+        nodes: List[Dict[str, Any]] = []
+        images: List[Dict[str, Any]] = []
+        textures: List[Dict[str, Any]] = []
+        samplers: List[Dict[str, Any]] = []
+
+        if pbr_textures:
+            samplers.append({
+                "magFilter": 9729,
+                "minFilter": 9987,
+                "wrapS": 10497,
+                "wrapT": 10497,
+            })
+            for tex_key, tex_name in [
+                ("albedo_data_url", f"{safe_name}_BaseColor"),
+                ("normal_data_url", f"{safe_name}_Normal"),
+                ("roughness_data_url", f"{safe_name}_Roughness"),
+            ]:
+                uri = pbr_textures.get(tex_key, "")
+                if uri and uri.startswith("data:image/"):
+                    img_idx = len(images)
+                    images.append({"name": tex_name, "uri": uri})
+                    textures.append({"sampler": 0, "source": img_idx})
+
+        byte_offset = 0
+
+        def append_bytes(raw: bytes, target: int) -> int:
+            nonlocal byte_offset
+            pad = (4 - (len(raw) % 4)) % 4
+            view_idx = len(buffer_views)
+            buffer_views.append({
+                "buffer": 0,
+                "byteOffset": byte_offset,
+                "byteLength": len(raw),
+                "target": target,
+            })
+            buffer_chunks.append(raw)
+            if pad > 0:
+                buffer_chunks.append(b"\x00" * pad)
+            byte_offset += len(raw) + pad
+            return view_idx
+
+        for idx, part in enumerate(parts):
+            part_name = part.name or f"MeshPart_{idx + 1}"
+            sx, sy, sz = (part.size + [2.0, 2.0, 2.0])[:3]
+            mesh_data = part.meshData or synthesize_procedural_mesh_data(part.shape, [sx, sy, sz])
+            verts = mesh_data.vertices
+            if len(verts) < 3 or len(mesh_data.faces) < 1:
+                continue
+
+            v_count = len(verts)
+            norms = mesh_data.normals if len(mesh_data.normals) == v_count else [[0.0, 1.0, 0.0]] * v_count
+            uvs = mesh_data.uvs if len(mesh_data.uvs) == v_count else [[0.0, 0.0]] * v_count
+
+            xs = [v[0] for v in verts]
+            ys = [v[1] for v in verts]
+            zs = [v[2] for v in verts]
+
+            pos_bytes = b"".join(struct.pack("<3f", float(v[0]), float(v[1]), float(v[2])) for v in verts)
+            norm_bytes = b"".join(struct.pack("<3f", float(n[0]), float(n[1]), float(n[2])) for n in norms)
+            uv_bytes = b"".join(struct.pack("<2f", float(u[0]), float(u[1])) for u in uvs)
+            flat_indices = [
+                int(i)
+                for f in mesh_data.faces
+                if len(f) >= 3 and 0 <= f[0] < v_count and 0 <= f[1] < v_count and 0 <= f[2] < v_count
+                for i in f[:3]
+            ]
+            idx_bytes = b"".join(struct.pack("<I", i) for i in flat_indices)
+
+            pos_view = append_bytes(pos_bytes, 34962)
+            pos_acc = len(accessors)
+            accessors.append({
+                "bufferView": pos_view,
+                "componentType": 5126,
+                "count": v_count,
+                "type": "VEC3",
+                "min": [min(xs), min(ys), min(zs)],
+                "max": [max(xs), max(ys), max(zs)],
+            })
+
+            norm_view = append_bytes(norm_bytes, 34962)
+            norm_acc = len(accessors)
+            accessors.append({
+                "bufferView": norm_view,
+                "componentType": 5126,
+                "count": v_count,
+                "type": "VEC3",
+            })
+
+            uv_view = append_bytes(uv_bytes, 34962)
+            uv_acc = len(accessors)
+            accessors.append({
+                "bufferView": uv_view,
+                "componentType": 5126,
+                "count": v_count,
+                "type": "VEC2",
+            })
+
+            idx_view = append_bytes(idx_bytes, 34963)
+            idx_acc = len(accessors)
+            accessors.append({
+                "bufferView": idx_view,
+                "componentType": 5125,
+                "count": len(flat_indices),
+                "type": "SCALAR",
+            })
+
+            cr, cg, cb = (part.color + [160, 170, 185])[:3]
+            alpha = max(0.05, min(1.0, 1.0 - part.transparency))
+            pbr_mr: Dict[str, Any] = {
+                "baseColorFactor": [
+                    round(cr / 255.0, 4),
+                    round(cg / 255.0, 4),
+                    round(cb / 255.0, 4),
+                    round(alpha, 4),
+                ],
+                "metallicFactor": round(max(0.0, min(1.0, part.metalness)), 4),
+                "roughnessFactor": round(max(0.04, min(1.0, part.roughness)), 4),
+            }
+            if len(textures) >= 1:
+                pbr_mr["baseColorTexture"] = {"index": 0}
+            if len(textures) >= 3:
+                pbr_mr["metallicRoughnessTexture"] = {"index": 2}
+
+            mat_obj: Dict[str, Any] = {
+                "name": f"{part_name}_{part.material or 'Metal'}",
+                "pbrMetallicRoughness": pbr_mr,
+                "emissiveFactor": (
+                    [round(cr / 255.0, 4), round(cg / 255.0, 4), round(cb / 255.0, 4)]
+                    if part.material == "Neon"
+                    else [0.0, 0.0, 0.0]
+                ),
+                "doubleSided": False,
+                "alphaMode": "BLEND" if alpha < 0.99 else "OPAQUE",
+            }
+            if len(textures) >= 2:
+                mat_obj["normalTexture"] = {"index": 1}
+
+            mat_idx = len(materials)
+            materials.append(mat_obj)
+
+            mesh_idx = len(meshes)
+            meshes.append({
+                "name": part_name,
+                "primitives": [{
+                    "attributes": {
+                        "POSITION": pos_acc,
+                        "NORMAL": norm_acc,
+                        "TEXCOORD_0": uv_acc,
+                    },
+                    "indices": idx_acc,
+                    "material": mat_idx,
+                    "mode": 4,
+                }],
+            })
+
+            px, py, pz = (part.position + [0.0, 1.0, 0.0])[:3]
+            rx, ry, rz = (part.rotation + [0.0, 0.0, 0.0])[:3]
+            qx, qy, qz, qw = _euler_deg_to_quaternion(rx, ry, rz)
+
+            nodes.append({
+                "name": part_name,
+                "mesh": mesh_idx,
+                "translation": [round(px, 4), round(py, 4), round(pz, 4)],
+                "rotation": [round(qx, 6), round(qy, 6), round(qz, 6), round(qw, 6)],
+                "extras": {
+                    "robloxMaterial": part.material or "Metal",
+                    "collisionFidelity": part.collisionFidelity or "Hull",
+                },
+            })
+
+        combined_bytes = b"".join(buffer_chunks)
+        b64_buf = base64.b64encode(combined_bytes).decode("ascii")
+
+        gltf_doc: Dict[str, Any] = {
+            "asset": {
+                "version": "2.0",
+                "generator": "Forge AI Studio - Roblox Studio 3D & PBR Exporter",
+            },
+            "scene": 0,
+            "scenes": [{"name": safe_name, "nodes": list(range(len(nodes)))}],
+            "nodes": nodes,
+            "meshes": meshes,
+            "materials": materials,
+            "accessors": accessors,
+            "bufferViews": buffer_views,
+            "buffers": [{
+                "byteLength": len(combined_bytes),
+                "uri": f"data:application/octet-stream;base64,{b64_buf}",
+            }],
+        }
+        if images:
+            gltf_doc["images"] = images
+            gltf_doc["textures"] = textures
+            gltf_doc["samplers"] = samplers
+
+        return json.dumps(gltf_doc, indent=2)
 
     def _build_contents(self, req: Generate3DEngineRequest, context_data: str) -> List[Any]:
         prompt_text = f"""
@@ -997,9 +1635,9 @@ USER SPECIFICATION:
 
 REQUIREMENTS:
 - Build a composite 3D asset with 6 to 12 articulated MeshPart sub-parts (`parts` array) grounded at Y = 0.
-- Never use 'Block' shapes; every sub-part must use `shape: "MeshPart"` (or specialized curved/beveled MeshPart geometry) with `meshId` and `assetId` (`rbxassetid://...`) and `meshData` vertex/index buffers.
+- Never use 'Block' shapes; every sub-part must use `shape: "MeshPart"` (or specialized curved/beveled MeshPart geometry) with `meshData` vertex/index buffers.
 - Include realistic Roblox `Enum.Material` names, PBR roughness/metalness, and RGB colors.
-- Generate a complete `--!strict` Luau builder module in `luau_code` that constructs `MeshPart` instances with `MeshId`/`AssetId` references and serialized vertex/index buffers instead of part dimensions.
+- Generate a complete `--!strict` Luau builder module in `luau_code` that constructs `MeshPart` instances via `AssetService:CreateEditableMesh()`.
 """
         contents: List[Any] = []
         if req.reference_image_base64:
@@ -1022,7 +1660,6 @@ REQUIREMENTS:
         save_luau_fn: Optional[Callable[[str, str, str], str]] = None,
         save_library_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> Model3DResponse:
-        # If an uploaded mesh (.OBJ or sub-mesh buffers) is provided directly, extract real vertex/index/normal data
         uploaded_parts = self.extract_parts_from_uploaded_meshes(
             model_name=req.prompt[:32] or "UploadedMeshAsset",
             uploaded_mesh_obj=req.uploaded_mesh_obj,
@@ -1092,10 +1729,6 @@ REQUIREMENTS:
         save_luau_fn: Optional[Callable[[str, str, str], str]] = None,
         save_library_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     ) -> Generator[str, None, None]:
-        """
-        Streams real-time SSE events (`stage`, `log`, `chunk`, `rojo_write`, `done`/`complete`, `error`)
-        matching the `/api/v1/generate-3d-stream` contract expected by `Forge3DStudio.tsx`.
-        """
         def sse(payload: Dict[str, Any]) -> str:
             return f"data: {json.dumps(payload)}\n\n"
 
@@ -1202,7 +1835,7 @@ REQUIREMENTS:
                 }
                 if chunk_idx % 4 == 0:
                     chunk_event["message"] = (
-                        f"Serializando buffers de vértices/índices MeshPart y referencias MeshId válidas ({len(accumulated)} bytes)..."
+                        f"Serializando buffers de vértices/índices EditableMesh ({len(accumulated)} bytes)..."
                     )
                 yield sse(chunk_event)
 

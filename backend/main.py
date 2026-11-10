@@ -52,6 +52,7 @@ from engines.generation_3d_engine import (
     PBRProfileSpec,
     SubMeshGeometrySpec,
     extract_mesh_geometry_from_processed_submesh,
+    validate_published_roblox_mesh_id,
 )
 from engines.asset_engine import AssetEngine
 from engines.world_engine import WorldEngine
@@ -698,27 +699,27 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
     for i, s in enumerate(sub_meshes):
         part_name = str(s.get("name", f"MeshPart_{i+1}"))
         extracted_geom = extract_mesh_geometry_from_processed_submesh(s, obj_file_name, model_name)
-        mesh_id = (
+        mesh_id = validate_published_roblox_mesh_id(
             s.get("meshId")
             or s.get("mesh_id")
             or extracted_geom.meshId
         )
-        asset_id = (
+        asset_id = validate_published_roblox_mesh_id(
             s.get("assetId")
             or s.get("asset_id")
             or extracted_geom.assetId
             or mesh_id
         )
-        extracted_geom.meshId = str(mesh_id)
-        extracted_geom.assetId = str(asset_id)
+        extracted_geom.meshId = mesh_id
+        extracted_geom.assetId = asset_id
         extracted_geom.objFileName = obj_file_name
 
         spec = MeshPart3DSpec(
             name=part_name,
             shape="MeshPart",
-            meshId=str(mesh_id),
-            assetId=str(asset_id),
-            textureId=s.get("textureId") or s.get("texture_id"),
+            meshId=mesh_id,
+            assetId=asset_id,
+            textureId=validate_published_roblox_mesh_id(s.get("textureId") or s.get("texture_id")) or None,
             size=s.get("studSize", [2.0, 2.0, 2.0]),
             position=s.get("studPosition", [0.0, 1.0, 0.0]),
             rotation=s.get("studRotation", [0.0, 0.0, 0.0]),
@@ -733,10 +734,17 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
             meshData=extracted_geom,
         )
         part_specs.append(spec)
-        parts.append(spec.model_dump())
+
+    # Automatically split oversized sub-meshes (>9,000 verts or >9,500 tris) so zero triangles are lost
+    part_specs = generation_3d_engine.ensure_mesh_data_on_parts(model_name, part_specs)
+    parts = [spec.model_dump() for spec in part_specs]
 
     raw_luau = str(payload.get("luauMeshPartBuilderCode", ""))
-    if "MeshId" in raw_luau and "CreateMeshPartAsync" in raw_luau:
+    if (
+        "CreateEditableMesh" in raw_luau
+        and "CreateMeshPartAsync" in raw_luau
+        and ".MeshId =" not in raw_luau
+    ):
         luau_code = raw_luau
     else:
         luau_code = generation_3d_engine.build_luau_from_parts(
@@ -750,9 +758,7 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
     if save_to_rojo and combined_obj.strip():
         obj_saved_path = save_raw_asset_to_rojo(target_folder, obj_file_name, combined_obj.encode("utf-8"))
 
-    total_tris = int(payload.get("totalTriangles", 0)) or sum(
-        len(p.meshData.faces) for p in part_specs if p.meshData
-    )
+    total_tris = sum(len(p.meshData.faces) for p in part_specs if p.meshData) or int(payload.get("totalTriangles", 0))
 
     asset_record = {
         "id": f"meshpart-{int(time.time() * 1000)}",
@@ -765,7 +771,7 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
         "file_name": file_name,
         "obj_file_name": obj_file_name,
         "obj_saved_path": obj_saved_path,
-        "description": f"MeshPart 3D con geometría real y referencias MeshId/AssetId ({len(parts)} sub-mallas, {total_tris} tris, EditableMesh + OBJ).",
+        "description": f"MeshPart 3D con geometría EditableMesh real ({len(parts)} sub-mallas, {total_tris} tris, OBJ sincronizado).",
         "pbr_profile": {
             "albedo_hex": "#38bdf8",
             "roughness": 0.35,
@@ -795,8 +801,9 @@ def process_imported_meshpart(payload_body: Dict[str, Any], x_forge_token: Optio
 @app.post("/api/v1/assets/export-roblox-package")
 def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     """
-    Exports a complete Roblox Studio 3D package (.rbxmx, .gltf, .obj, .mtl, and .luau)
-    into the Rojo workspace (`src/shared/Assets3D/`) and persists the updated asset.
+    Autonomously builds and exports all 5 Roblox Studio 3D package files (.luau, .rbxmx, .gltf, .obj, .mtl)
+    into the Rojo workspace (`src/shared/Assets3D/`), verifies on disk that all 5 files exist,
+    and persists the updated asset with version history.
     """
     verify_security_token(x_forge_token)
     asset = payload_body.get("asset", {})
@@ -807,6 +814,7 @@ def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[
     target_folder = str(asset.get("rojo_target_folder", "src/shared/Assets3D"))
     save_to_rojo = bool(payload_body.get("save_to_rojo", True))
     save_to_library = bool(payload_body.get("save_to_library", True))
+    collision_fidelity = str(asset.get("collision_fidelity", "Hull"))
 
     raw_parts = asset.get("parts", [])
     part_specs = [MeshPart3DSpec(**p) for p in raw_parts]
@@ -814,8 +822,38 @@ def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[
     rebuilt_luau = generation_3d_engine.build_luau_from_parts(
         safe_name,
         enriched_specs,
-        str(asset.get("collision_fidelity", "Hull")),
+        collision_fidelity,
     )
+
+    # Autonomously generate any of the 4 companion files on the backend if omitted by the client
+    client_rbxmx = str(payload_body.get("rbxmx_content", "") or "").strip()
+    client_gltf = str(payload_body.get("gltf_content", "") or "").strip()
+    client_obj = str(payload_body.get("obj_content", "") or "").strip()
+    client_mtl = str(payload_body.get("mtl_content", "") or "").strip()
+    pbr_textures = payload_body.get("pbr_textures") if isinstance(payload_body.get("pbr_textures"), dict) else None
+
+    if not client_rbxmx:
+        client_rbxmx = generation_3d_engine.build_rbxmx_from_parts(
+            safe_name,
+            enriched_specs,
+            collision_fidelity,
+            str(asset.get("category", "3D Asset")),
+            rebuilt_luau,
+        )
+
+    if not client_obj or not client_mtl:
+        built_obj_mtl = generation_3d_engine.build_obj_and_mtl_from_parts(safe_name, enriched_specs)
+        if not client_obj:
+            client_obj = built_obj_mtl["obj"]
+        if not client_mtl:
+            client_mtl = built_obj_mtl["mtl"]
+
+    if not client_gltf:
+        client_gltf = generation_3d_engine.build_gltf_from_parts(
+            safe_name,
+            enriched_specs,
+            pbr_textures=pbr_textures,
+        )
 
     saved_files: Dict[str, Optional[str]] = {
         "luau": None,
@@ -824,12 +862,27 @@ def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[
         "obj": None,
         "mtl": None,
     }
+    verified_files: Dict[str, bool] = {
+        "luau": False,
+        "rbxmx": False,
+        "gltf": False,
+        "obj": False,
+        "mtl": False,
+    }
+
     if save_to_rojo:
         saved_files["luau"] = save_luau_to_rojo(target_folder, f"{safe_name}.luau", rebuilt_luau)
-        for key, ext in [("rbxmx_content", "rbxmx"), ("gltf_content", "gltf"), ("obj_content", "obj"), ("mtl_content", "mtl")]:
-            content_str = str(payload_body.get(key, "") or "")
-            if content_str.strip():
-                saved_files[ext] = save_raw_asset_to_rojo(target_folder, f"{safe_name}.{ext}", content_str.encode("utf-8"))
+        saved_files["rbxmx"] = save_raw_asset_to_rojo(target_folder, f"{safe_name}.rbxmx", client_rbxmx.encode("utf-8"))
+        saved_files["gltf"] = save_raw_asset_to_rojo(target_folder, f"{safe_name}.gltf", client_gltf.encode("utf-8"))
+        saved_files["obj"] = save_raw_asset_to_rojo(target_folder, f"{safe_name}.obj", client_obj.encode("utf-8"))
+        saved_files["mtl"] = save_raw_asset_to_rojo(target_folder, f"{safe_name}.mtl", client_mtl.encode("utf-8"))
+
+        for ext, abs_path in saved_files.items():
+            if abs_path and Path(abs_path).is_file() and Path(abs_path).stat().st_size > 0:
+                verified_files[ext] = True
+
+    verified_count = sum(1 for ok in verified_files.values() if ok)
+    all_five_exist = (verified_count == 5) if save_to_rojo else True
 
     total_tris = sum(len(p.meshData.faces) for p in enriched_specs if p.meshData)
     updated_asset = {
@@ -842,12 +895,17 @@ def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[
         "obj_file_name": f"{safe_name}.obj",
         "saved_path": saved_files["luau"] or asset.get("saved_path"),
         "obj_saved_path": saved_files["obj"] or asset.get("obj_saved_path"),
+        "exported_package_files": saved_files,
+        "verified_package_files": verified_files,
     }
     if save_to_library:
         save_asset_to_library(updated_asset)
 
     return {
-        "success": True,
+        "success": all_five_exist,
+        "all_five_exist": all_five_exist,
+        "verified_files_count": verified_count,
+        "verified_files": verified_files,
         "asset": updated_asset,
         "saved_files": saved_files,
     }
@@ -857,13 +915,15 @@ def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[
 def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     """
     Publishes browser-synthesized PBR texture maps (Albedo, Normal, Roughness PNGs)
-    into `src/shared/Assets3D/Textures/` and generates a `--!strict` Luau
-    `SurfaceAppearance` binder module so MeshParts receive real PBR materials in Rojo.
+    into `src/shared/Assets3D/Textures/`, optionally uploads them to Roblox Open Cloud
+    if `roblox_api_key` and `roblox_creator_id` are supplied, and generates a `--!strict`
+    Luau `SurfaceAppearance` + `EditableImage` binder module (never outputting `rbxassetid://0`).
     """
     verify_security_token(x_forge_token)
     material_name = re.sub(r"[^a-zA-Z0-9_]", "", str(payload_body.get("material_name", "ForgePBRMaterial"))) or "ForgePBRMaterial"
     target_folder = "src/shared/Assets3D/Textures"
     saved_textures: Dict[str, str] = {}
+    raw_png_buffers: Dict[str, bytes] = {}
 
     for map_key, suffix in [
         ("albedo_data_url", "ColorMap.png"),
@@ -875,6 +935,7 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
             _, b64_part = data_url.split(",", 1)
             try:
                 raw_bytes = base64.b64decode(b64_part)
+                raw_png_buffers[suffix] = raw_bytes
                 tex_file = f"{material_name}_{suffix}"
                 saved_textures[suffix] = save_raw_asset_to_rojo(target_folder, tex_file, raw_bytes)
             except Exception as err:
@@ -884,13 +945,51 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
     metalness_val = float(payload_body.get("metalness", 0.75))
     albedo_hex = str(payload_body.get("albedo_hex", "#38bdf8"))
 
-    asset_engine = AssetEngine()
+    color_map_id = str(payload_body.get("color_map_asset_id", "") or "").strip()
+    normal_map_id = str(payload_body.get("normal_map_asset_id", "") or "").strip()
+    roughness_map_id = str(payload_body.get("roughness_map_asset_id", "") or "").strip()
+    metalness_map_id = str(payload_body.get("metalness_map_asset_id", "") or "").strip()
+
+    asset_engine = AssetEngine(get_assets_library_path())
+
+    # Optional Roblox Open Cloud Asset API upload when credentials are provided
+    roblox_api_key = str(payload_body.get("roblox_api_key", "") or os.getenv("ROBLOX_OPEN_CLOUD_API_KEY", "")).strip()
+    roblox_creator_id = str(payload_body.get("roblox_creator_id", "") or os.getenv("ROBLOX_CREATOR_ID", "")).strip()
+    cloud_publish_results: Dict[str, Any] = {}
+
+    if roblox_api_key and roblox_creator_id:
+        for suffix, attr_name in [
+            ("ColorMap.png", "color"),
+            ("NormalMap.png", "normal"),
+            ("RoughnessMap.png", "roughness"),
+        ]:
+            if suffix in raw_png_buffers:
+                pub_res = asset_engine.publish_decal_to_roblox_cloud(
+                    png_bytes=raw_png_buffers[suffix],
+                    display_name=f"{material_name}_{suffix.replace('.png', '')}",
+                    api_key=roblox_api_key,
+                    creator_user_id=roblox_creator_id,
+                )
+                cloud_publish_results[suffix] = pub_res
+                if pub_res.get("published") and pub_res.get("roblox_asset_uri"):
+                    uri = str(pub_res["roblox_asset_uri"])
+                    if attr_name == "color" and not color_map_id:
+                        color_map_id = uri
+                    elif attr_name == "normal" and not normal_map_id:
+                        normal_map_id = uri
+                    elif attr_name == "roughness" and not roughness_map_id:
+                        roughness_map_id = uri
+
     pbr_luau = asset_engine.generate_pbr_surface_appearance_luau(
         material_name=material_name,
-        color_map_id=f"rbxassetid://0 -- Rojo: {target_folder}/{material_name}_ColorMap.png",
-        normal_map_id=f"rbxassetid://0 -- Rojo: {target_folder}/{material_name}_NormalMap.png",
-        roughness_map_id=f"rbxassetid://0 -- Rojo: {target_folder}/{material_name}_RoughnessMap.png",
-        metalness_map_id=f"rbxassetid://0 -- Roughness={roughness_val:.2f}, Metalness={metalness_val:.2f}, Albedo={albedo_hex}",
+        color_map_id=color_map_id,
+        normal_map_id=normal_map_id,
+        roughness_map_id=roughness_map_id,
+        metalness_map_id=metalness_map_id,
+        roughness=roughness_val,
+        metalness=metalness_val,
+        albedo_hex=albedo_hex,
+        target_folder=target_folder,
     )
     luau_file_name = f"{material_name}_SurfaceAppearance.luau"
     luau_saved_path = save_luau_to_rojo("src/shared/Assets3D", luau_file_name, pbr_luau)
@@ -899,9 +998,141 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
         "success": True,
         "material_name": material_name,
         "saved_textures": saved_textures,
+        "verified_cloud_ids": {
+            "color_map_id": color_map_id if asset_engine.is_verified_roblox_asset_uri(color_map_id) else None,
+            "normal_map_id": normal_map_id if asset_engine.is_verified_roblox_asset_uri(normal_map_id) else None,
+            "roughness_map_id": roughness_map_id if asset_engine.is_verified_roblox_asset_uri(roughness_map_id) else None,
+            "metalness_map_id": metalness_map_id if asset_engine.is_verified_roblox_asset_uri(metalness_map_id) else None,
+        },
+        "cloud_publish_results": cloud_publish_results,
         "luau_file": f"src/shared/Assets3D/{luau_file_name}",
         "luau_saved_path": luau_saved_path,
         "luau_code": pbr_luau,
+    }
+
+
+@app.get("/api/v1/assets/sync-status")
+def get_assets_bidirectional_sync_status():
+    """
+    Phase 4 Bidirectional Rojo <-> Forge AI Studio synchronization & version audit.
+    Inspects all assets in `assets_library.json` and checks whether their corresponding
+    `.luau`, `.obj`, `.rbxmx`, `.gltf`, and `.mtl` files in `rojo_workspace/src/shared/Assets3D/`
+    exist or have been modified externally (e.g. from Roblox Studio / Rojo).
+    """
+    assets = load_assets_library()
+    rojo_root = Path(RUNTIME_CONFIG["rojo_project_path"]).resolve()
+    assets_dir = rojo_root / "src" / "shared" / "Assets3D"
+    statuses: List[Dict[str, Any]] = []
+
+    for a in assets:
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "", str(a.get("name", "Model3D"))) or "Model3D"
+        luau_path = assets_dir / str(a.get("file_name") or f"{safe_name}.luau")
+        obj_path = assets_dir / str(a.get("obj_file_name") or f"{safe_name}.obj")
+        rbxmx_path = assets_dir / f"{safe_name}.rbxmx"
+        gltf_path = assets_dir / f"{safe_name}.gltf"
+        mtl_path = assets_dir / f"{safe_name}.mtl"
+
+        disk_luau_sha = None
+        in_memory_luau_sha = hashlib.sha256(str(a.get("luau_code", "")).encode("utf-8")).hexdigest()[:12]
+        external_change_detected = False
+
+        if luau_path.is_file():
+            disk_bytes = luau_path.read_bytes()
+            disk_luau_sha = hashlib.sha256(disk_bytes).hexdigest()[:12]
+            if disk_luau_sha != in_memory_luau_sha:
+                external_change_detected = True
+
+        statuses.append({
+            "id": a.get("id"),
+            "name": a.get("name"),
+            "version": int(a.get("version", 1)),
+            "version_history_count": len(a.get("version_history", [])),
+            "files_on_disk": {
+                "luau": luau_path.is_file(),
+                "rbxmx": rbxmx_path.is_file(),
+                "gltf": gltf_path.is_file(),
+                "obj": obj_path.is_file(),
+                "mtl": mtl_path.is_file(),
+            },
+            "disk_luau_sha256": disk_luau_sha,
+            "library_luau_sha256": in_memory_luau_sha,
+            "external_change_detected": external_change_detected,
+        })
+
+    return {
+        "rojo_assets_folder": str(assets_dir),
+        "total_assets": len(statuses),
+        "assets": statuses,
+    }
+
+
+@app.post("/api/v1/assets/pull-from-rojo")
+def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    """
+    Phase 4 Bidirectional Sync & Version Recovery:
+    Either pulls updated `.obj` / `.luau` geometry from `rojo_workspace/src/shared/Assets3D/`
+    into the active Forge AI Studio asset, or restores a specific historical revision (`restore_version`).
+    """
+    verify_security_token(x_forge_token)
+    asset_id = str(payload_body.get("asset_id", "")).strip()
+    asset_name = str(payload_body.get("asset_name", "")).strip()
+    restore_version = payload_body.get("restore_version")
+
+    assets = load_assets_library()
+    target_asset = next(
+        (a for a in assets if (asset_id and a.get("id") == asset_id) or (asset_name and a.get("name") == asset_name)),
+        None,
+    )
+    if not target_asset:
+        raise HTTPException(status_code=404, detail="Asset not found in library.")
+
+    if restore_version is not None:
+        history = target_asset.get("version_history", [])
+        snap = next((h for h in history if int(h.get("version", -1)) == int(restore_version)), None)
+        if not snap:
+            raise HTTPException(status_code=404, detail=f"Version {restore_version} not found in asset history.")
+        target_asset["parts"] = snap.get("parts", target_asset.get("parts", []))
+        target_asset["luau_code"] = snap.get("luau_code", target_asset.get("luau_code", ""))
+        target_asset["poly_count"] = snap.get("poly_count", target_asset.get("poly_count", 0))
+        saved = save_asset_to_library(target_asset)
+        return {
+            "success": True,
+            "source": f"version_history_v{restore_version}",
+            "asset": saved,
+        }
+
+    safe_name = re.sub(r"[^a-zA-Z0-9_]", "", str(target_asset.get("name", "Model3D"))) or "Model3D"
+    rojo_root = Path(RUNTIME_CONFIG["rojo_project_path"]).resolve()
+    assets_dir = rojo_root / "src" / "shared" / "Assets3D"
+    obj_path = assets_dir / str(target_asset.get("obj_file_name") or f"{safe_name}.obj")
+    luau_path = assets_dir / str(target_asset.get("file_name") or f"{safe_name}.luau")
+
+    if obj_path.is_file():
+        obj_text = obj_path.read_text(encoding="utf-8", errors="ignore")
+        if "v " in obj_text:
+            re_parts = generation_3d_engine.extract_parts_from_uploaded_mesh(
+                model_name=safe_name,
+                uploaded_mesh_obj=obj_text,
+                uploaded_sub_meshes=None,
+                collision_fidelity=str(target_asset.get("collision_fidelity", "Hull")),
+            )
+            if re_parts:
+                target_asset["parts"] = [p.model_dump() for p in re_parts]
+                target_asset["poly_count"] = sum(len(p.meshData.faces) for p in re_parts if p.meshData)
+                target_asset["luau_code"] = generation_3d_engine.build_luau_from_parts(
+                    safe_name,
+                    re_parts,
+                    str(target_asset.get("collision_fidelity", "Hull")),
+                )
+
+    if luau_path.is_file():
+        target_asset["luau_code"] = luau_path.read_text(encoding="utf-8", errors="ignore")
+
+    saved = save_asset_to_library(target_asset)
+    return {
+        "success": True,
+        "source": "rojo_workspace_disk",
+        "asset": saved,
     }
 
 

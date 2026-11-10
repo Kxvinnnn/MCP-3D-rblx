@@ -26,7 +26,10 @@ export interface MeshPart3DSpec {
   renderFidelity?: 'Automatic' | 'Precise' | 'Performance';
   doubleSided?: boolean;
   meshId?: string;
+  assetId?: string;
+  textureId?: string;
   meshData?: SubMeshGeometryData;
+  baseMeshData?: SubMeshGeometryData;
 }
 
 export interface PBRProfileSpec {
@@ -39,6 +42,9 @@ export interface PBRProfileSpec {
   albedo_asset_path?: string;
   normal_asset_path?: string;
   roughness_asset_path?: string;
+  color_map_asset_id?: string;
+  normal_map_asset_id?: string;
+  roughness_map_asset_id?: string;
 }
 
 export interface Forge3DAsset {
@@ -58,6 +64,132 @@ export interface Forge3DAsset {
   luau_code: string;
   saved_path?: string | null;
   created_at?: string;
+  updated_at?: string;
+  version?: number;
+  version_history?: Array<{
+    version: number;
+    timestamp: string;
+    poly_count: number;
+    part_count: number;
+    luau_code: string;
+    parts: MeshPart3DSpec[];
+  }>;
+  exported_package_files?: Record<string, string | null>;
+  verified_package_files?: Record<string, boolean>;
+}
+
+/**
+ * Validates whether a candidate string is a real published Roblox asset URI
+ * (`rbxassetid://<positive_integer>` or `rbxasset://...`).
+ * Never invents fictional hash-based IDs or `rbxassetid://0`.
+ */
+export function validatePublishedRobloxMeshId(candidate?: string | null): string {
+  const raw = String(candidate || '').trim();
+  if (!raw || raw.startsWith('rbxassetid://0') || raw === 'None' || raw === 'undefined') {
+    return '';
+  }
+  if (/^rbxassetid:\/\/[1-9]\d*$/.test(raw)) {
+    return raw;
+  }
+  if (/^rbxasset:\/\/.+/.test(raw)) {
+    return raw;
+  }
+  return '';
+}
+
+/**
+ * Splits a high-polygon MeshPart exceeding `maxVertsPerPart` or `maxFacesPerPart`
+ * into contiguous sub-meshes (`_Sub1`, `_Sub2`, ...) with remapped vertex, normal, UV,
+ * and triangle index buffers so zero triangles are ever truncated.
+ */
+export function splitOversizedMeshPart(
+  part: MeshPart3DSpec,
+  maxVertsPerPart: number = 9000,
+  maxFacesPerPart: number = 9500
+): MeshPart3DSpec[] {
+  const md = ensurePartHasMeshData(part);
+  if (md.vertices.length <= maxVertsPerPart && md.faces.length <= maxFacesPerPart) {
+    return [{ ...part, meshData: md }];
+  }
+
+  const splitParts: MeshPart3DSpec[] = [];
+  let chunkFaces: number[][] = [];
+  let usedVerts = new Set<number>();
+
+  const flushChunk = (chunkIdx: number) => {
+    if (chunkFaces.length === 0) return;
+    const oldToNew = new Map<number, number>();
+    const newVerts: number[][] = [];
+    const newNorms: number[][] = [];
+    const newUvs: number[][] = [];
+    const newFaces: number[][] = [];
+
+    const totalV = md.vertices.length;
+    const totalN = md.normals?.length || 0;
+    const totalUv = md.uvs?.length || 0;
+
+    for (const tri of chunkFaces) {
+      const remappedTri: number[] = [0, 0, 0];
+      for (let k = 0; k < 3; k++) {
+        const oldIdx = tri[k];
+        const safeOld = oldIdx >= 0 && oldIdx < totalV ? oldIdx : 0;
+        let mapped = oldToNew.get(safeOld);
+        if (mapped === undefined) {
+          mapped = newVerts.length;
+          oldToNew.set(safeOld, mapped);
+          newVerts.push(md.vertices[safeOld] || [0, 0, 0]);
+          newNorms.push(safeOld < totalN && md.normals ? md.normals[safeOld] : [0, 1, 0]);
+          newUvs.push(safeOld < totalUv && md.uvs ? md.uvs[safeOld] : [0, 0]);
+        }
+        remappedTri[k] = mapped;
+      }
+      newFaces.push(remappedTri);
+    }
+
+    splitParts.push({
+      ...part,
+      name: `${part.name}_Sub${chunkIdx}`,
+      meshData: {
+        vertices: newVerts,
+        normals: newNorms,
+        uvs: newUvs,
+        faces: newFaces,
+        objFileName: md.objFileName,
+      },
+    });
+  };
+
+  let chunkCounter = 1;
+  for (const tri of md.faces) {
+    if (!Array.isArray(tri) || tri.length < 3) continue;
+    let newVertCount = usedVerts.size;
+    if (!usedVerts.has(tri[0])) newVertCount++;
+    if (!usedVerts.has(tri[1])) newVertCount++;
+    if (!usedVerts.has(tri[2])) newVertCount++;
+
+    if (
+      chunkFaces.length > 0 &&
+      (chunkFaces.length + 1 > maxFacesPerPart || newVertCount > maxVertsPerPart)
+    ) {
+      flushChunk(chunkCounter);
+      chunkCounter++;
+      chunkFaces = [];
+      usedVerts = new Set<number>();
+    }
+    chunkFaces.push([tri[0], tri[1], tri[2]]);
+    usedVerts.add(tri[0]);
+    usedVerts.add(tri[1]);
+    usedVerts.add(tri[2]);
+  }
+
+  if (chunkFaces.length > 0) {
+    if (chunkCounter === 1) {
+      return [{ ...part, meshData: md }];
+    }
+    flushChunk(chunkCounter);
+  }
+
+  return splitParts.length > 0 ? splitParts : [{ ...part, meshData: md }];
 }
 
 export interface PBRTextureSet {
@@ -588,15 +720,28 @@ export function recomputeSmoothNormals(
 }
 
 /**
- * Rescales a MeshPart's actual vertex coordinates proportionally to match `newSize` [sx, sy, sz]
- * and recomputes smooth normals so exported geometry preserves the exact edited dimensions and shape.
+ * Rescales a MeshPart's actual vertex coordinates non-destructively from `part.baseMeshData`
+ * (or `part.meshData` on first edit) proportionally to match `newSize` [sx, sy, sz]
+ * and recomputes smooth normals so repeated resizing never degrades original geometry.
  */
 export function rescaleMeshPartGeometry(
   part: MeshPart3DSpec,
   newSize: number[]
 ): MeshPart3DSpec {
-  const baseData = ensurePartHasMeshData(part);
-  const verts = baseData.vertices;
+  const currentMesh = ensurePartHasMeshData(part);
+  const immutableBase: SubMeshGeometryData =
+    part.baseMeshData && part.baseMeshData.vertices?.length > 0
+      ? part.baseMeshData
+      : {
+          vertices: currentMesh.vertices.map((v) => [...v]),
+          normals: (currentMesh.normals || []).map((n) => [...n]),
+          uvs: (currentMesh.uvs || []).map((u) => [...u]),
+          faces: currentMesh.faces.map((f) => [...f]),
+          vertexColors: currentMesh.vertexColors,
+          objFileName: currentMesh.objFileName,
+        };
+
+  const verts = immutableBase.vertices;
   let minX = Infinity, maxX = -Infinity;
   let minY = Infinity, maxY = -Infinity;
   let minZ = Infinity, maxZ = -Infinity;
@@ -624,14 +769,15 @@ export function rescaleMeshPartGeometry(
     Number(((v[1] - cy) * (sy / spanY)).toFixed(4)),
     Number(((v[2] - cz) * (sz / spanZ)).toFixed(4)),
   ]);
-  const updatedNormals = recomputeSmoothNormals(scaledVertices, baseData.faces);
+  const updatedNormals = recomputeSmoothNormals(scaledVertices, immutableBase.faces);
 
   return {
     ...part,
     shape: 'MeshPart',
     size: [Number(sx.toFixed(2)), Number(sy.toFixed(2)), Number(sz.toFixed(2))],
+    baseMeshData: immutableBase,
     meshData: {
-      ...baseData,
+      ...immutableBase,
       vertices: scaledVertices,
       normals: updatedNormals,
     },
@@ -1020,10 +1166,41 @@ export function generateEditableMeshLuauCode(
   }>
 ): string {
   const safeName = modelName.replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeMeshModel';
+  const expandedSubMeshes: typeof subMeshes = [];
+
+  for (const sub of subMeshes) {
+    const splitList = splitOversizedMeshPart({
+      name: sub.name,
+      shape: 'MeshPart',
+      size: sub.size,
+      position: sub.position,
+      rotation: sub.rotation,
+      color: sub.color,
+      material: sub.material,
+      roughness: sub.roughness,
+      metalness: sub.metalness,
+      transparency: 0,
+      canCollide: true,
+      anchored: true,
+      collisionFidelity: (sub.collisionFidelity as any) || 'Hull',
+      doubleSided: sub.doubleSided,
+      meshId: sub.meshId,
+      assetId: sub.assetId,
+      meshData: sub.meshData,
+    });
+    for (const sp of splitList) {
+      expandedSubMeshes.push({
+        ...sub,
+        name: sp.name,
+        meshData: sp.meshData,
+      });
+    }
+  }
+
   const lines: string[] = [
     '--!strict',
     `-- Generated by Forge AI Real Geometry Pipeline: ${safeName}`,
-    '-- Outputs MeshPart instances with MeshId/AssetId references + AssetService:CreateEditableMesh() real vertex/normal/UV/index buffers',
+    '-- Constructs real MeshPart geometry directly from vertex/normal/UV/index buffers via AssetService:CreateEditableMesh()',
     'local AssetService = game:GetService("AssetService")',
     'local InsertService = game:GetService("InsertService")',
     'local Workspace = game:GetService("Workspace")',
@@ -1038,9 +1215,10 @@ export function generateEditableMeshLuauCode(
     '',
     'type SubMeshPayload = {',
     '    name: string,',
-    '    meshId: string,',
-    '    assetId: string,',
+    '    publishedMeshId: string,',
+    '    publishedAssetId: string,',
     '    objSourcePath: string,',
+    '    size: Vector3,',
     '    offsetPos: Vector3,',
     '    offsetRotDeg: Vector3,',
     '    color: Color3,',
@@ -1059,7 +1237,8 @@ export function generateEditableMeshLuauCode(
     'local SUB_MESH_DATA: { SubMeshPayload } = {',
   ];
 
-  for (const sub of subMeshes) {
+  for (const sub of expandedSubMeshes) {
+    const [sx, sy, sz] = sub.size;
     const [px, py, pz] = sub.position;
     const [rx, ry, rz] = sub.rotation;
     const [cr, cg, cb] = sub.color;
@@ -1071,38 +1250,32 @@ export function generateEditableMeshLuauCode(
     const rawUvs = sub.meshData?.uvs || [];
     const rawFaces = sub.meshData?.faces || [];
 
-    const maxInlineVerts = 3500;
-    const maxInlineFaces = 4500;
-    const cappedVerts = rawVerts.slice(0, maxInlineVerts);
-    const cappedFaces = rawFaces
-      .slice(0, maxInlineFaces)
-      .filter((f) => f[0] < maxInlineVerts && f[1] < maxInlineVerts && f[2] < maxInlineVerts);
-
-    const vertStrings = cappedVerts.map(
+    const vertStrings = rawVerts.map(
       (v) => `{${Number(v[0] ?? 0).toFixed(4)}, ${Number(v[1] ?? 0).toFixed(4)}, ${Number(v[2] ?? 0).toFixed(4)}}`
     );
-    const normStrings = cappedVerts.map((_, i) => {
+    const normStrings = rawVerts.map((_, i) => {
       const n = rawNorms[i] || [0, 1, 0];
       return `{${Number(n[0] ?? 0).toFixed(4)}, ${Number(n[1] ?? 1).toFixed(4)}, ${Number(n[2] ?? 0).toFixed(4)}}`;
     });
-    const uvStrings = cappedVerts.map((_, i) => {
+    const uvStrings = rawVerts.map((_, i) => {
       const u = rawUvs[i] || [0, 0];
       return `{${Number(u[0] ?? 0).toFixed(4)}, ${Number(u[1] ?? 0).toFixed(4)}}`;
     });
-    const faceStrings = cappedFaces.map(
-      (f) => `{${(f[0] ?? 0) + 1}, ${(f[1] ?? 1) + 1}, ${(f[2] ?? 2) + 1}}`
-    );
+    const faceStrings = rawFaces
+      .filter((f) => f[0] < rawVerts.length && f[1] < rawVerts.length && f[2] < rawVerts.length)
+      .map((f) => `{${(f[0] ?? 0) + 1}, ${(f[1] ?? 1) + 1}, ${(f[2] ?? 2) + 1}}`);
 
     const objFile = sub.meshData?.objFileName || `${safeName}.obj`;
-    const meshId = sub.meshId && sub.meshId.startsWith('rbxassetid://') ? sub.meshId : 'rbxassetid://1000000001';
-    const assetId = sub.assetId && sub.assetId.startsWith('rbxassetid://') ? sub.assetId : meshId;
+    const publishedMeshId = validatePublishedRobloxMeshId(sub.meshId);
+    const publishedAssetId = validatePublishedRobloxMeshId(sub.assetId) || publishedMeshId;
 
     lines.push(
       '    {',
       `        name = "${sub.name}",`,
-      `        meshId = "${meshId}",`,
-      `        assetId = "${assetId}",`,
+      `        publishedMeshId = "${publishedMeshId}",`,
+      `        publishedAssetId = "${publishedAssetId}",`,
       `        objSourcePath = "src/shared/Assets3D/${objFile}",`,
+      `        size = Vector3.new(${sx.toFixed(3)}, ${sy.toFixed(3)}, ${sz.toFixed(3)}),`,
       `        offsetPos = Vector3.new(${px.toFixed(2)}, ${py.toFixed(2)}, ${pz.toFixed(2)}),`,
       `        offsetRotDeg = Vector3.new(${rx.toFixed(1)}, ${ry.toFixed(1)}, ${rz.toFixed(1)}),`,
       `        color = Color3.fromRGB(${Math.round(cr)}, ${Math.round(cg)}, ${Math.round(cb)}),`,
@@ -1155,32 +1328,34 @@ export function generateEditableMeshLuauCode(
     '        })',
     '    end)',
     '    if okEditable and generatedMeshPart then',
+    '        generatedMeshPart.Size = payload.size',
     '        generatedMeshPart.DoubleSided = payload.doubleSided',
-    '        generatedMeshPart:SetAttribute("MeshId", payload.meshId)',
-    '        generatedMeshPart:SetAttribute("AssetId", payload.assetId)',
     '        generatedMeshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
+    '        generatedMeshPart:SetAttribute("GeometrySource", "EditableMeshBuffer")',
     '        return generatedMeshPart',
     '    end',
     '',
-    '    local resolvedUri = if overrideAssetId and overrideAssetId ~= "" then overrideAssetId else payload.meshId',
-    '    local ok, meshPart = pcall(function()',
-    '        return InsertService:CreateMeshPartAsync(resolvedUri, payload.collisionFidelity, payload.renderFidelity)',
-    '    end)',
-    '    if ok and meshPart then',
-    '        meshPart.DoubleSided = payload.doubleSided',
-    '        meshPart:SetAttribute("MeshId", payload.meshId)',
-    '        meshPart:SetAttribute("AssetId", payload.assetId)',
-    '        meshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
-    '        return meshPart',
+    '    local resolvedUri = if overrideAssetId and overrideAssetId ~= "" then overrideAssetId else payload.publishedMeshId',
+    '    if resolvedUri ~= "" then',
+    '        local ok, meshPart = pcall(function()',
+    '            return InsertService:CreateMeshPartAsync(resolvedUri, payload.collisionFidelity, payload.renderFidelity)',
+    '        end)',
+    '        if ok and meshPart then',
+    '            meshPart.Size = payload.size',
+    '            meshPart.DoubleSided = payload.doubleSided',
+    '            meshPart:SetAttribute("PublishedMeshId", resolvedUri)',
+    '            meshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
+    '            meshPart:SetAttribute("GeometrySource", "PublishedCloudAsset")',
+    '            return meshPart',
+    '        end',
     '    end',
     '',
-    '    local fallbackMeshPart = Instance.new("MeshPart")',
-    '    fallbackMeshPart.DoubleSided = payload.doubleSided',
-    '    pcall(function() (fallbackMeshPart :: any).MeshId = resolvedUri end)',
-    '    fallbackMeshPart:SetAttribute("MeshId", payload.meshId)',
-    '    fallbackMeshPart:SetAttribute("AssetId", payload.assetId)',
-    '    fallbackMeshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
-    '    return fallbackMeshPart',
+    '    local containerMeshPart = Instance.new("MeshPart")',
+    '    containerMeshPart.Size = payload.size',
+    '    containerMeshPart.DoubleSided = payload.doubleSided',
+    '    containerMeshPart:SetAttribute("RojoObjPath", payload.objSourcePath)',
+    '    containerMeshPart:SetAttribute("GeometrySource", "ContainerMeshPart")',
+    '    return containerMeshPart',
     'end',
     '',
     `function ${safeName}MeshBuilder.Spawn(config: MeshSpawnConfig?): Model`,
@@ -1222,6 +1397,29 @@ export function generateEditableMeshLuauCode(
     '',
     '    model.Parent = Workspace',
     '    return model',
+    'end',
+    '',
+    `function ${safeName}MeshBuilder.ReconstructInPlace(targetModel: Model): number`,
+    '    local reconstructedCount = 0',
+    `    local spawned = ${safeName}MeshBuilder.Spawn({ origin = targetModel:GetPivot() })`,
+    '    for _, generatedChild in ipairs(spawned:GetChildren()) do',
+    '        if generatedChild:IsA("MeshPart") then',
+    '            local existing = targetModel:FindFirstChild(generatedChild.Name)',
+    '            if existing and existing:IsA("BasePart") then',
+    '                generatedChild.CFrame = existing.CFrame',
+    '                for _, subChild in ipairs(existing:GetChildren()) do',
+    '                    subChild:Clone().Parent = generatedChild',
+    '                end',
+    '                existing:Destroy()',
+    '            end',
+    '            generatedChild.Parent = targetModel',
+    '            reconstructedCount += 1',
+    '        end',
+    '    end',
+    '    spawned:Destroy()',
+    '    targetModel:SetAttribute("ForgeEditableMeshReconstructed", true)',
+    '    targetModel:SetAttribute("ForgeReconstructedCount", reconstructedCount)',
+    '    return reconstructedCount',
     'end',
     '',
     `return ${safeName}MeshBuilder`
@@ -1657,8 +1855,14 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
   const euler = new THREE.Euler();
   const mat4 = new THREE.Matrix4();
 
+  const expandedParts: MeshPart3DSpec[] = [];
+  for (const part of asset.parts || []) {
+    expandedParts.push(...splitOversizedMeshPart(part));
+  }
+
   const lines: string[] = [
     '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
+    '  <Meta name="ExplicitAutoJoints">true</Meta>',
     '  <External>null</External>',
     '  <External>nil</External>',
     `  <Item class="Model" referent="RBX_FORGE_MODEL_${safeName}">`,
@@ -1668,8 +1872,8 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     '    </Properties>',
   ];
 
-  for (let idx = 0; idx < (asset.parts || []).length; idx++) {
-    const part = asset.parts[idx];
+  for (let idx = 0; idx < expandedParts.length; idx++) {
+    const part = expandedParts[idx];
     const refId = `RBX_PART_${idx + 1}`;
     const partName = part.name || `MeshPart_${idx + 1}`;
     const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
@@ -1685,7 +1889,6 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     );
     mat4.makeRotationFromEuler(euler);
     const te = mat4.elements;
-    // Three.js column-major to Roblox row-major R00..R22
     const r00 = te[0].toFixed(6), r01 = te[4].toFixed(6), r02 = te[8].toFixed(6);
     const r10 = te[1].toFixed(6), r11 = te[5].toFixed(6), r12 = te[9].toFixed(6);
     const r20 = te[2].toFixed(6), r21 = te[6].toFixed(6), r22 = te[10].toFixed(6);
@@ -1699,21 +1902,23 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
 
     const matToken = ROBLOX_MATERIAL_ENUM_TOKENS[part.material] ?? 1088;
     const meshData = ensurePartHasMeshData(part);
-    const meshId =
-      part.meshId && part.meshId.startsWith('rbxassetid://')
-        ? part.meshId
-        : `rbxassetid://${1000000000 + idx + 1}`;
+    const validMeshId = validatePublishedRobloxMeshId(part.meshId);
 
     const geometryJsonPayload = JSON.stringify({
       shape: 'MeshPart',
-      meshId,
+      meshId: validMeshId,
+      size: [sx, sy, sz],
+      position: [px, py, pz],
+      rotation: [rx, ry, rz],
+      color: [cr, cg, cb],
+      material: part.material || 'Metal',
       roughness: part.roughness ?? 0.35,
       metalness: part.metalness ?? 0.65,
       collisionFidelity: part.collisionFidelity || 'Hull',
-      vertices: meshData.vertices.slice(0, 2500),
-      normals: (meshData.normals || []).slice(0, 2500),
-      uvs: (meshData.uvs || []).slice(0, 2500),
-      faces: meshData.faces.slice(0, 3500),
+      vertices: meshData.vertices,
+      normals: meshData.normals || [],
+      uvs: meshData.uvs || [],
+      faces: meshData.faces,
     });
 
     lines.push(
@@ -1726,8 +1931,15 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
       `        <float name="Transparency">${Number(part.transparency ?? 0).toFixed(3)}</float>`,
       `        <token name="Material">${matToken}</token>`,
       `        <Color3uint8 name="Color3uint8">${colorUint8}</Color3uint8>`,
-      `        <Content name="MeshId"><url>${escapeXml(meshId)}</url></Content>`,
+      validMeshId
+        ? `        <Content name="MeshId"><url>${escapeXml(validMeshId)}</url></Content>`
+        : '        <Content name="MeshId"><null></null></Content>',
       '        <Vector3 name="size">',
+      `          <X>${Number(sx).toFixed(4)}</X>`,
+      `          <Y>${Number(sy).toFixed(4)}</Y>`,
+      `          <Z>${Number(sz).toFixed(4)}</Z>`,
+      '        </Vector3>',
+      '        <Vector3 name="InitialSize">',
       `          <X>${Number(sx).toFixed(4)}</X>`,
       `          <Y>${Number(sy).toFixed(4)}</Y>`,
       `          <Z>${Number(sz).toFixed(4)}</Z>`,
@@ -1757,30 +1969,58 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     );
   }
 
-  const luauScript =
-    asset.luau_code ||
-    generateEditableMeshLuauCode(
-      safeName,
-      (asset.parts || []).map((p) => ({
-        name: p.name,
-        size: [p.size[0] ?? 2, p.size[1] ?? 2, p.size[2] ?? 2],
-        position: [p.position[0] ?? 0, p.position[1] ?? 1, p.position[2] ?? 0],
-        rotation: [p.rotation[0] ?? 0, p.rotation[1] ?? 0, p.rotation[2] ?? 0],
-        color: [p.color[0] ?? 160, p.color[1] ?? 170, p.color[2] ?? 185],
-        material: p.material || 'Metal',
-        roughness: p.roughness ?? 0.35,
-        metalness: p.metalness ?? 0.65,
-        collisionFidelity: p.collisionFidelity || 'Hull',
-        meshId: p.meshId,
-        meshData: ensurePartHasMeshData(p),
-      }))
-    );
+  const luauScript = generateEditableMeshLuauCode(
+    safeName,
+    expandedParts.map((p) => ({
+      name: p.name,
+      size: [p.size[0] ?? 2, p.size[1] ?? 2, p.size[2] ?? 2],
+      position: [p.position[0] ?? 0, p.position[1] ?? 1, p.position[2] ?? 0],
+      rotation: [p.rotation[0] ?? 0, p.rotation[1] ?? 0, p.rotation[2] ?? 0],
+      color: [p.color[0] ?? 160, p.color[1] ?? 170, p.color[2] ?? 185],
+      material: p.material || 'Metal',
+      roughness: p.roughness ?? 0.35,
+      metalness: p.metalness ?? 0.65,
+      collisionFidelity: p.collisionFidelity || 'Hull',
+      meshId: validatePublishedRobloxMeshId(p.meshId),
+      meshData: ensurePartHasMeshData(p),
+    }))
+  );
+
+  const autoRunnerLuau = [
+    '--!strict',
+    `-- Auto-Executed Geometry Reconstructor for ${safeName} (.RBXMX Import / Studio / Runtime)`,
+    'local model = script.Parent',
+    'if model and model:IsA("Model") and not model:GetAttribute("ForgeEditableMeshReconstructed") then',
+    '    local reconstructorModule = model:FindFirstChild("ForgeStudioReconstructor")',
+    '    if reconstructorModule and reconstructorModule:IsA("ModuleScript") then',
+    '        local ok, builder = pcall(require, reconstructorModule)',
+    '        if ok and type(builder) == "table" and type(builder.ReconstructInPlace) == "function" then',
+    '            local okRun, countOrErr = xpcall(function()',
+    '                return builder.ReconstructInPlace(model)',
+    '            end, debug.traceback)',
+    '            if okRun then',
+    '                model:SetAttribute("ForgeReconstructionVerified", true)',
+    '                model:SetAttribute("ForgeReconstructedPartCount", countOrErr)',
+    '            else',
+    '                warn("[ForgeAI .RBXMX Reconstructor] Error reconstructing EditableMesh:", countOrErr)',
+    '            end',
+    '        end',
+    '    end',
+    'end',
+  ].join('\n');
 
   lines.push(
     `    <Item class="ModuleScript" referent="RBX_FORGE_RECONSTRUCTOR">`,
     '      <Properties>',
     '        <string name="Name">ForgeStudioReconstructor</string>',
-    `        <ProtectedString name="Source"><![CDATA[${luauScript}]]></ProtectedString>`,
+    `        <ProtectedString name="Source"><![CDATA[${luauScript.replace(/\]\]>/g, ']]]]><![CDATA[>')}]]></ProtectedString>`,
+    '      </Properties>',
+    '    </Item>',
+    `    <Item class="Script" referent="RBX_FORGE_AUTORUNNER">`,
+    '      <Properties>',
+    '        <string name="Name">ForgeAutoReconstructRunner</string>',
+    '        <token name="RunContext">0</token>',
+    `        <ProtectedString name="Source"><![CDATA[${autoRunnerLuau.replace(/\]\]>/g, ']]]]><![CDATA[>')}]]></ProtectedString>`,
     '      </Properties>',
     '    </Item>',
     '  </Item>',
@@ -1993,10 +2233,17 @@ export function parseRBXMXToForgeAsset(
 
 /**
  * Exports a Forge3DAsset to a standard glTF 2.0 (.gltf) file with embedded binary buffers
- * and PBR Metallic-Roughness materials. Ready to import directly into Roblox Studio's 3D Importer
- * or Blender without losing geometry or materials.
+ * and embedded PBR Metallic-Roughness texture maps (Albedo, Normal, Roughness).
+ * Ready to import directly into Roblox Studio's 3D Importer or Blender without losing geometry or textures.
  */
-export function exportAssetToGLTF(asset: Forge3DAsset): string {
+export function exportAssetToGLTF(
+  asset: Forge3DAsset,
+  pbrBundle?: {
+    albedoDataUrl?: string;
+    normalDataUrl?: string;
+    roughnessDataUrl?: string;
+  }
+): string {
   const safeName = (asset.name || 'ForgeModel3D').replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeModel3D';
   const euler = new THREE.Euler();
   const quat = new THREE.Quaternion();
@@ -2007,6 +2254,40 @@ export function exportAssetToGLTF(asset: Forge3DAsset): string {
   const meshes: any[] = [];
   const materials: any[] = [];
   const nodes: any[] = [];
+  const images: any[] = [];
+  const samplers: any[] = [];
+  const textures: any[] = [];
+
+  let baseColorTexIdx: number | undefined;
+  let normalTexIdx: number | undefined;
+  let metallicRoughnessTexIdx: number | undefined;
+
+  if (pbrBundle) {
+    const texSpecs: Array<[string | undefined, string, 'albedo' | 'normal' | 'roughness']> = [
+      [pbrBundle.albedoDataUrl, `${safeName}_ColorMap`, 'albedo'],
+      [pbrBundle.normalDataUrl, `${safeName}_NormalMap`, 'normal'],
+      [pbrBundle.roughnessDataUrl, `${safeName}_RoughnessMap`, 'roughness'],
+    ];
+    for (const [dataUrl, texName, role] of texSpecs) {
+      if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+        if (samplers.length === 0) {
+          samplers.push({
+            magFilter: 9729,
+            minFilter: 9987,
+            wrapS: 10497,
+            wrapT: 10497,
+          });
+        }
+        const imgIdx = images.length;
+        images.push({ name: texName, uri: dataUrl });
+        const texIdx = textures.length;
+        textures.push({ name: texName, sampler: 0, source: imgIdx });
+        if (role === 'albedo') baseColorTexIdx = texIdx;
+        if (role === 'normal') normalTexIdx = texIdx;
+        if (role === 'roughness') metallicRoughnessTexIdx = texIdx;
+      }
+    }
+  }
 
   let byteOffset = 0;
 
@@ -2028,8 +2309,13 @@ export function exportAssetToGLTF(asset: Forge3DAsset): string {
     return viewIndex;
   };
 
-  for (let idx = 0; idx < (asset.parts || []).length; idx++) {
-    const part = asset.parts[idx];
+  const expandedParts: MeshPart3DSpec[] = [];
+  for (const part of asset.parts || []) {
+    expandedParts.push(...splitOversizedMeshPart(part));
+  }
+
+  for (let idx = 0; idx < expandedParts.length; idx++) {
+    const part = expandedParts[idx];
     const partName = part.name || `MeshPart_${idx + 1}`;
     const geom = buildBufferGeometryFromMeshData(
       ensurePartHasMeshData(part),
@@ -2127,19 +2413,26 @@ export function exportAssetToGLTF(asset: Forge3DAsset): string {
 
     const [cr = 160, cg = 170, cb = 185] = part.color || [160, 170, 185];
     const alpha = Math.max(0.05, Math.min(1, 1 - (part.transparency || 0)));
-    const matIndex = materials.length;
-    materials.push({
+    const pbrSpec: any = {
+      baseColorFactor: [
+        Number((cr / 255).toFixed(4)),
+        Number((cg / 255).toFixed(4)),
+        Number((cb / 255).toFixed(4)),
+        Number(alpha.toFixed(4)),
+      ],
+      metallicFactor: Number(Math.max(0, Math.min(1, part.metalness ?? 0.65)).toFixed(4)),
+      roughnessFactor: Number(Math.max(0.04, Math.min(1, part.roughness ?? 0.35)).toFixed(4)),
+    };
+    if (baseColorTexIdx !== undefined) {
+      pbrSpec.baseColorTexture = { index: baseColorTexIdx };
+    }
+    if (metallicRoughnessTexIdx !== undefined) {
+      pbrSpec.metallicRoughnessTexture = { index: metallicRoughnessTexIdx };
+    }
+
+    const matDef: any = {
       name: `${partName}_${part.material || 'Metal'}`,
-      pbrMetallicRoughness: {
-        baseColorFactor: [
-          Number((cr / 255).toFixed(4)),
-          Number((cg / 255).toFixed(4)),
-          Number((cb / 255).toFixed(4)),
-          Number(alpha.toFixed(4)),
-        ],
-        metallicFactor: Number(Math.max(0, Math.min(1, part.metalness ?? 0.65)).toFixed(4)),
-        roughnessFactor: Number(Math.max(0.04, Math.min(1, part.roughness ?? 0.35)).toFixed(4)),
-      },
+      pbrMetallicRoughness: pbrSpec,
       emissiveFactor:
         part.material === 'Neon'
           ? [
@@ -2150,7 +2443,13 @@ export function exportAssetToGLTF(asset: Forge3DAsset): string {
           : [0, 0, 0],
       doubleSided: Boolean(part.doubleSided),
       alphaMode: alpha < 0.99 ? 'BLEND' : 'OPAQUE',
-    });
+    };
+    if (normalTexIdx !== undefined) {
+      matDef.normalTexture = { index: normalTexIdx };
+    }
+
+    const matIndex = materials.length;
+    materials.push(matDef);
 
     const meshIndex = meshes.length;
     meshes.push({
@@ -2192,7 +2491,7 @@ export function exportAssetToGLTF(asset: Forge3DAsset): string {
       extras: {
         robloxMaterial: part.material || 'Metal',
         collisionFidelity: part.collisionFidelity || 'Hull',
-        meshId: part.meshId || '',
+        publishedMeshId: validatePublishedRobloxMeshId(part.meshId),
       },
     });
 
@@ -2213,10 +2512,10 @@ export function exportAssetToGLTF(asset: Forge3DAsset): string {
   }
   const base64Buffer = btoa(binaryStr);
 
-  const gltfDoc = {
+  const gltfDoc: any = {
     asset: {
       version: '2.0',
-      generator: 'Forge AI Studio - Roblox Studio 3D Exporter',
+      generator: 'Forge AI Studio - Roblox Studio 3D Exporter (glTF 2.0 + PBR Textures)',
     },
     scene: 0,
     scenes: [
@@ -2237,6 +2536,10 @@ export function exportAssetToGLTF(asset: Forge3DAsset): string {
       },
     ],
   };
+
+  if (images.length > 0) gltfDoc.images = images;
+  if (samplers.length > 0) gltfDoc.samplers = samplers;
+  if (textures.length > 0) gltfDoc.textures = textures;
 
   return JSON.stringify(gltfDoc, null, 2);
 }

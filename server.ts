@@ -13,13 +13,18 @@ import {
   SPECIALIZED_AGENTS,
 } from './src/server/engines/architectureManifest.ts';
 import {
+  buildGltfFromPartsServer,
+  buildObjAndMtlFromPartsServer,
+  buildRbxmxFromPartsServer,
   buildStrictLuauFromEditedParts,
   extractGeometryFromProcessedMesh,
   extractPartsFromUploadedMesh,
   generatePBRSurfaceAppearanceLuau,
   generateWorldEnvironmentLuau,
   normalizeValidMeshId,
+  splitOversizedMeshPartInput,
   synthesizeProceduralMeshData,
+  validatePublishedRobloxMeshId,
 } from './src/server/engines/worldAndModelEditorEngine.ts';
 
 dotenv.config();
@@ -376,8 +381,23 @@ function saveAssetToLibrary(asset: any): any {
   if (!asset.id) {
     asset.id = `asset-${Date.now()}`;
   }
-  asset.created_at = new Date().toISOString();
-  const filtered = assets.filter((a) => a.id !== asset.id);
+  const existing = assets.find((a) => a.id === asset.id || a.name === asset.name);
+  const history = Array.isArray(existing?.version_history) ? [...existing.version_history] : [];
+  if (existing) {
+    history.unshift({
+      version: Number(existing.version || 1),
+      timestamp: existing.updated_at || existing.created_at || new Date().toISOString(),
+      poly_count: Number(existing.poly_count || 0),
+      part_count: Array.isArray(existing.parts) ? existing.parts.length : 0,
+      luau_code: existing.luau_code || '',
+      parts: existing.parts || [],
+    });
+  }
+  asset.version = existing ? Number(existing.version || 1) + 1 : 1;
+  asset.version_history = history.slice(0, 10);
+  asset.created_at = existing?.created_at || new Date().toISOString();
+  asset.updated_at = new Date().toISOString();
+  const filtered = assets.filter((a) => a.id !== asset.id && a.name !== asset.name);
   filtered.unshift(asset);
   fs.writeFileSync(getAssetsLibraryPath(), JSON.stringify(filtered, null, 2), 'utf-8');
   return asset;
@@ -625,36 +645,29 @@ app.post('/api/v1/assets/rebuild-luau', (req, res) => {
     const safeModelName = String(asset.name).replace(/[^a-zA-Z0-9_]/g, '') || 'EditedModel3D';
     const objFileName = asset.obj_file_name || `${safeModelName}.obj`;
 
-    const enrichedParts = (asset.parts || []).map((p: any, idx: number) => {
+    const enrichedParts: any[] = [];
+    (asset.parts || []).forEach((p: any, idx: number) => {
       const partName = p.name || `MeshPart_${idx + 1}`;
       const resolvedMesh = extractGeometryFromProcessedMesh(p, objFileName, safeModelName);
-      const meshId = normalizeValidMeshId(
-        p.meshId || p.mesh_id || resolvedMesh.meshId,
-        safeModelName,
-        partName,
-        resolvedMesh.vertices.length,
-        resolvedMesh.faces.length
-      );
-      const assetId = normalizeValidMeshId(
-        p.assetId || p.asset_id || resolvedMesh.assetId || meshId,
-        safeModelName,
-        partName,
-        resolvedMesh.vertices.length,
-        resolvedMesh.faces.length
+      const meshId = validatePublishedRobloxMeshId(p.meshId || p.mesh_id || resolvedMesh.meshId);
+      const assetId = validatePublishedRobloxMeshId(
+        p.assetId || p.asset_id || resolvedMesh.assetId || meshId
       );
       resolvedMesh.meshId = meshId;
       resolvedMesh.assetId = assetId;
       resolvedMesh.objFileName = objFileName;
 
-      return {
+      const splitList = splitOversizedMeshPartInput({
         ...p,
         name: partName,
         shape: 'MeshPart',
         meshId,
         assetId,
         meshData: resolvedMesh,
-      };
+      });
+      enrichedParts.push(...splitList);
     });
+
     const rebuiltLuau = buildStrictLuauFromEditedParts(
       asset.name,
       enrichedParts,
@@ -685,7 +698,7 @@ app.post('/api/v1/assets/rebuild-luau', (req, res) => {
   }
 });
 
-// GLB/GLTF/OBJ/FBX/Heightmap Preprocessor -> Real Roblox EditableMesh / MeshPart + MeshId/AssetId + OBJ Export Endpoint
+// GLB/GLTF/OBJ/FBX/Heightmap Preprocessor -> Real Roblox EditableMesh / MeshPart + OBJ Export Endpoint
 app.post('/api/v1/assets/process-meshpart', (req, res) => {
   try {
     const {
@@ -704,35 +717,26 @@ app.post('/api/v1/assets/process-meshpart', (req, res) => {
     const fileName = payload.fileName || `${payload.modelName}_MeshPart.luau`;
     const objFileName = payload.objFileName || `${payload.modelName}.obj`;
 
-    const parts = payload.subMeshParts.map((sub: any, idx: number) => {
+    const parts: any[] = [];
+    payload.subMeshParts.forEach((sub: any, idx: number) => {
       const partName = sub.name || `MeshPart_${idx + 1}`;
       const studSize = sub.studSize || [2, 2, 2];
       const extractedMesh = extractGeometryFromProcessedMesh(sub, objFileName, payload.modelName);
-      const meshId = normalizeValidMeshId(
-        sub.meshId || sub.mesh_id || extractedMesh.meshId,
-        payload.modelName,
-        partName,
-        extractedMesh.vertices.length,
-        extractedMesh.faces.length
-      );
-      const assetId = normalizeValidMeshId(
-        sub.assetId || sub.asset_id || extractedMesh.assetId || meshId,
-        payload.modelName,
-        partName,
-        extractedMesh.vertices.length,
-        extractedMesh.faces.length
+      const meshId = validatePublishedRobloxMeshId(sub.meshId || sub.mesh_id || extractedMesh.meshId);
+      const assetId = validatePublishedRobloxMeshId(
+        sub.assetId || sub.asset_id || extractedMesh.assetId || meshId
       );
 
       extractedMesh.meshId = meshId;
       extractedMesh.assetId = assetId;
       extractedMesh.objFileName = objFileName;
 
-      return {
+      const splitList = splitOversizedMeshPartInput({
         name: partName,
         shape: 'MeshPart',
         meshId,
         assetId,
-        textureId: sub.textureId || sub.texture_id,
+        textureId: validatePublishedRobloxMeshId(sub.textureId || sub.texture_id) || undefined,
         size: studSize,
         position: sub.studPosition || [0, 1, 0],
         rotation: sub.studRotation || [0, 0, 0],
@@ -745,13 +749,15 @@ app.post('/api/v1/assets/process-meshpart', (req, res) => {
         anchored: true,
         collisionFidelity: sub.collisionFidelity || 'Hull',
         meshData: extractedMesh,
-      };
+      });
+      parts.push(...splitList);
     });
 
     const luauCode =
       payload.luauMeshPartBuilderCode &&
-      payload.luauMeshPartBuilderCode.includes('rbxassetid://') &&
-      payload.luauMeshPartBuilderCode.includes('CreateMeshPartAsync')
+      payload.luauMeshPartBuilderCode.includes('CreateEditableMesh') &&
+      payload.luauMeshPartBuilderCode.includes('CreateMeshPartAsync') &&
+      !payload.luauMeshPartBuilderCode.includes('.MeshId =')
         ? payload.luauMeshPartBuilderCode
         : buildStrictLuauFromEditedParts(payload.modelName, parts, 'Hull');
 
@@ -764,18 +770,22 @@ app.post('/api/v1/assets/process-meshpart', (req, res) => {
       }
     }
 
+    const totalTris =
+      parts.reduce((sum, p) => sum + (p.meshData?.faces?.length || 0), 0) ||
+      Number(payload.totalTriangles || 0);
+
     const assetRecord = {
       id: `meshpart-${Date.now()}`,
       name: payload.modelName,
       category: `Imported ${payload.sourceFormat || '3D'}`,
       asset_type: 'Model3D',
-      poly_count: Number(payload.totalTriangles || 0),
+      poly_count: totalTris,
       collision_fidelity: parts[0]?.collisionFidelity || 'Hull',
       rojo_target_folder: targetFolder,
       file_name: fileName,
       obj_file_name: objFileName,
       obj_saved_path: objSavedPath,
-      description: `MeshPart 3D con geometría real desde ${payload.sourceFormat || 'GLB/OBJ'} (${parts.length} MeshParts, ${payload.totalTriangles || 0} triángulos, EditableMesh + OBJ sincronizados).`,
+      description: `MeshPart 3D con geometría EditableMesh real desde ${payload.sourceFormat || 'GLB/OBJ'} (${parts.length} MeshParts, ${totalTris} triángulos, EditableMesh + OBJ sincronizados).`,
       pbr_profile: {
         albedo_hex: '#38bdf8',
         roughness: parts[0]?.roughness ?? 0.35,
@@ -797,7 +807,7 @@ app.post('/api/v1/assets/process-meshpart', (req, res) => {
       saved_path: savedPath,
       obj_saved_path: objSavedPath,
       meshpart_count: parts.length,
-      total_triangles: Number(payload.totalTriangles || 0),
+      total_triangles: totalTris,
       is_roblox_compliant: Boolean(payload.isRobloxCompliant),
     });
   } catch (err: any) {
@@ -814,6 +824,7 @@ app.post('/api/v1/assets/export-roblox-package', (req, res) => {
       gltf_content = '',
       obj_content = '',
       mtl_content = '',
+      pbr_textures,
       save_to_rojo = true,
       save_to_library = true,
     } = req.body;
@@ -825,43 +836,62 @@ app.post('/api/v1/assets/export-roblox-package', (req, res) => {
     const safeName = String(asset.name).replace(/[^a-zA-Z0-9_]/g, '') || 'ForgeModel3D';
     const targetFolder = asset.rojo_target_folder || 'src/shared/Assets3D';
     const objFileName = `${safeName}.obj`;
+    const collisionFidelity = asset.collision_fidelity || 'Hull';
 
-    const enrichedParts = (asset.parts || []).map((p: any, idx: number) => {
+    const enrichedParts: any[] = [];
+    (asset.parts || []).forEach((p: any, idx: number) => {
       const partName = p.name || `MeshPart_${idx + 1}`;
       const resolvedMesh = extractGeometryFromProcessedMesh(p, objFileName, safeName);
-      const meshId = normalizeValidMeshId(
-        p.meshId || p.mesh_id || resolvedMesh.meshId,
-        safeName,
-        partName,
-        resolvedMesh.vertices.length,
-        resolvedMesh.faces.length
-      );
-      const assetId = normalizeValidMeshId(
-        p.assetId || p.asset_id || resolvedMesh.assetId || meshId,
-        safeName,
-        partName,
-        resolvedMesh.vertices.length,
-        resolvedMesh.faces.length
+      const meshId = validatePublishedRobloxMeshId(p.meshId || p.mesh_id || resolvedMesh.meshId);
+      const assetId = validatePublishedRobloxMeshId(
+        p.assetId || p.asset_id || resolvedMesh.assetId || meshId
       );
       resolvedMesh.meshId = meshId;
       resolvedMesh.assetId = assetId;
       resolvedMesh.objFileName = objFileName;
 
-      return {
+      const splitList = splitOversizedMeshPartInput({
         ...p,
         name: partName,
         shape: 'MeshPart',
         meshId,
         assetId,
         meshData: resolvedMesh,
-      };
+      });
+      enrichedParts.push(...splitList);
     });
 
     const rebuiltLuau = buildStrictLuauFromEditedParts(
       safeName,
       enrichedParts,
-      asset.collision_fidelity || 'Hull'
+      collisionFidelity
     );
+
+    // Autonomously build any of the 4 companion files on the backend if omitted by the client
+    let finalRbxmx = typeof rbxmx_content === 'string' ? rbxmx_content.trim() : '';
+    let finalGltf = typeof gltf_content === 'string' ? gltf_content.trim() : '';
+    let finalObj = typeof obj_content === 'string' ? obj_content.trim() : '';
+    let finalMtl = typeof mtl_content === 'string' ? mtl_content.trim() : '';
+
+    if (!finalRbxmx) {
+      finalRbxmx = buildRbxmxFromPartsServer(
+        safeName,
+        enrichedParts,
+        collisionFidelity,
+        asset.category || '3D Asset',
+        rebuiltLuau
+      );
+    }
+
+    if (!finalObj || !finalMtl) {
+      const builtObjMtl = buildObjAndMtlFromPartsServer(safeName, enrichedParts);
+      if (!finalObj) finalObj = builtObjMtl.obj;
+      if (!finalMtl) finalMtl = builtObjMtl.mtl;
+    }
+
+    if (!finalGltf) {
+      finalGltf = buildGltfFromPartsServer(safeName, enrichedParts, pbr_textures);
+    }
 
     const savedFiles: Record<string, string | null> = {
       luau: null,
@@ -870,22 +900,30 @@ app.post('/api/v1/assets/export-roblox-package', (req, res) => {
       obj: null,
       mtl: null,
     };
+    const verifiedFiles: Record<string, boolean> = {
+      luau: false,
+      rbxmx: false,
+      gltf: false,
+      obj: false,
+      mtl: false,
+    };
 
     if (save_to_rojo) {
       savedFiles.luau = writeToRojoWorkspace(targetFolder, `${safeName}.luau`, rebuiltLuau);
-      if (typeof rbxmx_content === 'string' && rbxmx_content.trim().length > 0) {
-        savedFiles.rbxmx = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.rbxmx`, rbxmx_content);
-      }
-      if (typeof gltf_content === 'string' && gltf_content.trim().length > 0) {
-        savedFiles.gltf = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.gltf`, gltf_content);
-      }
-      if (typeof obj_content === 'string' && obj_content.trim().length > 0) {
-        savedFiles.obj = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.obj`, obj_content);
-      }
-      if (typeof mtl_content === 'string' && mtl_content.trim().length > 0) {
-        savedFiles.mtl = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.mtl`, mtl_content);
+      savedFiles.rbxmx = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.rbxmx`, finalRbxmx);
+      savedFiles.gltf = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.gltf`, finalGltf);
+      savedFiles.obj = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.obj`, finalObj);
+      savedFiles.mtl = writeRawAssetToRojoWorkspace(targetFolder, `${safeName}.mtl`, finalMtl);
+
+      for (const [ext, filePath] of Object.entries(savedFiles)) {
+        if (filePath && fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
+          verifiedFiles[ext] = true;
+        }
       }
     }
+
+    const verifiedCount = Object.values(verifiedFiles).filter(Boolean).length;
+    const allFiveExist = save_to_rojo ? verifiedCount === 5 : true;
 
     const totalTris = enrichedParts.reduce((acc: number, p: any) => {
       return acc + (p.meshData?.faces?.length || 12);
@@ -901,12 +939,17 @@ app.post('/api/v1/assets/export-roblox-package', (req, res) => {
       obj_file_name: objFileName,
       saved_path: savedFiles.luau || asset.saved_path || null,
       obj_saved_path: savedFiles.obj || asset.obj_saved_path || null,
+      exported_package_files: savedFiles,
+      verified_package_files: verifiedFiles,
     };
 
     const finalAsset = save_to_library ? saveAssetToLibrary(updatedAsset) : updatedAsset;
 
     res.json({
-      success: true,
+      success: allFiveExist,
+      all_five_exist: allFiveExist,
+      verified_files_count: verifiedCount,
+      verified_files: verifiedFiles,
       asset: finalAsset,
       saved_files: savedFiles,
     });
@@ -926,6 +969,10 @@ app.post('/api/v1/assets/publish-pbr', (req, res) => {
       roughness = 0.35,
       metalness = 0.75,
       albedo_hex = '#38bdf8',
+      color_map_asset_id = '',
+      normal_map_asset_id = '',
+      roughness_map_asset_id = '',
+      metalness_map_asset_id = '',
     } = req.body;
 
     const safeMat = String(material_name).replace(/[^a-zA-Z0-9_]/g, '') || 'ForgePBRMaterial';
@@ -954,7 +1001,13 @@ app.post('/api/v1/assets/publish-pbr', (req, res) => {
       textureFolder,
       Number(roughness),
       Number(metalness),
-      String(albedo_hex)
+      String(albedo_hex),
+      {
+        colorMapId: String(color_map_asset_id || ''),
+        normalMapId: String(normal_map_asset_id || ''),
+        roughnessMapId: String(roughness_map_asset_id || ''),
+        metalnessMapId: String(metalness_map_asset_id || ''),
+      }
     );
     const luauFileName = `${safeMat}_SurfaceAppearance.luau`;
     const luauSavedPath = writeToRojoWorkspace('src/shared/Assets3D', luauFileName, pbrLuau);
@@ -963,9 +1016,148 @@ app.post('/api/v1/assets/publish-pbr', (req, res) => {
       success: true,
       material_name: safeMat,
       saved_textures: savedTextures,
+      verified_cloud_ids: {
+        color_map_id: validatePublishedRobloxMeshId(color_map_asset_id) || null,
+        normal_map_id: validatePublishedRobloxMeshId(normal_map_asset_id) || null,
+        roughness_map_id: validatePublishedRobloxMeshId(roughness_map_asset_id) || null,
+        metalness_map_id: validatePublishedRobloxMeshId(metalness_map_asset_id) || null,
+      },
       luau_file: `src/shared/Assets3D/${luauFileName}`,
       luau_saved_path: luauSavedPath,
       luau_code: pbrLuau,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Phase 4 Bidirectional Rojo <-> Forge AI Studio synchronization & version audit
+app.get('/api/v1/assets/sync-status', (_req, res) => {
+  try {
+    const assets = loadAssetsLibrary();
+    const rojoRoot = path.resolve(runtimeRojoPath);
+    const assetsDir = path.join(rojoRoot, 'src', 'shared', 'Assets3D');
+
+    const statuses = assets.map((a: any) => {
+      const safeName = String(a.name || 'Model3D').replace(/[^a-zA-Z0-9_]/g, '') || 'Model3D';
+      const luauPath = path.join(assetsDir, a.file_name || `${safeName}.luau`);
+      const objPath = path.join(assetsDir, a.obj_file_name || `${safeName}.obj`);
+      const rbxmxPath = path.join(assetsDir, `${safeName}.rbxmx`);
+      const gltfPath = path.join(assetsDir, `${safeName}.gltf`);
+      const mtlPath = path.join(assetsDir, `${safeName}.mtl`);
+
+      const librarySha = crypto
+        .createHash('sha256')
+        .update(String(a.luau_code || ''), 'utf-8')
+        .digest('hex')
+        .slice(0, 12);
+      let diskSha: string | null = null;
+      let externalChangeDetected = false;
+
+      if (fs.existsSync(luauPath)) {
+        const rawBytes = fs.readFileSync(luauPath);
+        diskSha = crypto.createHash('sha256').update(rawBytes).digest('hex').slice(0, 12);
+        if (diskSha !== librarySha) {
+          externalChangeDetected = true;
+        }
+      }
+
+      return {
+        id: a.id,
+        name: a.name,
+        version: Number(a.version || 1),
+        version_history_count: Array.isArray(a.version_history) ? a.version_history.length : 0,
+        files_on_disk: {
+          luau: fs.existsSync(luauPath),
+          rbxmx: fs.existsSync(rbxmxPath),
+          gltf: fs.existsSync(gltfPath),
+          obj: fs.existsSync(objPath),
+          mtl: fs.existsSync(mtlPath),
+        },
+        disk_luau_sha256: diskSha,
+        library_luau_sha256: librarySha,
+        external_change_detected: externalChangeDetected,
+      };
+    });
+
+    res.json({
+      rojo_assets_folder: assetsDir,
+      total_assets: statuses.length,
+      assets: statuses,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Phase 4 Bidirectional Sync & Version Recovery
+app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
+  try {
+    const { asset_id = '', asset_name = '', restore_version } = req.body;
+    const assets = loadAssetsLibrary();
+    const targetAsset = assets.find(
+      (a: any) => (asset_id && a.id === asset_id) || (asset_name && a.name === asset_name)
+    );
+    if (!targetAsset) {
+      return res.status(404).json({ error: 'Asset no encontrado en la biblioteca.' });
+    }
+
+    if (restore_version !== undefined && restore_version !== null) {
+      const history = Array.isArray(targetAsset.version_history) ? targetAsset.version_history : [];
+      const snap = history.find((h: any) => Number(h.version) === Number(restore_version));
+      if (!snap) {
+        return res.status(404).json({ error: `Versión v${restore_version} no encontrada en el historial.` });
+      }
+      targetAsset.parts = snap.parts || targetAsset.parts || [];
+      targetAsset.luau_code = snap.luau_code || targetAsset.luau_code || '';
+      targetAsset.poly_count = snap.poly_count || targetAsset.poly_count || 0;
+      const saved = saveAssetToLibrary(targetAsset);
+      return res.json({
+        success: true,
+        source: `version_history_v${restore_version}`,
+        asset: saved,
+      });
+    }
+
+    const safeName = String(targetAsset.name || 'Model3D').replace(/[^a-zA-Z0-9_]/g, '') || 'Model3D';
+    const rojoRoot = path.resolve(runtimeRojoPath);
+    const assetsDir = path.join(rojoRoot, 'src', 'shared', 'Assets3D');
+    const objPath = path.join(assetsDir, targetAsset.obj_file_name || `${safeName}.obj`);
+    const luauPath = path.join(assetsDir, targetAsset.file_name || `${safeName}.luau`);
+
+    if (fs.existsSync(objPath)) {
+      const objText = fs.readFileSync(objPath, 'utf-8');
+      if (objText.includes('v ')) {
+        const reParts = extractPartsFromUploadedMesh(
+          safeName,
+          objText,
+          undefined,
+          targetAsset.collision_fidelity || 'Hull'
+        );
+        if (reParts.length > 0) {
+          targetAsset.parts = reParts;
+          targetAsset.poly_count = reParts.reduce(
+            (sum, p) => sum + (p.meshData?.faces?.length || 0),
+            0
+          );
+          targetAsset.luau_code = buildStrictLuauFromEditedParts(
+            safeName,
+            reParts,
+            targetAsset.collision_fidelity || 'Hull'
+          );
+        }
+      }
+    }
+
+    if (fs.existsSync(luauPath)) {
+      targetAsset.luau_code = fs.readFileSync(luauPath, 'utf-8');
+    }
+
+    const saved = saveAssetToLibrary(targetAsset);
+    res.json({
+      success: true,
+      source: 'rojo_workspace_disk',
+      asset: saved,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
