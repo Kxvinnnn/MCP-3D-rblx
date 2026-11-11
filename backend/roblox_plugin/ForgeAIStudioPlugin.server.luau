@@ -24,8 +24,16 @@ local StarterPlayer = game:GetService("StarterPlayer")
 local Workspace = game:GetService("Workspace")
 
 -- Default unified backend endpoint (FastAPI port 8000 or Gateway port 3000)
-local BACKEND_URL = "http://127.0.0.1:8000"
-local FORGE_SECURITY_TOKEN = ""
+local savedBackendUrl = ""
+local savedSecurityToken = ""
+pcall(function()
+    if plugin and type(plugin.GetSetting) == "function" then
+        savedBackendUrl = tostring(plugin:GetSetting("ForgeBackendUrl") or "")
+        savedSecurityToken = tostring(plugin:GetSetting("ForgeSecurityToken") or "")
+    end
+end)
+local BACKEND_URL = if #savedBackendUrl > 0 then savedBackendUrl else "http://127.0.0.1:8000"
+local FORGE_SECURITY_TOKEN = savedSecurityToken
 
 local toolbar = plugin:CreateToolbar("Forge AI v2.1")
 local toggleButton = toolbar:CreateButton(
@@ -362,6 +370,7 @@ local function normalizeHierarchyMetadataLuau(partSpec: any, idxFallback: number
     partId: string,
     parentId: string,
     parentName: string,
+    parentContainerClass: string,
     hierarchyPath: string,
     hierarchySegments: { string },
 }
@@ -376,6 +385,9 @@ local function normalizeHierarchyMetadataLuau(partSpec: any, idxFallback: number
     end
     local rawPartId = string.match(tostring(partSpec.partId or partSpec.part_id or partSpec.id or ""), "^%s*(.-)%s*$") or ""
     local partId = if rawPartId ~= "" then rawPartId else ("fpart_" .. cleanAlnum)
+    if type(partSpec) == "table" and rawPartId == "" then
+        partSpec.partId = partId
+    end
 
     local rawParentName = string.match(tostring(partSpec.parentName or partSpec.parent_name or ""), "^%s*(.-)%s*$") or ""
     local rawHierarchyPath = string.match(tostring(partSpec.hierarchyPath or partSpec.hierarchy_path or ""), "^%s*(.-)%s*$") or ""
@@ -445,16 +457,25 @@ local function normalizeHierarchyMetadataLuau(partSpec: any, idxFallback: number
         table.insert(cleanedFolders, (string.gsub(folder, "[^%w_]", "_")))
     end
     local parentClean = table.concat(cleanedFolders, "_")
-    local parentId = if rawParentId ~= "" and rawParentId ~= "root" and rawParentId ~= "fnode_Root" and rawParentId ~= "fnode_ModelRoot" and #intermediateFolders > 0
-        then rawParentId
-        elseif #intermediateFolders > 0 then ("fnode_" .. parentClean)
-        else "fnode_Root"
+    local expectedParentId = if #intermediateFolders > 0 then ("fnode_" .. parentClean) else "fnode_Root"
+    local parentId: string
+    if #intermediateFolders == 0 then
+        parentId = "fnode_Root"
+    elseif rawParentId ~= "" and rawParentId ~= "root" and rawParentId ~= "fnode_Root" and rawParentId ~= "fnode_ModelRoot" then
+        parentId = if string.sub(rawParentId, 1, 6) == "fnode_" then expectedParentId else rawParentId
+    else
+        parentId = expectedParentId
+    end
+
+    local rawContainerCls = string.match(tostring(partSpec.parentContainerClass or partSpec.parent_container_class or ""), "^%s*(.-)%s*$") or ""
+    local parentContainerClass = if rawContainerCls == "Folder" or rawContainerCls == "Model" then rawContainerCls else "Model"
 
     return {
         partName = safeName,
         partId = partId,
         parentId = parentId,
         parentName = parentName,
+        parentContainerClass = parentContainerClass,
         hierarchyPath = hierarchyPath,
         hierarchySegments = segments,
     }
@@ -465,33 +486,36 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
     partId: string,
     parentId: string,
     parentName: string,
+    parentContainerClass: string,
     hierarchyPath: string,
     geometrySource: string,
     rotationMatrix: { number },
+    reflectance: number,
     geometryHash: string,
     materialHash: string,
     transformHash: string,
+    hierarchyHash: string,
     combinedHash: string,
 }
     local hier = normalizeHierarchyMetadataLuau(partSpec, idxFallback)
     local md = if type(partSpec.meshData) == "table" then partSpec.meshData else {}
-    local verts = if type(md.vertices) == "table" then md.vertices else {}
-    local faces = if type(md.faces) == "table" then md.faces else {}
-    local norms = if type(md.normals) == "table" then md.normals else {}
-    local uvs = if type(md.uvs) == "table" then md.uvs else {}
+    local verts = if type(md.vertices) == "table" then md.vertices elseif type(partSpec.vertices) == "table" then partSpec.vertices else {}
+    local faces = if type(md.faces) == "table" then md.faces elseif type(partSpec.faces) == "table" then partSpec.faces else {}
+    local norms = if type(md.normals) == "table" then md.normals elseif type(partSpec.normals) == "table" then partSpec.normals else {}
+    local uvs = if type(md.uvs) == "table" then md.uvs elseif type(partSpec.uvs) == "table" then partSpec.uvs else {}
 
     local rawMeshId = partSpec.meshId or partSpec.mesh_id or md.meshId or partSpec.assetId
     local meshId = if isVerifiedRobloxAssetUri(rawMeshId) then tostring(rawMeshId) else ""
     local rawGeomSource = string.match(tostring(partSpec.geometrySource or partSpec.geometry_source or md.geometrySource or ""), "^%s*(.-)%s*$") or ""
-    local geometrySource = rawGeomSource
-    if geometrySource == "" then
-        if #verts > 0 and #faces > 0 then
-            geometrySource = "EditableMeshBuffers"
-        elseif meshId ~= "" then
-            geometrySource = "PublishedCloudMeshId"
-        else
-            geometrySource = "StudioExternalUnreadable"
-        end
+    local geometrySource = ""
+    if #verts >= 3 and #faces >= 1 then
+        geometrySource = "EditableMeshBuffers"
+    elseif meshId ~= "" then
+        geometrySource = "PublishedCloudMeshId"
+    elseif rawGeomSource ~= "" then
+        geometrySource = rawGeomSource
+    else
+        geometrySource = "StudioExternalUnreadable"
     end
 
     local geomTokens: { string } = {
@@ -542,14 +566,19 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
     local cb = math.clamp(math.floor((tonumber(col[3]) or 184) + 0.5), 0, 255)
     local matName = string.match(tostring(partSpec.material or "Metal"), "^%s*(.-)%s*$") or "Metal"
     if matName == "" then matName = "Metal" end
-    local roughStr = fmtCanonicalFixed(partSpec.roughness or 0.35, 3)
-    local metalStr = fmtCanonicalFixed(partSpec.metalness or 0.6, 3)
-    local transpStr = fmtCanonicalFixed(partSpec.transparency or 0, 3)
     local pbr = if type(partSpec.pbrMaterial) == "table" then partSpec.pbrMaterial else {}
-    local cmap = if isVerifiedRobloxAssetUri(pbr.colorMapAssetId or pbr.color_map_asset_id) then tostring(pbr.colorMapAssetId or pbr.color_map_asset_id) else ""
-    local nmap = if isVerifiedRobloxAssetUri(pbr.normalMapAssetId or pbr.normal_map_asset_id) then tostring(pbr.normalMapAssetId or pbr.normal_map_asset_id) else ""
-    local rmap = if isVerifiedRobloxAssetUri(pbr.roughnessMapAssetId or pbr.roughness_map_asset_id) then tostring(pbr.roughnessMapAssetId or pbr.roughness_map_asset_id) else ""
-    local mmap = if isVerifiedRobloxAssetUri(pbr.metalnessMapAssetId or pbr.metalness_map_asset_id) then tostring(pbr.metalnessMapAssetId or pbr.metalness_map_asset_id) else ""
+    local roughVal = if type(pbr.roughness) == "number" then pbr.roughness elseif partSpec.roughness ~= nil then partSpec.roughness else 0.35
+    local metalVal = if type(pbr.metalness) == "number" then pbr.metalness elseif partSpec.metalness ~= nil then partSpec.metalness else 0.6
+    local transVal = if partSpec.transparency ~= nil then partSpec.transparency else 0
+    local reflVal = if partSpec.reflectance ~= nil then partSpec.reflectance elseif type(pbr.reflectance) == "number" then pbr.reflectance else 0
+    local roughStr = fmtCanonicalFixed(roughVal, 3)
+    local metalStr = fmtCanonicalFixed(metalVal, 3)
+    local transpStr = fmtCanonicalFixed(transVal, 3)
+    local reflStr = fmtCanonicalFixed(reflVal, 3)
+    local cmap = if isVerifiedRobloxAssetUri(pbr.colorMapAssetId or pbr.color_map_asset_id or pbr.colorMapId) then tostring(pbr.colorMapAssetId or pbr.color_map_asset_id or pbr.colorMapId) else ""
+    local nmap = if isVerifiedRobloxAssetUri(pbr.normalMapAssetId or pbr.normal_map_asset_id or pbr.normalMapId) then tostring(pbr.normalMapAssetId or pbr.normal_map_asset_id or pbr.normalMapId) else ""
+    local rmap = if isVerifiedRobloxAssetUri(pbr.roughnessMapAssetId or pbr.roughness_map_asset_id or pbr.roughnessMapId) then tostring(pbr.roughnessMapAssetId or pbr.roughness_map_asset_id or pbr.roughnessMapId) else ""
+    local mmap = if isVerifiedRobloxAssetUri(pbr.metalnessMapAssetId or pbr.metalness_map_asset_id or pbr.metalnessMapId) then tostring(pbr.metalnessMapAssetId or pbr.metalness_map_asset_id or pbr.metalnessMapId) else ""
 
     local matTokens = {
         FORGE_SYNC_HASH_SCHEMA_V1,
@@ -559,6 +588,7 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
         roughStr,
         metalStr,
         transpStr,
+        reflStr,
         cmap,
         nmap,
         rmap,
@@ -568,6 +598,10 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
 
     local sz = if type(partSpec.size) == "table" and #partSpec.size >= 3 then partSpec.size else { 2, 2, 2 }
     local pos = if type(partSpec.position) == "table" and #partSpec.position >= 3 then partSpec.position else { 0, 1, 0 }
+    local rot = if type(partSpec.rotation) == "table" and #partSpec.rotation >= 3 then partSpec.rotation else nil
+    local rx = if rot then (tonumber(rot[1]) or 0) else 0
+    local ry = if rot then (tonumber(rot[2]) or 0) else 0
+    local rz = if rot then (tonumber(rot[3]) or 0) else 0
     local rotMat9: { number }
     if type(partSpec.rotationMatrix) == "table" and #partSpec.rotationMatrix >= 9 then
         rotMat9 = {
@@ -581,9 +615,14 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
             tonumber(partSpec.rotationMatrix[8]) or 0,
             tonumber(partSpec.rotationMatrix[9]) or 1,
         }
+        if rot then
+            local derivedDeg = canonicalMatrix9ToEulerDeg(rotMat9)
+            if math.abs(derivedDeg[1] - rx) > 0.05 or math.abs(derivedDeg[2] - ry) > 0.05 or math.abs(derivedDeg[3] - rz) > 0.05 then
+                rotMat9 = canonicalEulerToMatrix9(rx, ry, rz)
+            end
+        end
     else
-        local rot = if type(partSpec.rotation) == "table" and #partSpec.rotation >= 3 then partSpec.rotation else { 0, 0, 0 }
-        rotMat9 = canonicalEulerToMatrix9(tonumber(rot[1]) or 0, tonumber(rot[2]) or 0, tonumber(rot[3]) or 0)
+        rotMat9 = canonicalEulerToMatrix9(rx, ry, rz)
     end
 
     local sizeStr = string.format("%s,%s,%s", fmtCanonicalFixed(sz[1], 3), fmtCanonicalFixed(sz[2], 3), fmtCanonicalFixed(sz[3], 3))
@@ -601,7 +640,6 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
     local transformTokens = {
         FORGE_SYNC_HASH_SCHEMA_V1,
         "xform",
-        hier.hierarchyPath,
         sizeStr,
         posStr,
         rotMatStr,
@@ -610,8 +648,26 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
         cfMode,
     }
     local transformHash = computeLuauContentHash(table.concat(transformTokens, "|"))
+
+    local hierarchyTokens = {
+        FORGE_SYNC_HASH_SCHEMA_V1,
+        "hier",
+        hier.parentId,
+        hier.parentName,
+        hier.hierarchyPath,
+    }
+    local hierarchyHash = computeLuauContentHash(table.concat(hierarchyTokens, "|"))
+
     local combinedHash = computeLuauContentHash(
-        string.format("%s|part|%s|%s|%s|%s|%s", FORGE_SYNC_HASH_SCHEMA_V1, hier.partId, hier.hierarchyPath, geometryHash, materialHash, transformHash)
+        string.format(
+            "%s|part|%s|%s|%s|%s|%s",
+            FORGE_SYNC_HASH_SCHEMA_V1,
+            hier.partId,
+            geometryHash,
+            materialHash,
+            transformHash,
+            hierarchyHash
+        )
     )
 
     return {
@@ -619,38 +675,58 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
         partId = hier.partId,
         parentId = hier.parentId,
         parentName = hier.parentName,
+        parentContainerClass = hier.parentContainerClass,
         hierarchyPath = hier.hierarchyPath,
         geometrySource = geometrySource,
         rotationMatrix = rotMat9,
+        reflectance = tonumber(reflStr) or 0,
         geometryHash = geometryHash,
         materialHash = materialHash,
         transformHash = transformHash,
+        hierarchyHash = hierarchyHash,
         combinedHash = combinedHash,
     }
 end
 
--- Ensures nested Model containers exist inside rootModel for any multi-segment parentPath (e.g. "Turret/Cannon")
-local function ensureHierarchyContainer(rootModel: Model, parentPath: string?): Instance
-    if not parentPath or parentPath == "" or parentPath == "ModelRoot" or parentPath == "Root" or parentPath == rootModel.Name then
+-- Ensures nested Model or Folder containers exist inside rootModel for any multi-segment hierarchyPath or parentPath
+local function ensureHierarchyContainer(rootModel: Model, parentOrHierarchyPath: string?, leafPartName: string?, leafContainerClass: string?): Instance
+    if not parentOrHierarchyPath or parentOrHierarchyPath == "" or parentOrHierarchyPath == "ModelRoot" or parentOrHierarchyPath == "Root" or parentOrHierarchyPath == rootModel.Name then
         return rootModel
     end
-    local current: Instance = rootModel
-    local accumPath = ""
-    for segment in string.gmatch(string.gsub(parentPath, "\\", "/"), "[^/]+") do
+    local segments: { string } = {}
+    for segment in string.gmatch(string.gsub(parentOrHierarchyPath, "\\", "/"), "[^/]+") do
         local trimmed = string.match(segment, "^%s*(.-)%s*$") or ""
         if trimmed ~= "" and trimmed ~= "ModelRoot" and trimmed ~= "Root" and trimmed ~= rootModel.Name then
-            accumPath = if accumPath == "" then trimmed else (accumPath .. "/" .. trimmed)
-            local existing = current:FindFirstChild(trimmed)
-            if not existing or (not existing:IsA("Model") and not existing:IsA("Folder")) then
-                local container = Instance.new("Model")
-                container.Name = trimmed
-                container:SetAttribute("ForgeNodeId", "fnode_" .. string.gsub(accumPath, "[^%w_]", "_"))
-                container:SetAttribute("ForgeHierarchyPath", accumPath)
-                container.Parent = current
-                current = container
-            else
-                current = existing
-            end
+            table.insert(segments, trimmed)
+        end
+    end
+    if leafPartName and #segments > 0 and segments[#segments] == leafPartName then
+        table.remove(segments, #segments)
+    end
+    if #segments == 0 then
+        return rootModel
+    end
+
+    local current: Instance = rootModel
+    local accumPath = ""
+    for segIdx, trimmed in ipairs(segments) do
+        accumPath = if accumPath == "" then trimmed else (accumPath .. "/" .. trimmed)
+        local isDirectParent = (segIdx == #segments)
+        local desiredClass = if isDirectParent and (leafContainerClass == "Folder" or leafContainerClass == "Model")
+            then leafContainerClass
+            elseif string.find(string.lower(trimmed), "folder", 1, true) or string.find(string.lower(trimmed), "group", 1, true)
+            then "Folder"
+            else "Model"
+        local existing = current:FindFirstChild(trimmed)
+        if not existing or (not existing:IsA("Model") and not existing:IsA("Folder")) then
+            local container = Instance.new(desiredClass)
+            container.Name = trimmed
+            container:SetAttribute("ForgeNodeId", "fnode_" .. string.gsub(accumPath, "[^%w_]", "_"))
+            container:SetAttribute("ForgeHierarchyPath", accumPath)
+            container.Parent = current
+            current = container
+        else
+            current = existing
         end
     end
     return current
@@ -713,6 +789,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
         end
 
         part.Transparency = partSpec.transparency or 0
+        part.Reflectance = tonumber(syncMeta.reflectance) or 0
         part.Anchored = if partSpec.anchored ~= nil then partSpec.anchored else true
         part.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
         part.TopSurface = Enum.SurfaceType.Smooth
@@ -773,6 +850,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
         part:SetAttribute("ForgePartId", syncMeta.partId)
         part:SetAttribute("ForgeParentId", syncMeta.parentId)
         part:SetAttribute("ForgeParentName", syncMeta.parentName)
+        part:SetAttribute("ForgeParentContainerClass", syncMeta.parentContainerClass)
         part:SetAttribute("ForgeHierarchyPath", syncMeta.hierarchyPath)
         part:SetAttribute("ForgeGeometrySource", syncMeta.geometrySource)
 
@@ -783,11 +861,14 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
                     partId = syncMeta.partId,
                     parentId = syncMeta.parentId,
                     parentName = syncMeta.parentName,
+                    parentContainerClass = syncMeta.parentContainerClass,
                     hierarchyPath = syncMeta.hierarchyPath,
                     geometrySource = syncMeta.geometrySource,
                     geometryHash = syncMeta.geometryHash,
                     materialHash = syncMeta.materialHash,
                     transformHash = syncMeta.transformHash,
+                    hierarchyHash = syncMeta.hierarchyHash,
+                    combinedHash = syncMeta.combinedHash,
                     publishedMeshId = if isVerifiedRobloxAssetUri(partSpec.meshId) then partSpec.meshId else nil,
                     meshId = if isVerifiedRobloxAssetUri(partSpec.meshId) then partSpec.meshId else nil,
                     textureId = if isVerifiedRobloxAssetUri(partSpec.textureId) then partSpec.textureId else nil,
@@ -799,6 +880,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
                     material = part.Material.Name,
                     roughness = roughnessVal,
                     metalness = metalnessVal,
+                    reflectance = syncMeta.reflectance,
                     transparency = part.Transparency,
                     canCollide = part.CanCollide,
                     anchored = part.Anchored,
@@ -818,7 +900,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
             end
         end
 
-        part.Parent = ensureHierarchyContainer(model, syncMeta.parentName)
+        part.Parent = ensureHierarchyContainer(model, syncMeta.hierarchyPath, syncMeta.partName, syncMeta.parentContainerClass)
         if idx == 1 then
             model.PrimaryPart = part
         end
@@ -1042,11 +1124,17 @@ local function resolveModelSyncOriginCFrame(rootModel: Model?, collectedParts: {
 end
 
 -- Walks ancestor chain from `part.Parent` up to `rootModel` to build the real nested hierarchy path
-local function resolveStudioPartHierarchy(part: BasePart, rootModel: Model?, meshData: any): (string, string, string)
+local function resolveStudioPartHierarchy(part: BasePart, rootModel: Model?, meshData: any): (string, string, string, string)
     local segments: { string } = {}
+    local directParentClass = "Model"
+    local firstContainerSeen = false
     local curr: Instance? = part.Parent
     while curr and curr ~= Workspace and curr ~= game and curr ~= rootModel do
         if curr:IsA("Model") or curr:IsA("Folder") then
+            if not firstContainerSeen then
+                directParentClass = if curr:IsA("Folder") then "Folder" else "Model"
+                firstContainerSeen = true
+            end
             if curr.Name ~= "ModelRoot" and curr.Name ~= "Root" and (not rootModel or curr.Name ~= rootModel.Name) then
                 table.insert(segments, 1, curr.Name)
             end
@@ -1054,24 +1142,34 @@ local function resolveStudioPartHierarchy(part: BasePart, rootModel: Model?, mes
         curr = curr.Parent
     end
 
-    local parentName = "ModelRoot"
+    local parentName = "Root"
+    local hierarchyPath = "Root/" .. part.Name
     if #segments > 0 then
-        parentName = table.concat(segments, "/")
+        parentName = segments[#segments]
+        hierarchyPath = "Root/" .. table.concat(segments, "/") .. "/" .. part.Name
     elseif rootModel and part.Parent == rootModel then
         local containersBuilt = rootModel:GetAttribute("ForgeHierarchyContainersBuilt") == true
         if not containersBuilt then
+            local attrHierarchyPath = part:GetAttribute("ForgeHierarchyPath")
+                or (if type(meshData) == "table" then meshData.hierarchyPath else nil)
             local attrParent = part:GetAttribute("ForgeParentName")
                 or (if type(meshData) == "table" then meshData.parentName else nil)
-            if type(attrParent) == "string" and #attrParent > 0 and attrParent ~= "Root" then
+            if type(attrHierarchyPath) == "string" and #attrHierarchyPath > 0 then
+                hierarchyPath = attrHierarchyPath
+            end
+            if type(attrParent) == "string" and #attrParent > 0 and attrParent ~= "Root" and attrParent ~= "ModelRoot" then
                 parentName = attrParent
             end
         end
     end
 
-    local hierarchyPath = parentName .. "/" .. part.Name
-    local parentClean = string.gsub(parentName, "[^%w_]", "_")
-    local parentId = if parentName == "ModelRoot" then "fnode_ModelRoot" else ("fnode_" .. parentClean)
-    return parentId, parentName, hierarchyPath
+    local cleanedSegs: { string } = {}
+    for _, seg in ipairs(segments) do
+        table.insert(cleanedSegs, (string.gsub(seg, "[^%w_]", "_")))
+    end
+    local parentClean = table.concat(cleanedSegs, "_")
+    local parentId = if #segments == 0 then "fnode_Root" else ("fnode_" .. parentClean)
+    return parentId, parentName, hierarchyPath, directParentClass
 end
 
 -- Helper to serialize BaseParts from a Studio Model or Selection with ForgePartId,
@@ -1118,7 +1216,7 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
             then meshData.partId
             else ("fpart_" .. cleanName)
 
-        local parentId, parentName, hierarchyPath = resolveStudioPartHierarchy(part, rootModel, meshData)
+        local parentId, parentName, hierarchyPath, parentContainerClass = resolveStudioPartHierarchy(part, rootModel, meshData)
 
         -- Preserve real MeshId / TextureID and never replace external MeshParts with procedural cubes!
         local rawMeshId = ""
@@ -1174,6 +1272,7 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
             or part:GetAttribute("ForgePBRMetalness")
             or (if type(meshData) == "table" then meshData.metalness else nil)
         ) or 0.6
+        local reflectanceVal = tonumber(fmtCanonicalFixed(part.Reflectance, 3)) or 0
 
         local sa = part:FindFirstChildOfClass("SurfaceAppearance")
         local pbrSpec = if type(meshData) == "table" and type(meshData.pbrMaterial) == "table" then meshData.pbrMaterial else nil
@@ -1199,6 +1298,7 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
             parentId = parentId,
             name = part.Name,
             parentName = parentName,
+            parentContainerClass = parentContainerClass,
             hierarchyPath = hierarchyPath,
             shape = "MeshPart",
             meshId = if rawMeshId ~= "" then rawMeshId else nil,
@@ -1225,6 +1325,7 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
             material = part.Material.Name,
             roughness = roughnessVal,
             metalness = metalnessVal,
+            reflectance = reflectanceVal,
             transparency = tonumber(fmtCanonicalFixed(part.Transparency, 3)) or 0,
             canCollide = part.CanCollide,
             anchored = part.Anchored,
@@ -1238,11 +1339,225 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
         entry.geometryHash = syncHashes.geometryHash
         entry.materialHash = syncHashes.materialHash
         entry.transformHash = syncHashes.transformHash
+        entry.hierarchyHash = syncHashes.hierarchyHash
         entry.combinedHash = syncHashes.combinedHash
 
         table.insert(serializedParts, entry)
     end
     return serializedParts
+end
+
+-- Incremental In-Place Model Update in Studio (Fase 5.4):
+-- Updates only modified domains (`update_geometry`, `update_transform`, `update_material`, `update_hierarchy`, `add`, `delete`)
+-- without destroying untouched parts or user-attached Studio instances (WeldConstraints, Scripts, Attachments).
+local function applyIncrementalModelUpdateInStudio(
+    targetModel: Model,
+    assetData: any,
+    explicitDeleteIds: { string }?
+): (number, number, number, number)
+    local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Incremental Sync Update")
+    local existingByPartId: { [string]: BasePart } = {}
+    local allBaseParts: { BasePart } = {}
+
+    for _, desc in ipairs(targetModel:GetDescendants()) do
+        if desc:IsA("BasePart") then
+            table.insert(allBaseParts, desc)
+            local pidAttr = desc:GetAttribute("ForgePartId")
+            local pidVal = desc:FindFirstChild("ForgePartId")
+            local pid = if type(pidAttr) == "string" and #pidAttr > 0
+                then pidAttr
+                elseif pidVal and pidVal:IsA("StringValue") and #pidVal.Value > 0
+                then pidVal.Value
+                else ("fpart_" .. string.gsub(desc.Name, "[^%w_]", "_"))
+            existingByPartId[pid] = desc
+        end
+    end
+
+    local originCFrame = resolveModelSyncOriginCFrame(targetModel, allBaseParts)
+    local currentSerialized = serializeStudioPartsFromInstances(allBaseParts, targetModel)
+    local currentMetaById: { [string]: any } = {}
+    for _, s in ipairs(currentSerialized) do
+        currentMetaById[tostring(s.partId)] = s
+    end
+
+    local incomingParts = if type(assetData) == "table" and type(assetData.parts) == "table" then assetData.parts else {}
+    local incomingIds: { [string]: boolean } = {}
+    local addedCount = 0
+    local updatedCount = 0
+    local unchangedCount = 0
+    local deletedCount = 0
+
+    for idx, partSpec in ipairs(incomingParts) do
+        local syncMeta = computePartSyncHashesLuau(partSpec, idx)
+        incomingIds[syncMeta.partId] = true
+        local existingPart = existingByPartId[syncMeta.partId]
+        local existingMeta = currentMetaById[syncMeta.partId]
+
+        if not existingPart or not existingMeta then
+            -- Operation: `add`
+            local newPart, _, _ = createEditableMeshPartFromSpec(partSpec, idx)
+            local pos = partSpec.position or { 0, 1, 0 }
+            local rotMat = syncMeta.rotationMatrix
+            local localCF = CFrame.new(
+                tonumber(pos[1]) or 0, tonumber(pos[2]) or 0, tonumber(pos[3]) or 0,
+                rotMat[1], rotMat[2], rotMat[3],
+                rotMat[4], rotMat[5], rotMat[6],
+                rotMat[7], rotMat[8], rotMat[9]
+            )
+            newPart.CFrame = originCFrame * localCF
+            local col = partSpec.color or { 148, 163, 184 }
+            newPart.Color = Color3.fromRGB(col[1] or 148, col[2] or 163, col[3] or 184)
+            local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
+            if matEnum then newPart.Material = matEnum end
+            newPart.Transparency = tonumber(partSpec.transparency) or 0
+            newPart.Reflectance = syncMeta.reflectance
+            newPart.Anchored = if partSpec.anchored ~= nil then partSpec.anchored else true
+            newPart.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
+            newPart:SetAttribute("ForgePartId", syncMeta.partId)
+            newPart:SetAttribute("ForgeParentId", syncMeta.parentId)
+            newPart:SetAttribute("ForgeParentName", syncMeta.parentName)
+            newPart:SetAttribute("ForgeParentContainerClass", syncMeta.parentContainerClass)
+            newPart:SetAttribute("ForgeHierarchyPath", syncMeta.hierarchyPath)
+            newPart.Parent = ensureHierarchyContainer(targetModel, syncMeta.hierarchyPath, syncMeta.partName, syncMeta.parentContainerClass)
+            addedCount += 1
+        else
+            local geomChanged = existingMeta.geometryHash ~= syncMeta.geometryHash and existingMeta.geometrySource ~= "StudioExternalUnreadable"
+            local xformChanged = existingMeta.transformHash ~= syncMeta.transformHash
+            local matChanged = existingMeta.materialHash ~= syncMeta.materialHash
+            local hierChanged = existingMeta.hierarchyHash ~= syncMeta.hierarchyHash or existingPart.Name ~= syncMeta.partName
+
+            if not geomChanged and not xformChanged and not matChanged and not hierChanged then
+                unchangedCount += 1
+            else
+                updatedCount += 1
+                local activePart = existingPart
+                if geomChanged then
+                    local rebuiltPart, isVer, _ = createEditableMeshPartFromSpec(partSpec, idx)
+                    if isVer then
+                        rebuiltPart.CFrame = activePart.CFrame
+                        rebuiltPart.Color = activePart.Color
+                        rebuiltPart.Material = activePart.Material
+                        rebuiltPart.Transparency = activePart.Transparency
+                        rebuiltPart.Reflectance = activePart.Reflectance
+                        rebuiltPart.Anchored = activePart.Anchored
+                        rebuiltPart.CanCollide = activePart.CanCollide
+                        for _, ch in ipairs(activePart:GetChildren()) do
+                            if ch.Name ~= "ForgeMeshGeometryJSON" then
+                                ch.Parent = rebuiltPart
+                            end
+                        end
+                        rebuiltPart.Parent = activePart.Parent
+                        if targetModel.PrimaryPart == activePart then
+                            targetModel.PrimaryPart = rebuiltPart
+                        end
+                        activePart:Destroy()
+                        activePart = rebuiltPart
+                    else
+                        rebuiltPart:Destroy()
+                    end
+                end
+                if xformChanged then
+                    local sz = partSpec.size or { 2, 2, 2 }
+                    activePart.Size = Vector3.new(tonumber(sz[1]) or 2, tonumber(sz[2]) or 2, tonumber(sz[3]) or 2)
+                    local pos = partSpec.position or { 0, 1, 0 }
+                    local rotMat = syncMeta.rotationMatrix
+                    local localCF = CFrame.new(
+                        tonumber(pos[1]) or 0, tonumber(pos[2]) or 0, tonumber(pos[3]) or 0,
+                        rotMat[1], rotMat[2], rotMat[3],
+                        rotMat[4], rotMat[5], rotMat[6],
+                        rotMat[7], rotMat[8], rotMat[9]
+                    )
+                    activePart.CFrame = originCFrame * localCF
+                    activePart.Anchored = if partSpec.anchored ~= nil then partSpec.anchored else true
+                    activePart.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
+                end
+                if matChanged then
+                    local col = partSpec.color or { 148, 163, 184 }
+                    activePart.Color = Color3.fromRGB(col[1] or 148, col[2] or 163, col[3] or 184)
+                    local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
+                    if matEnum then activePart.Material = matEnum end
+                    activePart.Transparency = tonumber(partSpec.transparency) or 0
+                    activePart.Reflectance = syncMeta.reflectance
+                    activePart:SetAttribute("PBR_Roughness", tonumber(partSpec.roughness) or 0.35)
+                    activePart:SetAttribute("PBR_Metalness", tonumber(partSpec.metalness) or 0.6)
+                end
+                if hierChanged then
+                    activePart.Name = syncMeta.partName
+                    activePart:SetAttribute("ForgeParentId", syncMeta.parentId)
+                    activePart:SetAttribute("ForgeParentName", syncMeta.parentName)
+                    activePart:SetAttribute("ForgeParentContainerClass", syncMeta.parentContainerClass)
+                    activePart:SetAttribute("ForgeHierarchyPath", syncMeta.hierarchyPath)
+                    activePart.Parent = ensureHierarchyContainer(targetModel, syncMeta.hierarchyPath, syncMeta.partName, syncMeta.parentContainerClass)
+                end
+                activePart:SetAttribute("ForgePartId", syncMeta.partId)
+            end
+        end
+    end
+
+    local deleteSet: { [string]: boolean } = {}
+    if type(explicitDeleteIds) == "table" then
+        for _, did in ipairs(explicitDeleteIds) do
+            deleteSet[tostring(did)] = true
+        end
+    end
+    for pid, partInst in pairs(existingByPartId) do
+        if deleteSet[pid] or (not incomingIds[pid] and type(explicitDeleteIds) == "table" and #explicitDeleteIds == 0) then
+            partInst:Destroy()
+            deletedCount += 1
+        end
+    end
+
+    if recordId then
+        ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
+    end
+    return addedCount, updatedCount, unchangedCount, deletedCount
+end
+
+-- Automated Self-Verification Suite for Luau Plugin (Fase 8.3)
+local function runForgePluginSelfVerification(): (boolean, { string })
+    local errors: { string } = {}
+    if computeLuauContentHash("hello") ~= "4f9f2cab" then
+        table.insert(errors, "FNV-1a ASCII vector mismatch")
+    end
+    if computeLuauContentHash("line1\r\nline2\rline3") ~= computeLuauContentHash("line1\nline2\nline3") then
+        table.insert(errors, "FNV-1a CRLF/LF normalization mismatch")
+    end
+    local samplePart = {
+        name = "TurretCannon",
+        parentName = "Turret",
+        parentContainerClass = "Folder",
+        hierarchyPath = "Root/Turret/TurretCannon",
+        size = { 2, 2, 4 },
+        position = { 0, 3, 0 },
+        rotation = { 0, 45, 0 },
+        color = { 148, 163, 184 },
+        material = "Metal",
+        roughness = 0.35,
+        metalness = 0.6,
+        reflectance = 0.15,
+        transparency = 0,
+        anchored = true,
+        canCollide = true,
+        collisionFidelity = "Hull",
+        meshData = {
+            vertices = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } },
+            normals = { { 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 } },
+            uvs = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } },
+            faces = { { 0, 1, 2 }, { 0, 2, 3 } },
+        },
+    }
+    local h1 = computePartSyncHashesLuau(samplePart, 1)
+    samplePart.name = "RenamedTurretCannon"
+    local h2 = computePartSyncHashesLuau(samplePart, 1)
+    if h1.partId ~= h2.partId then
+        table.insert(errors, "partId changed after renaming part.name")
+    end
+    samplePart.meshData.vertices[2][2] = 0.75
+    local h3 = computePartSyncHashesLuau(samplePart, 1)
+    if h2.geometryHash == h3.geometryHash then
+        table.insert(errors, "Intermediate vertex modification did not change geometryHash")
+    end
+    return (#errors == 0), errors
 end
 
 -- Finds the top-level root Model in Workspace for any nested BasePart or sub-Model
@@ -1625,6 +1940,28 @@ btnPushToForge.Size = UDim2.new(1, 0, 0, 32)
 btnPushToForge.BackgroundColor3 = Color3.fromRGB(217, 119, 6)
 btnPushToForge.LayoutOrder = 9
 
+local tokenBox = Instance.new("TextBox")
+tokenBox.PlaceholderText = "X-Forge-Token (opcional, guardado en plugin:SetSetting)"
+tokenBox.Text = FORGE_SECURITY_TOKEN
+tokenBox.ClearTextOnFocus = false
+tokenBox.Font = Enum.Font.Code
+tokenBox.TextSize = 11
+tokenBox.TextColor3 = Color3.fromRGB(226, 232, 240)
+tokenBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+tokenBox.Size = UDim2.new(1, 0, 0, 26)
+tokenBox.TextXAlignment = Enum.TextXAlignment.Left
+tokenBox.LayoutOrder = 10
+tokenBox.Parent = root
+
+tokenBox.FocusLost:Connect(function()
+    FORGE_SECURITY_TOKEN = string.match(tokenBox.Text or "", "^%s*(.-)%s*$") or ""
+    pcall(function()
+        if plugin and type(plugin.SetSetting) == "function" then
+            plugin:SetSetting("ForgeSecurityToken", FORGE_SECURITY_TOKEN)
+        end
+    end)
+end)
+
 local outputLog = Instance.new("TextLabel")
 outputLog.Text = "Listo. Conecta FastAPI/Express en " .. BACKEND_URL
 outputLog.Font = Enum.Font.Code
@@ -1635,7 +1972,7 @@ outputLog.Size = UDim2.new(1, 0, 0, 180)
 outputLog.TextWrapped = true
 outputLog.TextXAlignment = Enum.TextXAlignment.Left
 outputLog.TextYAlignment = Enum.TextYAlignment.Top
-outputLog.LayoutOrder = 10
+outputLog.LayoutOrder = 11
 outputLog.Parent = root
 
 btnGenerate3D.MouseButton1Click:Connect(function()

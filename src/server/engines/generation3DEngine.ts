@@ -34,6 +34,7 @@ export interface MeshPartInput {
   partId?: string;
   parentId?: string;
   parentName?: string;
+  parentContainerClass?: 'Folder' | 'Model';
   hierarchyPath?: string;
   name: string;
   shape: string;
@@ -49,6 +50,7 @@ export interface MeshPartInput {
   material: string;
   roughness: number;
   metalness: number;
+  reflectance?: number;
   transparency: number;
   canCollide: boolean;
   anchored: boolean;
@@ -58,6 +60,9 @@ export interface MeshPartInput {
   geometryHash?: string;
   materialHash?: string;
   transformHash?: string;
+  hierarchyHash?: string;
+  combinedHash?: string;
+  integritySha256?: string;
 }
 
 /**

@@ -630,6 +630,7 @@ class MeshPart3DSpec(BaseModel):
     partId: Optional[str] = Field(default=None, description="Stable ForgePartId identifier")
     parentId: Optional[str] = Field(default=None, description="Stable ForgeParentId identifier")
     parentName: Optional[str] = Field(default="ModelRoot", description="Parent container name or path")
+    parentContainerClass: Optional[str] = Field(default="Model", description="Container class ('Folder' or 'Model')")
     hierarchyPath: Optional[str] = Field(default=None, description="Full canonical hierarchy path")
     name: str = Field(description="Sub-part name in PascalCase")
     shape: Literal["MeshPart", "Cylinder", "Ball", "Wedge", "CornerWedge"] = Field(
@@ -669,6 +670,7 @@ class MeshPart3DSpec(BaseModel):
     material: str = Field(default="Metal", description="Roblox Enum.Material name")
     roughness: float = Field(default=0.35)
     metalness: float = Field(default=0.6)
+    reflectance: float = Field(default=0.0)
     transparency: float = Field(default=0.0)
     canCollide: bool = Field(default=True)
     anchored: bool = Field(default=True)
@@ -684,6 +686,9 @@ class MeshPart3DSpec(BaseModel):
     geometryHash: Optional[str] = Field(default=None)
     materialHash: Optional[str] = Field(default=None)
     transformHash: Optional[str] = Field(default=None)
+    hierarchyHash: Optional[str] = Field(default=None)
+    combinedHash: Optional[str] = Field(default=None)
+    integritySha256: Optional[str] = Field(default=None)
 
     @field_validator("shape", mode="before")
     @classmethod
@@ -1620,11 +1625,14 @@ class Generation3DEngine:
                 "partId": sync_meta["partId"],
                 "parentId": sync_meta["parentId"],
                 "parentName": sync_meta["parentName"],
+                "parentContainerClass": sync_meta["parentContainerClass"],
                 "hierarchyPath": sync_meta["hierarchyPath"],
                 "geometrySource": sync_meta["geometrySource"],
                 "geometryHash": sync_meta["geometryHash"],
                 "materialHash": sync_meta["materialHash"],
                 "transformHash": sync_meta["transformHash"],
+                "hierarchyHash": sync_meta["hierarchyHash"],
+                "combinedHash": sync_meta["combinedHash"],
                 "shape": "MeshPart",
                 "publishedMeshId": published_mesh_id,
                 "meshId": published_mesh_id,
@@ -1637,6 +1645,7 @@ class Generation3DEngine:
                 "material": part.material or "Metal",
                 "roughness": part.roughness,
                 "metalness": part.metalness,
+                "reflectance": sync_meta["reflectance"],
                 "transparency": part.transparency,
                 "anchored": part.anchored,
                 "canCollide": part.canCollide,
@@ -1678,6 +1687,7 @@ class Generation3DEngine:
                 if valid_metal_map
                 else '<Content name="MetalnessMap"><null></null></Content>'
             )
+            refl_val = float(getattr(part, "reflectance", 0.0) or 0.0)
 
             return [
                 f'{indent}<Item class="MeshPart" referent="{ref_id}">',
@@ -1686,6 +1696,7 @@ class Generation3DEngine:
                 f'{indent}    <bool name="Anchored">{"true" if part.anchored else "false"}</bool>',
                 f'{indent}    <bool name="CanCollide">{"true" if part.canCollide else "false"}</bool>',
                 f'{indent}    <float name="Transparency">{part.transparency:.3f}</float>',
+                f'{indent}    <float name="Reflectance">{refl_val:.3f}</float>',
                 f'{indent}    <token name="Material">{mat_token}</token>',
                 f'{indent}    <Color3uint8 name="Color3uint8">{color_uint8}</Color3uint8>',
                 f"{indent}    {mesh_id_xml}",
@@ -1751,6 +1762,7 @@ class Generation3DEngine:
             "name": "ModelRoot",
             "path": "ModelRoot",
             "nodeId": "fnode_ModelRoot",
+            "containerClass": "Model",
             "children": {},
             "parts": [],
         }
@@ -1768,17 +1780,26 @@ class Generation3DEngine:
             else:
                 curr = root_tree
                 accum = ""
-                for seg in parent_segs:
+                for seg_idx, seg in enumerate(parent_segs):
                     accum = f"{accum}/{seg}" if accum else seg
+                    is_direct_parent = seg_idx == len(parent_segs) - 1
+                    desired_class = (
+                        hier["parentContainerClass"]
+                        if is_direct_parent
+                        else ("Folder" if ("folder" in seg.lower() or "group" in seg.lower()) else "Model")
+                    )
                     if seg not in curr["children"]:
                         clean_node = "".join(c if (c.isalnum() or c == "_") else "_" for c in accum)
                         curr["children"][seg] = {
                             "name": seg,
                             "path": accum,
                             "nodeId": f"fnode_{clean_node}",
+                            "containerClass": desired_class,
                             "children": {},
                             "parts": [],
                         }
+                    elif is_direct_parent and hier["parentContainerClass"] == "Folder":
+                        curr["children"][seg]["containerClass"] = "Folder"
                     curr = curr["children"][seg]
                 curr["parts"].append((part, idx))
 
@@ -1789,8 +1810,9 @@ class Generation3DEngine:
             for _, child_node in node["children"].items():
                 container_counter += 1
                 ref_container = f"RBX_CONTAINER_{child_node['nodeId']}_{container_counter}"
+                c_cls = child_node.get("containerClass") or "Model"
                 lines.extend([
-                    f'{indent}<Item class="Model" referent="{ref_container}">',
+                    f'{indent}<Item class="{c_cls}" referent="{ref_container}">',
                     f"{indent}  <Properties>",
                     f'{indent}    <string name="Name">{saxutils.escape(child_node["name"])}</string>',
                     f"{indent}  </Properties>",
@@ -1847,7 +1869,7 @@ class Generation3DEngine:
         Parses a Roblox Studio `.rbxmx` XML file into `MeshPart3DSpec` instances and metadata,
         recovering:
         - Model name & category
-        - Real nested container hierarchy (`parentName`, `hierarchyPath`) by walking the XML parent chain
+        - Real nested container hierarchy (`parentName`, `parentContainerClass`, `hierarchyPath`) by walking the XML parent chain
           from each `MeshPart` up to the root `Model` as well as `ForgeParentName` / `ForgeHierarchyPath`
         - Full `CFrame` transformations (`position`, 9-component `rotationMatrix`, and `rotation` in degrees)
         - `size` `[X, Y, Z]`
@@ -1898,12 +1920,18 @@ class Generation3DEngine:
             anchored = _prop_text('./bool[@name="Anchored"]', "true").lower() != "false"
             can_collide = _prop_text('./bool[@name="CanCollide"]', "true").lower() != "false"
             transparency = float(_prop_text('./float[@name="Transparency"]', "0.0") or 0.0)
+            reflectance_val = float(_prop_text('./float[@name="Reflectance"]', "0.0") or 0.0)
 
             # Walk XML ancestor chain to reconstruct nested container path up to root model
             ancestor_names: List[str] = []
+            direct_parent_class = "Model"
             curr_parent = parent_map.get(item)
+            first_container_seen = False
             while curr_parent is not None and curr_parent != model_item:
                 if curr_parent.tag == "Item" and curr_parent.attrib.get("class") in ("Model", "Folder"):
+                    if not first_container_seen:
+                        direct_parent_class = "Folder" if curr_parent.attrib.get("class") == "Folder" else "Model"
+                        first_container_seen = True
                     cp_props = curr_parent.find("./Properties")
                     cp_name = ""
                     if cp_props is not None:
@@ -1923,6 +1951,7 @@ class Generation3DEngine:
             part_id = ""
             parent_id = ""
             parent_name = inferred_parent_name
+            parent_container_class = direct_parent_class
             hierarchy_path = inferred_hierarchy_path
             geometry_source: Optional[str] = None
 
@@ -2030,6 +2059,8 @@ class Generation3DEngine:
                                     parent_id = str(decoded["parentId"])
                                 if decoded.get("parentName"):
                                     parent_name = str(decoded["parentName"])
+                                if decoded.get("parentContainerClass") in ("Folder", "Model"):
+                                    parent_container_class = str(decoded["parentContainerClass"])
                                 if decoded.get("hierarchyPath"):
                                     hierarchy_path = str(decoded["hierarchyPath"])
                                 if decoded.get("geometrySource"):
@@ -2044,6 +2075,8 @@ class Generation3DEngine:
                                     published_tex_id = json_tex_id
                                 roughness_val = float(decoded.get("roughness", roughness_val))
                                 metalness_val = float(decoded.get("metalness", metalness_val))
+                                if "reflectance" in decoded and decoded["reflectance"] is not None:
+                                    reflectance_val = float(decoded["reflectance"])
                                 cf_mode = str(decoded.get("collisionFidelity") or cf_mode)
                                 if isinstance(decoded.get("rotationMatrix"), list) and len(decoded["rotationMatrix"]) == 9:
                                     rotation_matrix = [float(x) for x in decoded["rotationMatrix"]]
@@ -2095,6 +2128,7 @@ class Generation3DEngine:
                 partId=part_id or None,
                 parentId=parent_id or None,
                 parentName=parent_name or "ModelRoot",
+                parentContainerClass=parent_container_class,
                 hierarchyPath=hierarchy_path or None,
                 name=part_name,
                 shape="MeshPart",
@@ -2110,6 +2144,7 @@ class Generation3DEngine:
                 material=material_name,
                 roughness=roughness_val,
                 metalness=metalness_val,
+                reflectance=round(reflectance_val, 3),
                 transparency=transparency,
                 canCollide=can_collide,
                 anchored=anchored,
@@ -2121,12 +2156,17 @@ class Generation3DEngine:
             raw_spec.partId = sync_hashes["partId"]
             raw_spec.parentId = sync_hashes["parentId"]
             raw_spec.parentName = sync_hashes["parentName"]
+            raw_spec.parentContainerClass = sync_hashes["parentContainerClass"]
             raw_spec.hierarchyPath = sync_hashes["hierarchyPath"]
             raw_spec.geometrySource = sync_hashes["geometrySource"]
             raw_spec.rotationMatrix = sync_hashes["rotationMatrix"]
+            raw_spec.reflectance = sync_hashes["reflectance"]
             raw_spec.geometryHash = sync_hashes["geometryHash"]
             raw_spec.materialHash = sync_hashes["materialHash"]
             raw_spec.transformHash = sync_hashes["transformHash"]
+            raw_spec.hierarchyHash = sync_hashes["hierarchyHash"]
+            raw_spec.combinedHash = sync_hashes["combinedHash"]
+            raw_spec.integritySha256 = sync_hashes["integritySha256"]
             recovered_parts.append(raw_spec)
 
         total_tris = sum(len(p.meshData.faces) for p in recovered_parts if p.meshData)

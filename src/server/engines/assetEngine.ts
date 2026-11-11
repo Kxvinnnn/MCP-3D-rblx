@@ -132,18 +132,41 @@ export function canonicalMatrix9ToEulerDeg(m: number[]): [number, number, number
   return [toDeg(rx), toDeg(ry), toDeg(rz)];
 }
 
+export function generatePersistentPartGuid(seedPrefix: string = 'fpart'): string {
+  return `${seedPrefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+}
+
 export function extractCanonicalRotationMatrix9(part: any): number[] {
+  const rot = Array.isArray(part?.rotation) ? part.rotation : null;
+  let rx = 0, ry = 0, rz = 0;
+  let hasExplicitEuler = false;
+  if (rot && rot.length >= 3) {
+    rx = Number(rot[0] ?? 0);
+    ry = Number(rot[1] ?? 0);
+    rz = Number(rot[2] ?? 0);
+    if (Number.isFinite(rx) && Number.isFinite(ry) && Number.isFinite(rz)) {
+      hasExplicitEuler = true;
+    } else {
+      rx = 0; ry = 0; rz = 0;
+    }
+  }
   const rawMat = part?.rotationMatrix || part?.rotation_matrix || part?.cframeMatrix;
   if (Array.isArray(rawMat) && rawMat.length >= 9) {
     const out = rawMat.slice(0, 9).map((v: any) => Number(v));
     if (out.every((v: number) => Number.isFinite(v))) {
+      if (hasExplicitEuler) {
+        const derivedDeg = canonicalMatrix9ToEulerDeg(out);
+        if (
+          Math.abs(derivedDeg[0] - rx) > 0.05 ||
+          Math.abs(derivedDeg[1] - ry) > 0.05 ||
+          Math.abs(derivedDeg[2] - rz) > 0.05
+        ) {
+          return canonicalEulerToMatrix9(rx, ry, rz);
+        }
+      }
       return out;
     }
   }
-  const rot = Array.isArray(part?.rotation) ? part.rotation : [0, 0, 0];
-  const rx = Number(rot[0] ?? 0) || 0;
-  const ry = Number(rot[1] ?? 0) || 0;
-  const rz = Number(rot[2] ?? 0) || 0;
   return canonicalEulerToMatrix9(rx, ry, rz);
 }
 
@@ -185,6 +208,7 @@ export function normalizeHierarchyMetadata(
   partId: string;
   parentId: string;
   parentName: string;
+  parentContainerClass: 'Folder' | 'Model';
   hierarchyPath: string;
   hierarchySegments: string[];
 } {
@@ -196,6 +220,9 @@ export function normalizeHierarchyMetadata(
       .join('') || `MeshPart_${indexFallback + 1}`;
   const rawPartId = String(part?.partId || part?.part_id || part?.id || '').trim();
   const partId = rawPartId || `fpart_${cleanAlnum}`;
+  if (part && typeof part === 'object' && !rawPartId) {
+    part.partId = partId;
+  }
 
   const rawParent = String(part?.parentName || part?.parent_name || '').trim();
   const rawPath = String(part?.hierarchyPath || part?.hierarchy_path || '').trim();
@@ -277,17 +304,29 @@ export function normalizeHierarchyMetadata(
         .join('')
     )
     .join('_');
+  const expectedParentId = intermediateFolders.length > 0 ? `fnode_${parentClean}` : 'fnode_Root';
   const rawParentId = String(part?.parentId || part?.parent_id || '').trim();
-  const parentId =
+  let parentId: string;
+  if (intermediateFolders.length === 0) {
+    parentId = 'fnode_Root';
+  } else if (
     rawParentId &&
     rawParentId !== 'root' &&
     rawParentId !== 'fnode_Root' &&
-    rawParentId !== 'fnode_ModelRoot' &&
-    intermediateFolders.length > 0
-      ? rawParentId
-      : intermediateFolders.length > 0
-      ? `fnode_${parentClean}`
-      : 'fnode_Root';
+    rawParentId !== 'fnode_ModelRoot'
+  ) {
+    parentId = rawParentId.startsWith('fnode_') ? expectedParentId : rawParentId;
+  } else {
+    parentId = expectedParentId;
+  }
+
+  const rawContainerClass = String(
+    part?.parentContainerClass || part?.parent_container_class || ''
+  ).trim();
+  const parentContainerClass: 'Folder' | 'Model' =
+    rawContainerClass === 'Folder' || rawContainerClass === 'Model'
+      ? rawContainerClass
+      : 'Model';
 
   return {
     name: safeName,
@@ -295,16 +334,99 @@ export function normalizeHierarchyMetadata(
     partId,
     parentId,
     parentName,
+    parentContainerClass,
     hierarchyPath,
     hierarchySegments,
   };
 }
 
+export function validateHierarchyDag(
+  parts: any[],
+  modelName: string = ''
+): {
+  valid: boolean;
+  hasCycles: boolean;
+  cycles: string[][];
+  duplicatePartIds: string[];
+  errors: string[];
+} {
+  const parentMap = new Map<string, string>();
+  const partCounts = new Map<string, number>();
+  const errors: string[] = [];
+  const cycles: string[][] = [];
+
+  (parts || []).forEach((p, idx) => {
+    const rawPid = String(p?.partId || p?.part_id || '').trim();
+    const rawParentId = String(p?.parentId || p?.parent_id || '').trim();
+    const hier = normalizeHierarchyMetadata(p, idx, modelName);
+    const pid = rawPid || hier.partId;
+    const parentId =
+      rawParentId && rawParentId !== 'root' && rawParentId !== 'fnode_Root'
+        ? rawParentId
+        : hier.parentId;
+    partCounts.set(pid, (partCounts.get(pid) || 0) + 1);
+    parentMap.set(pid, parentId);
+    const segs = hier.hierarchySegments.slice(1, -1);
+    let prevNode = 'fnode_Root';
+    const accum: string[] = [];
+    for (const seg of segs) {
+      const cleanSeg = Array.from(seg)
+        .map((c) => (/[a-zA-Z0-9_]/.test(c) ? c : '_'))
+        .join('');
+      accum.push(cleanSeg);
+      const curNode = `fnode_${accum.join('_')}`;
+      if (curNode === prevNode) {
+        cycles.push([curNode, prevNode]);
+      } else if (!parentMap.has(curNode)) {
+        parentMap.set(curNode, prevNode);
+      }
+      prevNode = curNode;
+    }
+  });
+
+  const duplicatePartIds = Array.from(partCounts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([pid]) => pid);
+  if (duplicatePartIds.length > 0) {
+    errors.push(`IDs de piezas duplicados detectados: ${duplicatePartIds.join(', ')}`);
+  }
+
+  for (const startNode of Array.from(parentMap.keys())) {
+    const visitedOrder: string[] = [];
+    const visitedSet = new Set<string>();
+    let curr: string | undefined = startNode;
+    while (curr && curr !== 'fnode_Root' && curr !== 'fnode_ModelRoot' && curr !== 'root') {
+      if (visitedSet.has(curr)) {
+        const cycleIdx = visitedOrder.indexOf(curr);
+        const cyclePath = [...visitedOrder.slice(cycleIdx), curr];
+        if (!cycles.some((existing) => existing.join('->') === cyclePath.join('->'))) {
+          cycles.push(cyclePath);
+          errors.push(`Ciclo jerárquico detectado: ${cyclePath.join(' -> ')}`);
+        }
+        break;
+      }
+      visitedSet.add(curr);
+      visitedOrder.push(curr);
+      curr = parentMap.get(curr);
+    }
+  }
+
+  return {
+    valid: cycles.length === 0 && duplicatePartIds.length === 0,
+    hasCycles: cycles.length > 0,
+    cycles,
+    duplicatePartIds,
+    errors,
+  };
+}
+
 /**
  * Computes canonical `FORGE_SYNC_HASH_SCHEMA_V1` FNV-1a 32-bit hashes across:
- * 1. FULL geometry buffers (every vertex, normal, UV, and triangle index + meshId + geometrySource)
- * 2. Material & 4-channel PBR asset URIs
- * 3. Model-relative Transform (size, position, 9-component rotation matrix, hierarchyPath)
+ * 1. `geometryHash`: FULL geometry buffers (every vertex, normal, UV, and triangle index + meshId + geometrySource)
+ * 2. `materialHash`: Material, reflectance, transparency, roughness, metalness & 4-channel PBR asset URIs
+ * 3. `transformHash`: Model-relative Transform (size, position, 9-component rotation matrix, physical flags)
+ * 4. `hierarchyHash`: Parent container identity and canonical hierarchyPath
+ * 5. `combinedHash`: Deterministic combination of partId + all 4 domain hashes (+ 256-bit `integritySha256`)
  * Matches Python `AssetEngine.compute_part_sync_hashes` and Luau plugin byte-for-byte.
  */
 export function computePartSyncHashes(
@@ -317,14 +439,18 @@ export function computePartSyncHashes(
   partId: string;
   parentId: string;
   parentName: string;
+  parentContainerClass: 'Folder' | 'Model';
   hierarchyPath: string;
   hierarchySegments: string[];
   geometrySource: string;
   rotationMatrix: number[];
+  reflectance: number;
   geometryHash: string;
   materialHash: string;
   transformHash: string;
+  hierarchyHash: string;
   combinedHash: string;
+  integritySha256: string;
 } {
   const hier = normalizeHierarchyMetadata(part, indexFallback, modelName);
   const md = part?.meshData && typeof part.meshData === 'object' ? part.meshData : {};
@@ -417,9 +543,16 @@ export function computePartSyncHashes(
       : 0.6;
   const transVal =
     part?.transparency !== undefined && part?.transparency !== null ? part.transparency : 0;
+  const reflVal =
+    part?.reflectance !== undefined && part?.reflectance !== null
+      ? part.reflectance
+      : typeof pbr.reflectance === 'number'
+      ? pbr.reflectance
+      : 0;
   const roughStr = fmtCanonicalFixed(roughVal, 3);
   const metalStr = fmtCanonicalFixed(metalVal, 3);
   const transpStr = fmtCanonicalFixed(transVal, 3);
+  const reflStr = fmtCanonicalFixed(reflVal, 3);
   const cmap = validatePublishedRobloxMeshId(pbr.colorMapAssetId || pbr.color_map_asset_id || pbr.colorMapId);
   const nmap = validatePublishedRobloxMeshId(pbr.normalMapAssetId || pbr.normal_map_asset_id || pbr.normalMapId);
   const rmap = validatePublishedRobloxMeshId(pbr.roughnessMapAssetId || pbr.roughness_map_asset_id || pbr.roughnessMapId);
@@ -432,6 +565,7 @@ export function computePartSyncHashes(
     roughStr,
     metalStr,
     transpStr,
+    reflStr,
     cmap,
     nmap,
     rmap,
@@ -451,7 +585,6 @@ export function computePartSyncHashes(
   const transformTokens = [
     FORGE_SYNC_HASH_SCHEMA_V1,
     'xform',
-    hier.hierarchyPath,
     sizeStr,
     posStr,
     rotMatStr,
@@ -459,11 +592,28 @@ export function computePartSyncHashes(
     collStr,
     cfMode,
   ];
-  const transformHash = computeFnv1a32Hex(transformTokens.join('|'));
+  const transformSig = transformTokens.join('|');
+  const transformHash = computeFnv1a32Hex(transformSig);
 
-  const combinedHash = computeFnv1a32Hex(
-    `${FORGE_SYNC_HASH_SCHEMA_V1}|part|${hier.partId}|${hier.hierarchyPath}|${geometryHash}|${materialHash}|${transformHash}`
-  );
+  const hierarchyTokens = [
+    FORGE_SYNC_HASH_SCHEMA_V1,
+    'hier',
+    hier.parentId,
+    hier.parentName,
+    hier.hierarchyPath,
+  ];
+  const hierarchySig = hierarchyTokens.join('|');
+  const hierarchyHash = computeFnv1a32Hex(hierarchySig);
+
+  const combinedSig = `${FORGE_SYNC_HASH_SCHEMA_V1}|part|${hier.partId}|${geometryHash}|${materialHash}|${transformHash}|${hierarchyHash}`;
+  const combinedHash = computeFnv1a32Hex(combinedSig);
+  const geomSig = geomTokens.join('|');
+  const matSig = matTokens.join('|');
+  const integritySha256 = crypto
+    .createHash('sha256')
+    .update(`${geomSig}\n${matSig}\n${transformSig}\n${hierarchySig}\n${combinedSig}`, 'utf-8')
+    .digest('hex')
+    .slice(0, 32);
 
   return {
     schemaVersion: FORGE_SYNC_HASH_SCHEMA_V1,
@@ -471,14 +621,18 @@ export function computePartSyncHashes(
     partId: hier.partId,
     parentId: hier.parentId,
     parentName: hier.parentName,
+    parentContainerClass: hier.parentContainerClass,
     hierarchyPath: hier.hierarchyPath,
     hierarchySegments: hier.hierarchySegments,
     geometrySource,
     rotationMatrix: rotMat9.map((c) => Number(fmtCanonicalFixed(c, 6))),
+    reflectance: Number(fmtCanonicalFixed(reflVal, 4)),
     geometryHash,
     materialHash,
     transformHash,
+    hierarchyHash,
     combinedHash,
+    integritySha256,
   };
 }
 
@@ -501,18 +655,22 @@ export function normalizePartsWithSyncMetadata(parts: any[], modelName: string =
       partId: syncMeta.partId,
       parentId: syncMeta.parentId,
       parentName: syncMeta.parentName,
+      parentContainerClass: syncMeta.parentContainerClass,
       hierarchyPath: syncMeta.hierarchyPath,
       hierarchySegments: syncMeta.hierarchySegments,
       geometrySource: syncMeta.geometrySource,
       rotationMatrix: syncMeta.rotationMatrix,
       rotation: existingRot,
+      reflectance: syncMeta.reflectance,
       color: normalizeColorRgb255(p?.color),
       schemaVersion: syncMeta.schemaVersion,
       hashSchemaVersion: syncMeta.hashSchemaVersion,
       geometryHash: syncMeta.geometryHash,
       materialHash: syncMeta.materialHash,
       transformHash: syncMeta.transformHash,
+      hierarchyHash: syncMeta.hierarchyHash,
       combinedHash: syncMeta.combinedHash,
+      integritySha256: syncMeta.integritySha256,
     };
   });
 }
@@ -534,6 +692,7 @@ export function computeAssetSnapshotSha256(asset: any): string {
       g: hashes.geometryHash,
       m: hashes.materialHash,
       t: hashes.transformHash,
+      h: hashes.hierarchyHash,
     };
   });
   const canonical = JSON.stringify({
@@ -547,7 +706,8 @@ export function computeAssetSnapshotSha256(asset: any): string {
 /**
  * Compares the web editor asset (`forgeAssetOrParts`) against a live Roblox Studio DataModel part list
  * (`studioParts`) using stable `partId` (`ForgePartId`) identifiers, reporting exact differences
- * across geometry, transformations, hierarchies, materials, duplicate IDs, and 3-way conflicts.
+ * across geometry, transformations, hierarchies, materials, duplicate IDs, hierarchy cycles,
+ * granular incremental operations, and 3-way conflicts.
  */
 export function computeDataModelSyncDiffServer(
   forgeAssetOrParts: any,
@@ -577,6 +737,12 @@ export function computeDataModelSyncDiffServer(
   has_duplicate_ids: boolean;
   hasDuplicateIds: boolean;
   hasDuplicateStudioIds: boolean;
+  has_hierarchy_cycles: boolean;
+  hasHierarchyCycles: boolean;
+  hierarchy_cycles: string[][];
+  hierarchyCycles: string[][];
+  deleted_parent_ids: string[];
+  deletedParentIds: string[];
   duplicate_studio_part_ids: string[];
   duplicateStudioPartIds: string[];
   duplicate_forge_part_ids: string[];
@@ -603,6 +769,8 @@ export function computeDataModelSyncDiffServer(
   modifiedTransform: string[];
   modifiedHierarchy: string[];
   modifiedMaterial: string[];
+  incremental_operations: Array<any>;
+  incrementalOperations: Array<any>;
   conflicts: Array<any>;
   part_diffs: Array<any>;
   partDiffs: Array<any>;
@@ -627,6 +795,8 @@ export function computeDataModelSyncDiffServer(
     : Array.isArray(forgeAssetOrParts?.parts)
     ? forgeAssetOrParts.parts
     : [];
+  const forgeDag = validateHierarchyDag(rawForgeParts, modelName);
+  const studioDag = validateHierarchyDag(studioParts || [], modelName);
   const forgeParts = normalizePartsWithSyncMetadata(rawForgeParts, modelName);
   const normStudio = normalizePartsWithSyncMetadata(studioParts || [], modelName);
 
@@ -697,9 +867,24 @@ export function computeDataModelSyncDiffServer(
   const modifiedTransform: string[] = [];
   const modifiedHierarchy: string[] = [];
   const modifiedMaterial: string[] = [];
+  const incrementalOperations: Array<any> = [];
   const conflicts: Array<any> = [];
   const partDiffs: Array<any> = [];
   let matchingPartsCount = 0;
+
+  const forgeParentIds = new Set<string>(['fnode_Root', 'fnode_ModelRoot', 'root']);
+  for (const fp of forgeParts) {
+    forgeParentIds.add(String(fp.partId || ''));
+    if (fp.parentId) forgeParentIds.add(String(fp.parentId));
+  }
+  const studioParentIds = new Set<string>(['fnode_Root', 'fnode_ModelRoot', 'root']);
+  for (const sp of normStudio) {
+    studioParentIds.add(String(sp.partId || ''));
+    if (sp.parentId) studioParentIds.add(String(sp.parentId));
+  }
+  const deletedParentIds = Array.from(forgeParentIds).filter(
+    (pid) => pid && !studioParentIds.has(pid) && pid.startsWith('fnode_')
+  );
 
   for (const sp of normStudio) {
     let fp = forgeById.get(String(sp.partId));
@@ -712,10 +897,18 @@ export function computeDataModelSyncDiffServer(
 
     if (!fp) {
       addedInStudio.push(sp.name);
+      incrementalOperations.push({
+        op: 'add',
+        partId: sp.partId,
+        name: sp.name,
+        parentId: sp.parentId,
+        hierarchyPath: sp.hierarchyPath,
+      });
       partDiffs.push({
         partId: sp.partId,
         name: sp.name,
         status: 'added_in_studio',
+        operations: ['add'],
         geometryMatch: false,
         transformMatch: false,
         hierarchyMatch: false,
@@ -724,6 +917,7 @@ export function computeDataModelSyncDiffServer(
           geometryHash: sp.geometryHash,
           transformHash: sp.transformHash,
           materialHash: sp.materialHash,
+          hierarchyHash: sp.hierarchyHash,
           parentName: sp.parentName,
           hierarchyPath: sp.hierarchyPath,
         },
@@ -737,51 +931,116 @@ export function computeDataModelSyncDiffServer(
       fp.geometryHash === sp.geometryHash || spGeomSource === 'StudioExternalUnreadable';
     const transformMatch = fp.transformHash === sp.transformHash;
     const hierarchyMatch =
-      fp.hierarchyPath === sp.hierarchyPath && fp.parentName === sp.parentName;
+      fp.hierarchyHash === sp.hierarchyHash &&
+      fp.hierarchyPath === sp.hierarchyPath &&
+      fp.parentName === sp.parentName;
     const materialMatch = fp.materialHash === sp.materialHash;
 
     const changes: string[] = [];
+    const partOps: string[] = [];
     if (!geometryMatch) {
       modifiedGeometry.push(fp.name);
       changes.push('geometry');
+      partOps.push('update_geometry');
+      incrementalOperations.push({
+        op: 'update_geometry',
+        partId: fp.partId,
+        name: fp.name,
+      });
     }
     if (!transformMatch) {
       modifiedTransform.push(fp.name);
       changes.push('transform');
+      partOps.push('update_transform');
+      incrementalOperations.push({
+        op: 'update_transform',
+        partId: fp.partId,
+        name: fp.name,
+      });
     }
     if (!hierarchyMatch) {
       modifiedHierarchy.push(fp.name);
-      if (!changes.includes('transform')) changes.push('transform');
       changes.push('hierarchy');
+      partOps.push('update_hierarchy');
+      incrementalOperations.push({
+        op: 'update_hierarchy',
+        partId: fp.partId,
+        name: fp.name,
+        fromHierarchyPath: fp.hierarchyPath,
+        toHierarchyPath: sp.hierarchyPath,
+      });
     }
     if (!materialMatch) {
       modifiedMaterial.push(fp.name);
       changes.push('material');
+      partOps.push('update_material');
+      incrementalOperations.push({
+        op: 'update_material',
+        partId: fp.partId,
+        name: fp.name,
+      });
     }
 
     const allMatch = geometryMatch && transformMatch && hierarchyMatch && materialMatch;
     if (allMatch) {
       matchingPartsCount++;
       unchangedParts.push(fp.name);
+      partOps.push('unchanged');
+      incrementalOperations.push({
+        op: 'unchanged',
+        partId: fp.partId,
+        name: fp.name,
+      });
     }
 
     let partConflict: any = null;
     if (!allMatch && forgeModifiedSinceBaseline) {
       const bp = baselinePartMap.get(String(fp.partId)) || baselinePartMap.get(String(fp.name));
       if (bp) {
-        const forgeChangedFromBase =
-          bp.geometryHash !== fp.geometryHash ||
-          bp.materialHash !== fp.materialHash ||
-          bp.transformHash !== fp.transformHash;
-        const studioChangedFromBase =
-          bp.geometryHash !== sp.geometryHash ||
-          bp.materialHash !== sp.materialHash ||
-          bp.transformHash !== sp.transformHash;
-        if (forgeChangedFromBase && studioChangedFromBase) {
+        const forgeChangedFields: string[] = [];
+        const studioChangedFields: string[] = [];
+        if (bp.geometryHash !== fp.geometryHash) forgeChangedFields.push('geometry');
+        if (bp.materialHash !== fp.materialHash) forgeChangedFields.push('material');
+        if (bp.transformHash !== fp.transformHash) forgeChangedFields.push('transform');
+        if (bp.hierarchyHash !== fp.hierarchyHash) forgeChangedFields.push('hierarchy');
+
+        if (bp.geometryHash !== sp.geometryHash && spGeomSource !== 'StudioExternalUnreadable') {
+          studioChangedFields.push('geometry');
+        }
+        if (bp.materialHash !== sp.materialHash) studioChangedFields.push('material');
+        if (bp.transformHash !== sp.transformHash) studioChangedFields.push('transform');
+        if (bp.hierarchyHash !== sp.hierarchyHash) studioChangedFields.push('hierarchy');
+
+        if (forgeChangedFields.length > 0 && studioChangedFields.length > 0) {
           partConflict = {
             partId: fp.partId,
             name: fp.name,
             changes,
+            modified_fields: {
+              forge: forgeChangedFields,
+              studio: studioChangedFields,
+              overlapping: forgeChangedFields.filter((f) => studioChangedFields.includes(f)),
+            },
+            last_known_common_version: {
+              snapshotSha256: baselineSha,
+              geometryHash: bp.geometryHash,
+              materialHash: bp.materialHash,
+              transformHash: bp.transformHash,
+              hierarchyHash: bp.hierarchyHash,
+            },
+            forge_version: {
+              snapshotSha256: currentForgeSha,
+              geometryHash: fp.geometryHash,
+              materialHash: fp.materialHash,
+              transformHash: fp.transformHash,
+              hierarchyHash: fp.hierarchyHash,
+            },
+            studio_version: {
+              geometryHash: sp.geometryHash,
+              materialHash: sp.materialHash,
+              transformHash: sp.transformHash,
+              hierarchyHash: sp.hierarchyHash,
+            },
             hasConflict: true,
             reason: 'both_modified_since_baseline',
             baselineSha256: baselineSha,
@@ -794,6 +1053,25 @@ export function computeDataModelSyncDiffServer(
           partId: fp.partId,
           name: fp.name,
           changes,
+          modified_fields: {
+            forge: changes,
+            studio: changes,
+            overlapping: changes,
+          },
+          last_known_common_version: { snapshotSha256: baselineSha },
+          forge_version: {
+            snapshotSha256: currentForgeSha,
+            geometryHash: fp.geometryHash,
+            materialHash: fp.materialHash,
+            transformHash: fp.transformHash,
+            hierarchyHash: fp.hierarchyHash,
+          },
+          studio_version: {
+            geometryHash: sp.geometryHash,
+            materialHash: sp.materialHash,
+            transformHash: sp.transformHash,
+            hierarchyHash: sp.hierarchyHash,
+          },
           hasConflict: true,
           reason: 'baseline_mismatch_concurrent_edit',
           baselineSha256: baselineSha,
@@ -807,6 +1085,7 @@ export function computeDataModelSyncDiffServer(
       geometryHash: fp.geometryHash,
       transformHash: fp.transformHash,
       materialHash: fp.materialHash,
+      hierarchyHash: fp.hierarchyHash,
       parentName: fp.parentName,
       hierarchyPath: fp.hierarchyPath,
     };
@@ -814,6 +1093,7 @@ export function computeDataModelSyncDiffServer(
       geometryHash: sp.geometryHash,
       transformHash: sp.transformHash,
       materialHash: sp.materialHash,
+      hierarchyHash: sp.hierarchyHash,
       parentName: sp.parentName,
       hierarchyPath: sp.hierarchyPath,
     };
@@ -823,6 +1103,7 @@ export function computeDataModelSyncDiffServer(
         partId: fp.partId,
         name: fp.name,
         changes,
+        operations: partOps,
         hasConflict: Boolean(partConflict),
         forgeHashes: forgeHashesObj,
         studioHashes: studioHashesObj,
@@ -833,6 +1114,7 @@ export function computeDataModelSyncDiffServer(
       partId: fp.partId,
       name: fp.name,
       status: partConflict ? 'conflict' : allMatch ? 'in_sync' : 'modified',
+      operations: partOps,
       geometryMatch,
       transformMatch,
       hierarchyMatch,
@@ -852,10 +1134,17 @@ export function computeDataModelSyncDiffServer(
       if (isExplicitDelete) {
         explicitDeletedParts.push(fp.name);
         removedInStudio.push(fp.name);
+        incrementalOperations.push({
+          op: 'delete',
+          partId: fp.partId,
+          name: fp.name,
+          explicit: true,
+        });
         partDiffs.push({
           partId: fp.partId,
           name: fp.name,
           status: 'explicitly_deleted_in_studio',
+          operations: ['delete'],
           geometryMatch: false,
           transformMatch: false,
           hierarchyMatch: false,
@@ -864,6 +1153,7 @@ export function computeDataModelSyncDiffServer(
             geometryHash: fp.geometryHash,
             transformHash: fp.transformHash,
             materialHash: fp.materialHash,
+            hierarchyHash: fp.hierarchyHash,
             parentName: fp.parentName,
             hierarchyPath: fp.hierarchyPath,
           },
@@ -872,10 +1162,17 @@ export function computeDataModelSyncDiffServer(
         unchangedOmittedInSelection.push(fp.name);
         unchangedParts.push(fp.name);
         matchingPartsCount++;
+        incrementalOperations.push({
+          op: 'unchanged',
+          partId: fp.partId,
+          name: fp.name,
+          omittedInSelection: true,
+        });
         partDiffs.push({
           partId: fp.partId,
           name: fp.name,
           status: 'omitted_in_selection',
+          operations: ['unchanged'],
           geometryMatch: true,
           transformMatch: true,
           hierarchyMatch: true,
@@ -884,16 +1181,24 @@ export function computeDataModelSyncDiffServer(
             geometryHash: fp.geometryHash,
             transformHash: fp.transformHash,
             materialHash: fp.materialHash,
+            hierarchyHash: fp.hierarchyHash,
             parentName: fp.parentName,
             hierarchyPath: fp.hierarchyPath,
           },
         });
       } else {
         removedInStudio.push(fp.name);
+        incrementalOperations.push({
+          op: 'delete',
+          partId: fp.partId,
+          name: fp.name,
+          explicit: false,
+        });
         partDiffs.push({
           partId: fp.partId,
           name: fp.name,
           status: 'missing_in_studio',
+          operations: ['delete'],
           geometryMatch: false,
           transformMatch: false,
           hierarchyMatch: false,
@@ -902,6 +1207,7 @@ export function computeDataModelSyncDiffServer(
             geometryHash: fp.geometryHash,
             transformHash: fp.transformHash,
             materialHash: fp.materialHash,
+            hierarchyHash: fp.hierarchyHash,
             parentName: fp.parentName,
             hierarchyPath: fp.hierarchyPath,
           },
@@ -910,10 +1216,13 @@ export function computeDataModelSyncDiffServer(
     }
   }
 
+  const allHierarchyCycles = [...forgeDag.cycles, ...studioDag.cycles];
+  const hasHierarchyCycles = allHierarchyCycles.length > 0;
   const hasDuplicateIds =
     duplicateStudioPartIds.length > 0 || duplicateForgePartIds.length > 0;
   const inSync =
     !hasDuplicateIds &&
+    !hasHierarchyCycles &&
     conflicts.length === 0 &&
     addedInStudio.length === 0 &&
     removedInStudio.length === 0 &&
@@ -933,6 +1242,12 @@ export function computeDataModelSyncDiffServer(
     has_duplicate_ids: hasDuplicateIds,
     hasDuplicateIds,
     hasDuplicateStudioIds: duplicateStudioPartIds.length > 0,
+    has_hierarchy_cycles: hasHierarchyCycles,
+    hasHierarchyCycles,
+    hierarchy_cycles: allHierarchyCycles,
+    hierarchyCycles: allHierarchyCycles,
+    deleted_parent_ids: deletedParentIds,
+    deletedParentIds,
     duplicate_studio_part_ids: duplicateStudioPartIds,
     duplicateStudioPartIds,
     duplicate_forge_part_ids: duplicateForgePartIds,
@@ -959,6 +1274,8 @@ export function computeDataModelSyncDiffServer(
     modifiedTransform,
     modifiedHierarchy,
     modifiedMaterial,
+    incremental_operations: incrementalOperations,
+    incrementalOperations,
     conflicts,
     part_diffs: partDiffs,
     partDiffs,
@@ -1635,11 +1952,14 @@ export function buildRbxmxFromPartsServer(
       partId: syncMeta.partId,
       parentId: syncMeta.parentId,
       parentName: syncMeta.parentName,
+      parentContainerClass: syncMeta.parentContainerClass,
       hierarchyPath: syncMeta.hierarchyPath,
       geometrySource: syncMeta.geometrySource,
       geometryHash: syncMeta.geometryHash,
       materialHash: syncMeta.materialHash,
       transformHash: syncMeta.transformHash,
+      hierarchyHash: syncMeta.hierarchyHash,
+      combinedHash: syncMeta.combinedHash,
       publishedMeshId: validMeshId || undefined,
       meshId: validMeshId || undefined,
       textureId: validTexId || undefined,
@@ -1655,12 +1975,18 @@ export function buildRbxmxFromPartsServer(
       material: p.material,
       roughness: p.roughness,
       metalness: p.metalness,
+      reflectance: syncMeta.reflectance,
       transparency: p.transparency,
       canCollide: p.canCollide,
       anchored: p.anchored,
       collisionFidelity: p.collisionFidelity || collisionFidelity,
       pbrMaterial: (p as any).pbrMaterial || undefined,
     });
+
+    const reflFloat =
+      (p as any).reflectance !== undefined && (p as any).reflectance !== null
+        ? Number((p as any).reflectance)
+        : Number(p.metalness ?? 0.5) * 0.35;
 
     return [
       `${indent}<Item class="MeshPart" referent="${refId}">`,
@@ -1672,7 +1998,7 @@ export function buildRbxmxFromPartsServer(
       `${indent}    <token name="RenderFidelity">1</token>`,
       `${indent}    <token name="Material">${matToken}</token>`,
       `${indent}    <float name="Transparency">${Number(p.transparency ?? 0).toFixed(3)}</float>`,
-      `${indent}    <float name="Reflectance">${(Number(p.metalness ?? 0.5) * 0.35).toFixed(3)}</float>`,
+      `${indent}    <float name="Reflectance">${reflFloat.toFixed(3)}</float>`,
       `${indent}    <Color3 name="Color3uint8">`,
       `${indent}      <R>${(cr / 255).toFixed(4)}</R>`,
       `${indent}      <G>${(cg / 255).toFixed(4)}</G>`,
@@ -1765,6 +2091,7 @@ export function buildRbxmxFromPartsServer(
     name: string;
     path: string;
     nodeId: string;
+    containerClass: 'Folder' | 'Model';
     children: Map<string, HierarchyTreeNode>;
     parts: Array<{ part: MeshPartInput; idx: number }>;
   }
@@ -1773,6 +2100,7 @@ export function buildRbxmxFromPartsServer(
     name: 'ModelRoot',
     path: 'ModelRoot',
     nodeId: 'fnode_ModelRoot',
+    containerClass: 'Model',
     children: new Map(),
     parts: [],
   };
@@ -1787,21 +2115,30 @@ export function buildRbxmxFromPartsServer(
     } else {
       let curr = rootTree;
       let accum = '';
-      for (const seg of parentSegs) {
+      parentSegs.forEach((seg, segIdx) => {
         accum = accum ? `${accum}/${seg}` : seg;
         let nextNode = curr.children.get(seg);
+        const isDirectParent = segIdx === parentSegs.length - 1;
+        const desiredClass: 'Folder' | 'Model' = isDirectParent
+          ? hier.parentContainerClass
+          : seg.toLowerCase().includes('folder') || seg.toLowerCase().includes('group')
+          ? 'Folder'
+          : 'Model';
         if (!nextNode) {
           nextNode = {
             name: seg,
             path: accum,
             nodeId: `fnode_${accum.replace(/[^a-zA-Z0-9_]/g, '_')}`,
+            containerClass: desiredClass,
             children: new Map(),
             parts: [],
           };
           curr.children.set(seg, nextNode);
+        } else if (isDirectParent && hier.parentContainerClass === 'Folder') {
+          nextNode.containerClass = 'Folder';
         }
         curr = nextNode;
-      }
+      });
       curr.parts.push({ part: p, idx });
     }
   });
@@ -1815,7 +2152,7 @@ export function buildRbxmxFromPartsServer(
       containerCounter++;
       const refContainer = `RBX_CONTAINER_${childNode.nodeId}_${containerCounter}`;
       lines.push(
-        `${indent}<Item class="Model" referent="${refContainer}">`,
+        `${indent}<Item class="${childNode.containerClass}" referent="${refContainer}">`,
         `${indent}  <Properties>`,
         `${indent}    <string name="Name">${escapeXmlServer(childNode.name)}</string>`,
         `${indent}  </Properties>`,
@@ -1935,6 +2272,7 @@ export function parseRbxmxFromPartsServer(
   const itemTagRegex = /<\/?Item(?:\s+class="([^"]+)"[^>]*)?>/gi;
   const containerStack: Array<{ cls: string; name: string }> = [];
   const inferredParentAtOffset = new Map<number, string>();
+  const inferredParentClassAtOffset = new Map<number, 'Folder' | 'Model'>();
 
   const parts: MeshPartInput[] = [];
   const startRegex = /<Item\s+class="(MeshPart|Part|WedgePart|CornerWedgePart|TrussPart)"[^>]*>/gi;
@@ -1957,13 +2295,20 @@ export function parseRbxmxFromPartsServer(
       const nm = snippet.match(/<Properties>\s*<string\s+name="Name">([^<]+)<\/string>/i)?.[1];
       const itemName = nm ? unescapeXmlServer(nm.trim()) : cls;
       if (startSet.has(tagIdx)) {
-        const containerSegs = containerStack
-          .filter((c, cIdx) => (c.cls === 'Model' || c.cls === 'Folder') && !(cIdx === 0 && c.name === modelName))
+        const containerEntries = containerStack.filter(
+          (c, cIdx) => (c.cls === 'Model' || c.cls === 'Folder') && !(cIdx === 0 && c.name === modelName)
+        );
+        const containerSegs = containerEntries
           .map((c) => c.name)
           .filter((n) => n && n !== 'ModelRoot');
         inferredParentAtOffset.set(
           tagIdx,
           containerSegs.length > 0 ? containerSegs.join('/') : 'ModelRoot'
+        );
+        const lastContainer = containerEntries[containerEntries.length - 1];
+        inferredParentClassAtOffset.set(
+          tagIdx,
+          lastContainer?.cls === 'Folder' ? 'Folder' : 'Model'
         );
       }
       containerStack.push({ cls, name: itemName });
@@ -1997,6 +2342,9 @@ export function parseRbxmxFromPartsServer(
     parentName = parentName
       ? unescapeXmlServer(parentName.trim())
       : inferredParentAtOffset.get(startIdx) || 'ModelRoot';
+
+    let parentContainerClass: 'Folder' | 'Model' =
+      inferredParentClassAtOffset.get(startIdx) || 'Model';
 
     let hierarchyPath =
       block.match(
@@ -2048,7 +2396,7 @@ export function parseRbxmxFromPartsServer(
       'Hull';
 
     const transparency = Number(block.match(/<float\s+name="Transparency">([^<]+)<\/float>/i)?.[1] ?? 0);
-    const reflectance = Number(block.match(/<float\s+name="Reflectance">([^<]+)<\/float>/i)?.[1] ?? 0.21);
+    let reflectance = Number(block.match(/<float\s+name="Reflectance">([^<]+)<\/float>/i)?.[1] ?? 0);
     const anchored = (block.match(/<bool\s+name="Anchored">([^<]+)<\/bool>/i)?.[1] ?? 'true') !== 'false';
     const canCollide = (block.match(/<bool\s+name="CanCollide">([^<]+)<\/bool>/i)?.[1] ?? 'true') !== 'false';
 
@@ -2099,6 +2447,12 @@ export function parseRbxmxFromPartsServer(
           if (typeof parsedGeom.parentId === 'string' && parsedGeom.parentId) parentId = parsedGeom.parentId;
           if (typeof parsedGeom.parentName === 'string' && parsedGeom.parentName)
             parentName = parsedGeom.parentName;
+          if (
+            parsedGeom.parentContainerClass === 'Folder' ||
+            parsedGeom.parentContainerClass === 'Model'
+          ) {
+            parentContainerClass = parsedGeom.parentContainerClass;
+          }
           if (typeof parsedGeom.hierarchyPath === 'string' && parsedGeom.hierarchyPath)
             hierarchyPath = parsedGeom.hierarchyPath;
           if (typeof parsedGeom.geometrySource === 'string' && parsedGeom.geometrySource)
@@ -2109,6 +2463,7 @@ export function parseRbxmxFromPartsServer(
           if (jsonTexId && !textureId) textureId = jsonTexId;
           if (typeof parsedGeom.roughness === 'number') roughness = parsedGeom.roughness;
           if (typeof parsedGeom.metalness === 'number') metalness = parsedGeom.metalness;
+          if (typeof parsedGeom.reflectance === 'number') reflectance = parsedGeom.reflectance;
           if (typeof parsedGeom.material === 'string') material = parsedGeom.material;
           if (Array.isArray(parsedGeom.rotationMatrix) && parsedGeom.rotationMatrix.length === 9) {
             rotationMatrix = parsedGeom.rotationMatrix.map((n: any) => Number(n));
@@ -2174,6 +2529,7 @@ export function parseRbxmxFromPartsServer(
       partId,
       parentId,
       parentName: parentName || 'ModelRoot',
+      parentContainerClass,
       hierarchyPath,
       name: partName,
       shape: 'MeshPart',
@@ -2189,6 +2545,7 @@ export function parseRbxmxFromPartsServer(
       material,
       roughness,
       metalness,
+      reflectance: Number(reflectance.toFixed(3)),
       transparency: Number(transparency.toFixed(3)),
       canCollide,
       anchored,
@@ -2202,12 +2559,16 @@ export function parseRbxmxFromPartsServer(
       partId: syncHashes.partId,
       parentId: syncHashes.parentId,
       parentName: syncHashes.parentName,
+      parentContainerClass: syncHashes.parentContainerClass,
       hierarchyPath: syncHashes.hierarchyPath,
       geometrySource: syncHashes.geometrySource,
       rotationMatrix: syncHashes.rotationMatrix,
+      reflectance: syncHashes.reflectance,
       geometryHash: syncHashes.geometryHash,
       materialHash: syncHashes.materialHash,
       transformHash: syncHashes.transformHash,
+      hierarchyHash: syncHashes.hierarchyHash,
+      combinedHash: syncHashes.combinedHash,
     } as MeshPartInput);
   }
 

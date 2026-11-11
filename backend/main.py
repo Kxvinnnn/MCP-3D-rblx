@@ -1556,9 +1556,18 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
     else:
         sync_scope = "selection"
 
-    conflict_policy = str(payload_body.get("conflict_policy") or "smart_merge").strip()
-    if conflict_policy not in ("reject", "smart_merge", "prefer_studio", "prefer_forge"):
-        conflict_policy = "smart_merge"
+    raw_policy = str(payload_body.get("conflict_policy") or "smart_merge").strip().lower()
+    policy_alias_map = {
+        "keep_forge": "keep_forge",
+        "prefer_forge": "keep_forge",
+        "accept_studio": "accept_studio",
+        "prefer_studio": "accept_studio",
+        "smart_merge": "smart_merge",
+        "manual_resolution": "manual_resolution",
+        "reject": "manual_resolution",
+        "abort_on_conflict": "manual_resolution",
+    }
+    conflict_policy = policy_alias_map.get(raw_policy, "smart_merge")
     merge_mode = str(payload_body.get("merge_mode") or ("replace" if sync_scope == "full_model" else "incremental"))
 
     if not isinstance(incoming_parts, list) or (len(incoming_parts) == 0 and len(explicit_delete_set) == 0):
@@ -1585,7 +1594,9 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
         inc = dict(raw_inc)
         inc_id = str(inc.get("partId") or inc.get("id") or "").strip()
         pname = str(inc.get("name") or f"MeshPart_{idx + 1}").strip()
-        matched_existing = (existing_by_id.get(inc_id) if inc_id else None) or existing_by_name.get(pname)
+        matched_existing = (existing_by_id.get(inc_id) if inc_id else None) or (
+            existing_by_name.get(pname) if not inc_id else None
+        )
 
         inc_md = inc.get("meshData") if isinstance(inc.get("meshData"), dict) else None
         has_inc_buffers = bool(
@@ -1660,11 +1671,23 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
             "sync_diff": sync_diff,
         }
 
+    # 1b. Reject circular hierarchy cycles
+    if sync_diff.get("has_hierarchy_cycles"):
+        return {
+            "success": False,
+            "status": "hierarchy_cycle_detected",
+            "error": "Push rechazado: se detectaron ciclos circulares en la jerarquía de contenedores.",
+            "studio_hierarchy_cycles": sync_diff.get("studio_hierarchy_cycles", []),
+            "forge_hierarchy_cycles": sync_diff.get("forge_hierarchy_cycles", []),
+            "sync_diff": sync_diff,
+        }
+
     # 2. Enforce conflict policy when 3-way conflicts exist
-    if sync_diff.get("has_conflicts") and conflict_policy == "reject":
+    if sync_diff.get("has_conflicts") and conflict_policy == "manual_resolution":
         return {
             "success": False,
             "status": "conflict_detected",
+            "conflict_policy": raw_policy,
             "error": "Push rechazado por política de conflictos: el modelo cambió tanto en Forge como en Studio desde el último snapshot base.",
             "conflicts": sync_diff.get("conflicts", []),
             "sync_diff": sync_diff,
@@ -1687,17 +1710,19 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
             pname = str(inc.get("name") or f"MeshPart_{idx + 1}")
             if inc_id in explicit_delete_set or pname in explicit_delete_set:
                 continue
-            f_part = existing_by_id.get(inc_id) or existing_by_name.get(pname)
+            f_part = existing_by_id.get(inc_id) or (existing_by_name.get(pname) if not inc_id else None)
             resolved_id = inc_id or (str(f_part.get("partId")) if f_part else f"forge-part-{idx + 1}-{pname.lower()}")
             seen_ids.add(resolved_id)
             seen_names.add(pname)
+            if f_part and f_part.get("name"):
+                seen_names.add(str(f_part.get("name")))
 
             if not f_part:
                 merged_parts.append(inc)
                 continue
 
             has_conflict = resolved_id in conflict_by_id
-            if has_conflict and conflict_policy == "prefer_forge":
+            if has_conflict and conflict_policy == "keep_forge":
                 merged_parts.append(f_part)
                 continue
 
@@ -1707,13 +1732,17 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
                 studio_geom_changed = inc.get("geometryHash") != b_part.get("geometryHash")
                 studio_mat_changed = inc.get("materialHash") != b_part.get("materialHash")
                 studio_trans_changed = inc.get("transformHash") != b_part.get("transformHash")
+                studio_hier_changed = inc.get("hierarchyHash") != b_part.get("hierarchyHash")
+                studio_name_changed = inc.get("name") != b_part.get("name")
+                resolved_name = pname if studio_name_changed else str(f_part.get("name") or pname)
                 merged_part = {
                     **f_part,
                     "partId": resolved_id,
-                    "name": pname,
-                    "parentId": inc.get("parentId") if studio_trans_changed else f_part.get("parentId"),
-                    "parentName": inc.get("parentName") if studio_trans_changed else f_part.get("parentName", "Root"),
-                    "hierarchyPath": inc.get("hierarchyPath") if studio_trans_changed else f_part.get("hierarchyPath", pname),
+                    "name": resolved_name,
+                    "parentId": inc.get("parentId") if studio_hier_changed else f_part.get("parentId"),
+                    "parentName": inc.get("parentName") if studio_hier_changed else f_part.get("parentName", "Root"),
+                    "parentContainerClass": inc.get("parentContainerClass") if studio_hier_changed else f_part.get("parentContainerClass", "Model"),
+                    "hierarchyPath": inc.get("hierarchyPath") if studio_hier_changed else f_part.get("hierarchyPath", f"Root/{resolved_name}"),
                     "size": inc.get("size") if studio_trans_changed else f_part.get("size", [2.0, 2.0, 2.0]),
                     "position": inc.get("position") if studio_trans_changed else f_part.get("position", [0.0, 1.0, 0.0]),
                     "rotation": inc.get("rotation") if studio_trans_changed else f_part.get("rotation", [0.0, 0.0, 0.0]),
@@ -1723,6 +1752,7 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
                     "roughness": float(inc.get("roughness", 0.35)) if studio_mat_changed else float(f_part.get("roughness", 0.35)),
                     "metalness": float(inc.get("metalness", 0.65)) if studio_mat_changed else float(f_part.get("metalness", 0.65)),
                     "transparency": float(inc.get("transparency", 0.0)) if studio_mat_changed else float(f_part.get("transparency", 0.0)),
+                    "reflectance": float(inc.get("reflectance", 0.0)) if studio_mat_changed else float(f_part.get("reflectance", 0.0)),
                     "pbrMaterial": (inc.get("pbrMaterial") or f_part.get("pbrMaterial")) if studio_mat_changed else f_part.get("pbrMaterial"),
                     "meshId": inc.get("meshId") if studio_geom_changed else f_part.get("meshId"),
                     "assetId": inc.get("assetId") if studio_geom_changed else f_part.get("assetId"),
@@ -1738,6 +1768,7 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
                     "partId": resolved_id,
                     "name": pname,
                     "parentName": str(inc.get("parentName") or f_part.get("parentName") or "Root"),
+                    "parentContainerClass": str(inc.get("parentContainerClass") or f_part.get("parentContainerClass") or "Model"),
                     "hierarchyPath": str(inc.get("hierarchyPath") or f_part.get("hierarchyPath") or pname),
                     "shape": "MeshPart",
                     "meshData": inc.get("meshData") if inc.get("meshData") is not None else f_part.get("meshData"),

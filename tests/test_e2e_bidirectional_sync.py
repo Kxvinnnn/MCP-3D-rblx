@@ -750,6 +750,562 @@ console.log(JSON.stringify({
             backend_main.RUNTIME_CONFIG["rojo_project_path"] = old_rojo_path
 
 
+def _build_valid_test_png_bytes(r: int, g: int, b: int, a: int = 255) -> str:
+    """Builds a valid 4x4 8-bit RGBA PNG encoded as a data:image/png;base64 URL."""
+    import base64
+    import struct
+    import zlib
+
+    width, height = 4, 4
+    raw_rows = b""
+    for _ in range(height):
+        raw_rows += b"\x00" + bytes([r, g, b, a]) * width
+
+    def _chunk(c_type: bytes, c_data: bytes) -> bytes:
+        crc = zlib.crc32(c_type + c_data) & 0xFFFFFFFF
+        return struct.pack(">I", len(c_data)) + c_type + c_data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    idat = zlib.compress(raw_rows)
+    png_bytes = b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+    return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+
+
+def test_4_shared_equivalence_vectors_and_png_validation():
+    """
+    Fase 2.3 & Fase 8.1-8.3:
+    Verifies all 9 shared equivalence vectors across Python and TypeScript:
+    1. ASCII text
+    2. Unicode text ("CañónPlásmico_Ω_日本語")
+    3. LF vs CRLF line endings
+    4. Intermediate vertex mutation (`v[10]`)
+    5. UV coordinate mutation (`uvs[5]`)
+    6. Normal vector mutation (`normals[3]`)
+    7. Material / reflectance / PBR mutation
+    8. Position / transform mutation
+    9. Hierarchy (`parentId`, `parentName`, `parentContainerClass`, `hierarchyPath`) mutation
+    Also verifies hierarchy cycle detection (`validate_hierarchy_dag`) and PNG validation.
+    """
+    from engines.asset_engine import validate_and_decode_png_bytes, validate_hierarchy_dag
+
+    # 1-3: Text hashing equivalence vectors (ASCII, Unicode, LF/CRLF)
+    vec_ascii = "ForgeAIStudio::CanonicalSync::v1"
+    vec_unicode = "CañónPlásmico_Ω_日本語_🚀"
+    vec_lf = "  --!strict\nlocal a = 'Cañón'\nreturn a\n"
+    vec_crlf = "\r\n--!strict\r\nlocal a = 'Cañón'\r\nreturn a\r\n  "
+
+    py_ascii = compute_fnv1a_32_hex(vec_ascii)
+    py_unicode = compute_fnv1a_32_hex(vec_unicode)
+    py_lf = compute_fnv1a_32_hex(vec_lf)
+    py_crlf = compute_fnv1a_32_hex(vec_crlf)
+    assert py_lf == py_crlf, "LF and CRLF must hash to identical FNV-1a 32-bit hex"
+
+    # 4-9: Part mutation vectors
+    sphere_mesh = synthesize_procedural_mesh_data("Sphere", [3.0, 3.0, 3.0]).model_dump()
+    base_part = {
+        "partId": "fpart-a1b2c3d4-e5f647a8-9b0c1d2e3f4a",
+        "name": "CañónPlásmico",
+        "parentId": "fnode-11223344-55667788",
+        "parentName": "TurretAssembly",
+        "parentContainerClass": "Model",
+        "hierarchyPath": "Root/WeaponsFolder/TurretAssembly/CañónPlásmico",
+        "shape": "MeshPart",
+        "size": [3.0, 3.0, 3.0],
+        "position": [1.5, 2.25, -4.0],
+        "rotation": [12.0, -45.0, 8.5],
+        "color": [64, 196, 255],
+        "material": "Metal",
+        "roughness": 0.25,
+        "metalness": 0.85,
+        "transparency": 0.0,
+        "reflectance": 0.15,
+        "anchored": True,
+        "canCollide": True,
+        "collisionFidelity": "Hull",
+        "pbrMaterial": {
+            "colorMapAssetId": "rbxassetid://1001",
+            "normalMapAssetId": "rbxassetid://1002",
+            "roughnessMapAssetId": "rbxassetid://1003",
+            "metalnessMapAssetId": "rbxassetid://1004",
+        },
+        "meshData": sphere_mesh,
+    }
+
+    mut_vertex = json.loads(json.dumps(base_part))
+    mut_vertex["meshData"]["vertices"][10][0] += 0.25
+
+    mut_uv = json.loads(json.dumps(base_part))
+    mut_uv["meshData"]["uvs"][5][0] = round(float(mut_uv["meshData"]["uvs"][5][0]) + 0.125, 4)
+
+    mut_normal = json.loads(json.dumps(base_part))
+    mut_normal["meshData"]["normals"][3][2] = round(float(mut_normal["meshData"]["normals"][3][2]) - 0.35, 4)
+
+    mut_material = json.loads(json.dumps(base_part))
+    mut_material["reflectance"] = 0.45
+
+    mut_position = json.loads(json.dumps(base_part))
+    mut_position["position"][1] += 1.75
+
+    mut_hierarchy = json.loads(json.dumps(base_part))
+    mut_hierarchy["parentName"] = "SecondaryMount"
+    mut_hierarchy["hierarchyPath"] = "Root/WeaponsFolder/SecondaryMount/CañónPlásmico"
+
+    variants = {
+        "base": base_part,
+        "mut_vertex": mut_vertex,
+        "mut_uv": mut_uv,
+        "mut_normal": mut_normal,
+        "mut_material": mut_material,
+        "mut_position": mut_position,
+        "mut_hierarchy": mut_hierarchy,
+    }
+    py_results = {k: compute_part_sync_hashes(v, 0, "TestModel") for k, v in variants.items()}
+
+    # Verify independent hash sensitivity
+    assert py_results["mut_vertex"]["geometryHash"] != py_results["base"]["geometryHash"]
+    assert py_results["mut_vertex"]["materialHash"] == py_results["base"]["materialHash"]
+    assert py_results["mut_vertex"]["transformHash"] == py_results["base"]["transformHash"]
+    assert py_results["mut_vertex"]["hierarchyHash"] == py_results["base"]["hierarchyHash"]
+
+    assert py_results["mut_uv"]["geometryHash"] != py_results["base"]["geometryHash"]
+    assert py_results["mut_normal"]["geometryHash"] != py_results["base"]["geometryHash"]
+
+    assert py_results["mut_material"]["materialHash"] != py_results["base"]["materialHash"]
+    assert py_results["mut_material"]["geometryHash"] == py_results["base"]["geometryHash"]
+
+    assert py_results["mut_position"]["transformHash"] != py_results["base"]["transformHash"]
+    assert py_results["mut_position"]["geometryHash"] == py_results["base"]["geometryHash"]
+
+    assert py_results["mut_hierarchy"]["hierarchyHash"] != py_results["base"]["hierarchyHash"]
+    assert py_results["mut_hierarchy"]["transformHash"] == py_results["base"]["transformHash"]
+    assert py_results["mut_hierarchy"]["combinedHash"] != py_results["base"]["combinedHash"]
+
+    # Verify TypeScript matches all 9 vectors byte-for-byte
+    ts_vec_script = """
+import { computePartSyncHashes, computeFnv1a32Hex, validateHierarchyDag } from './src/server/engines/assetEngine.ts';
+const inp = JSON.parse(process.argv[1]);
+const out: Record<string, any> = {
+  ascii: computeFnv1a32Hex(inp.vec_ascii),
+  unicode: computeFnv1a32Hex(inp.vec_unicode),
+  lf: computeFnv1a32Hex(inp.vec_lf),
+  crlf: computeFnv1a32Hex(inp.vec_crlf),
+  variants: {},
+  dagCycle: validateHierarchyDag(inp.cyclicParts),
+};
+for (const [k, v] of Object.entries(inp.variants)) {
+  out.variants[k] = computePartSyncHashes(v as any, 0, 'TestModel');
+}
+console.log(JSON.stringify(out));
+"""
+    cyclic_parts = [
+        {"partId": "node-a", "name": "NodeA", "parentId": "node-b", "parentName": "NodeB", "hierarchyPath": "Root/NodeB/NodeA"},
+        {"partId": "node-b", "name": "NodeB", "parentId": "node-a", "parentName": "NodeA", "hierarchyPath": "Root/NodeA/NodeB"},
+    ]
+    py_dag = validate_hierarchy_dag(cyclic_parts)
+    assert py_dag["valid"] is False and len(py_dag["cycles"]) > 0
+
+    res = subprocess.run(
+        [
+            "npx",
+            "tsx",
+            "-e",
+            ts_vec_script,
+            json.dumps({
+                "vec_ascii": vec_ascii,
+                "vec_unicode": vec_unicode,
+                "vec_lf": vec_lf,
+                "vec_crlf": vec_crlf,
+                "variants": variants,
+                "cyclicParts": cyclic_parts,
+            }),
+        ],
+        cwd=str(ROOT_DIR),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ts_vec_out = json.loads(res.stdout.strip().splitlines()[-1])
+    assert ts_vec_out["ascii"] == py_ascii
+    assert ts_vec_out["unicode"] == py_unicode
+    assert ts_vec_out["lf"] == py_lf
+    assert ts_vec_out["crlf"] == py_crlf
+    assert ts_vec_out["dagCycle"]["valid"] is False
+
+    for k, py_h in py_results.items():
+        ts_h = ts_vec_out["variants"][k]
+        for h_key in ("geometryHash", "materialHash", "transformHash", "hierarchyHash", "combinedHash", "integritySha256"):
+            assert ts_h[h_key] == py_h[h_key], f"Mismatch in {k}.{h_key}: TS={ts_h[h_key]} vs PY={py_h[h_key]}"
+
+    # Verify PNG validation & decoding
+    valid_png_url = _build_valid_test_png_bytes(56, 189, 248, 255)
+    png_meta = validate_and_decode_png_bytes(valid_png_url)
+    assert png_meta["valid"] is True
+    assert png_meta["width"] == 4 and png_meta["height"] == 4
+    assert png_meta["mean_rgba"][0] == 56 and png_meta["mean_rgba"][1] == 189
+
+
+def test_5_master_plan_end_to_end_five_meshpart_scenario():
+    """
+    Fase 8.4 — Mandatory 12-Step (A–L) End-to-End Integration Scenario with a 5-MeshPart Model:
+    - 1 part with complex geometry (`PlasmaCoreReactor`, >40 vertices)
+    - 1 part with published `MeshId` (`PublishedArmorPlate`, `rbxassetid://9988776655`)
+    - 1 complete 4-channel PBR material applied & published (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`)
+    - 1 nested hierarchy (`Model -> Folder ("WeaponsFolder") -> SubModel ("TurretAssembly") -> MeshPart`)
+    - Distinct transforms across all 5 parts
+    - 1 part renamed in Studio (preserving `partId`)
+    - 1 part added in Studio (`AuxSensorPod`)
+    - 1 part explicitly deleted (`RearStabilizerFin`)
+    - Version restoration (`restore_version = 1`) updating library, `.luau`, and `.rbxmx`.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        old_rojo_path = backend_main.RUNTIME_CONFIG["rojo_project_path"]
+        backend_main.RUNTIME_CONFIG["rojo_project_path"] = tmp_dir
+        try:
+            backend_main.configure_rojo_path(
+                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True)
+            )
+
+            # Build meshes for the 5-MeshPart model
+            complex_sphere_mesh = synthesize_procedural_mesh_data("Sphere", [3.2, 3.2, 3.2]).model_dump()
+            assert len(complex_sphere_mesh["vertices"]) >= 26 and len(complex_sphere_mesh["faces"]) >= 48, (
+                "Complex geometry part must have >=26 vertices and >=48 triangles (strictly non-cube)"
+            )
+            chassis_mesh = synthesize_procedural_mesh_data("Block", [8.0, 1.8, 12.0]).model_dump()
+            barrel_mesh = synthesize_procedural_mesh_data("Cylinder", [1.0, 6.0, 1.0]).model_dump()
+            fin_mesh = synthesize_procedural_mesh_data("Wedge", [1.2, 2.5, 3.0]).model_dump()
+
+            # Step A: Create the 5-MeshPart model in Forge
+            model_name = "AegisTitanMech"
+            initial_asset = {
+                "id": "asset-aegis-titan-mech",
+                "name": model_name,
+                "category": "Mechs & Robotics",
+                "asset_type": "Model3D",
+                "collision_fidelity": "Hull",
+                "rojo_target_folder": "src/shared/Assets3D",
+                "parts": [
+                    {
+                        "partId": "fpart-10000001-aaaa4bbb-8ccc00000001",
+                        "name": "MainHullChassis",
+                        "parentId": "fnode-root0001-00000001",
+                        "parentName": "Root",
+                        "parentContainerClass": "Model",
+                        "hierarchyPath": "Root/MainHullChassis",
+                        "shape": "MeshPart",
+                        "size": [8.0, 1.8, 12.0],
+                        "position": [0.0, 0.9, 0.0],
+                        "rotation": [0.0, 0.0, 0.0],
+                        "color": [30, 41, 59],
+                        "material": "Metal",
+                        "roughness": 0.35,
+                        "metalness": 0.85,
+                        "transparency": 0.0,
+                        "reflectance": 0.1,
+                        "anchored": True,
+                        "canCollide": True,
+                        "collisionFidelity": "Hull",
+                        "meshData": chassis_mesh,
+                    },
+                    {
+                        # 1. Complex geometry part (>40 vertices)
+                        "partId": "fpart-10000002-aaaa4bbb-8ccc00000002",
+                        "name": "PlasmaCoreReactor",
+                        "parentId": "fnode-core0002-00000002",
+                        "parentName": "ReactorBay",
+                        "parentContainerClass": "Folder",
+                        "hierarchyPath": "Root/ReactorBay/PlasmaCoreReactor",
+                        "shape": "MeshPart",
+                        "size": [3.2, 3.2, 3.2],
+                        "position": [0.0, 2.8, 0.5],
+                        "rotation": [15.0, 30.0, -10.0],
+                        "color": [56, 189, 248],
+                        "material": "Neon",
+                        "roughness": 0.12,
+                        "metalness": 0.3,
+                        "transparency": 0.0,
+                        "reflectance": 0.25,
+                        "anchored": True,
+                        "canCollide": True,
+                        "collisionFidelity": "Hull",
+                        "meshData": complex_sphere_mesh,
+                    },
+                    {
+                        # 2. Published MeshId part (external cloud mesh without procedural cube replacement)
+                        "partId": "fpart-10000003-aaaa4bbb-8ccc00000003",
+                        "name": "PublishedArmorPlate",
+                        "parentId": "fnode-armr0003-00000003",
+                        "parentName": "ArmorFolder",
+                        "parentContainerClass": "Folder",
+                        "hierarchyPath": "Root/ArmorFolder/PublishedArmorPlate",
+                        "shape": "MeshPart",
+                        "meshId": "rbxassetid://9988776655",
+                        "geometrySource": "PublishedCloudMeshId",
+                        "size": [4.5, 2.0, 1.2],
+                        "position": [0.0, 2.4, -5.8],
+                        "rotation": [-12.0, 0.0, 0.0],
+                        "color": [100, 116, 139],
+                        "material": "DiamondPlate",
+                        "roughness": 0.45,
+                        "metalness": 0.9,
+                        "transparency": 0.0,
+                        "reflectance": 0.05,
+                        "anchored": True,
+                        "canCollide": True,
+                        "collisionFidelity": "Hull",
+                    },
+                    {
+                        # 3 & 4. Nested hierarchy (Model -> Folder -> SubModel -> MeshPart)
+                        "partId": "fpart-10000004-aaaa4bbb-8ccc00000004",
+                        "name": "HeavyRailCannon",
+                        "parentId": "fnode-turt0004-00000004",
+                        "parentName": "TurretAssembly",
+                        "parentContainerClass": "Model",
+                        "hierarchyPath": "Root/WeaponsFolder/TurretAssembly/HeavyRailCannon",
+                        "shape": "MeshPart",
+                        "size": [1.0, 6.0, 1.0],
+                        "position": [2.2, 3.8, -3.5],
+                        "rotation": [8.0, -20.0, 5.0],
+                        "color": [71, 85, 105],
+                        "material": "Metal",
+                        "roughness": 0.28,
+                        "metalness": 0.88,
+                        "transparency": 0.0,
+                        "reflectance": 0.15,
+                        "anchored": True,
+                        "canCollide": False,
+                        "collisionFidelity": "Box",
+                        "meshData": barrel_mesh,
+                    },
+                    {
+                        # 5. Fifth part with distinct transform (will be explicitly deleted in Step F)
+                        "partId": "fpart-10000005-aaaa4bbb-8ccc00000005",
+                        "name": "RearStabilizerFin",
+                        "parentId": "fnode-root0001-00000001",
+                        "parentName": "Root",
+                        "parentContainerClass": "Model",
+                        "hierarchyPath": "Root/RearStabilizerFin",
+                        "shape": "MeshPart",
+                        "size": [1.2, 2.5, 3.0],
+                        "position": [0.0, 2.2, 5.2],
+                        "rotation": [0.0, 180.0, 0.0],
+                        "color": [148, 163, 184],
+                        "material": "Metal",
+                        "roughness": 0.4,
+                        "metalness": 0.75,
+                        "transparency": 0.0,
+                        "reflectance": 0.0,
+                        "anchored": True,
+                        "canCollide": True,
+                        "collisionFidelity": "Hull",
+                        "meshData": fin_mesh,
+                    },
+                ],
+            }
+
+            # Step C (initial save & export): Save v1 to library and Rojo
+            exp_v1 = backend_main.export_roblox_package({
+                "asset": initial_asset,
+                "save_to_rojo": True,
+                "save_to_library": True,
+            })
+            assert exp_v1["all_five_exist"] is True
+            assert exp_v1["asset"]["version"] == 1
+
+            # Step B: Apply & publish a full 4-channel PBR material onto MainHullChassis
+            pbr_res = backend_main.publish_pbr_to_rojo({
+                "material_name": "Aegis Titanium Hex",
+                "pattern": "hex_plate",
+                "albedo_data_url": _build_valid_test_png_bytes(56, 189, 248, 255),
+                "normal_data_url": _build_valid_test_png_bytes(128, 128, 255, 255),
+                "roughness_data_url": _build_valid_test_png_bytes(90, 90, 90, 255),
+                "metalness_data_url": _build_valid_test_png_bytes(220, 220, 220, 255),
+                "color_map_asset_id": "rbxassetid://5500112201",
+                "normal_map_asset_id": "rbxassetid://5500112202",
+                "roughness_map_asset_id": "rbxassetid://5500112203",
+                "metalness_map_asset_id": "rbxassetid://5500112204",
+                "roughness": 0.28,
+                "metalness": 0.88,
+                "target_asset_id": exp_v1["asset"]["id"],
+                "target_part_name": "MainHullChassis",
+            })
+            assert pbr_res["success"] is True
+            assert pbr_res["status"] == "cloud_published"
+            assert len(pbr_res["verified_cloud_ids"]) == 4
+
+            # Re-export package with the applied PBR material (creates v2)
+            current_asset = backend_main.get_asset_engine().get_asset(model_name)
+            assert current_asset is not None
+            exp_v2 = backend_main.export_roblox_package({
+                "asset": current_asset,
+                "save_to_rojo": True,
+                "save_to_library": True,
+            })
+            saved_v2 = exp_v2["asset"]
+
+            # Step D: Construct the model in Studio with a camera offset CFrame (`ForgeSyncOriginCFrame`)
+            cam_pos = [-18.5, 12.0, 34.0]
+            cam_euler = [18.0, -42.0, 9.0]
+            studio_spawned_parts: List[Dict[str, Any]] = []
+            for p in saved_v2["parts"]:
+                rel_pos, rel_euler, rel_mat = simulate_studio_spawn_and_to_object_space(
+                    p["position"],
+                    p["rotation"],
+                    cam_pos,
+                    cam_euler,
+                )
+                studio_spawned_parts.append({
+                    **p,
+                    "position": rel_pos,
+                    "rotation": rel_euler,
+                    "rotationMatrix": rel_mat,
+                })
+
+            # Step E: Compare untouched Studio model with Forge -> 0 false differences
+            cmp_initial = backend_main.compare_studio_datamodel({
+                "model_name": model_name,
+                "parts": studio_spawned_parts,
+                "sync_scope": "full_model",
+            })
+            assert cmp_initial["diff"]["in_sync"] is True, f"Step E failed: {cmp_initial['diff']}"
+            assert cmp_initial["diff"]["unchanged_count"] == 5
+
+            # Step F: Perform Studio edits:
+            # 1. Modify position of PlasmaCoreReactor
+            # 2. Modify material of PublishedArmorPlate + rename it to "FrontReactiveArmor" (keeping partId!)
+            # 3. Reparent HeavyRailCannon to "Root/WeaponsFolder/UpperDeckMount/HeavyRailCannon"
+            # 4. Delete RearStabilizerFin (`explicit_delete_ids`)
+            # 5. Add a 6th part (`AuxSensorPod`)
+            edited_studio_parts: List[Dict[str, Any]] = []
+            for sp in studio_spawned_parts:
+                cp = json.loads(json.dumps(sp))
+                if cp["name"] == "RearStabilizerFin":
+                    continue  # Deleted in Studio
+                elif cp["name"] == "PlasmaCoreReactor":
+                    cp["position"] = [0.0, 3.45, 0.5]
+                elif cp["name"] == "PublishedArmorPlate":
+                    cp["name"] = "FrontReactiveArmor"  # Renamed while keeping partId!
+                    cp["hierarchyPath"] = "Root/ArmorFolder/FrontReactiveArmor"
+                    cp["material"] = "Neon"
+                    cp["roughness"] = 0.18
+                elif cp["name"] == "HeavyRailCannon":
+                    cp["parentName"] = "UpperDeckMount"
+                    cp["parentContainerClass"] = "Model"
+                    cp["hierarchyPath"] = "Root/WeaponsFolder/UpperDeckMount/HeavyRailCannon"
+                edited_studio_parts.append(cp)
+
+            sensor_mesh = synthesize_procedural_mesh_data("Cylinder", [0.9, 1.4, 0.9]).model_dump()
+            edited_studio_parts.append({
+                "partId": "fpart-10000006-aaaa4bbb-8ccc00000006",
+                "name": "AuxSensorPod",
+                "parentId": "fnode-sens0006-00000006",
+                "parentName": "SensorSuite",
+                "parentContainerClass": "Folder",
+                "hierarchyPath": "Root/SensorSuite/AuxSensorPod",
+                "shape": "MeshPart",
+                "size": [0.9, 1.4, 0.9],
+                "position": [-2.5, 4.1, -1.0],
+                "rotation": [0.0, 15.0, 0.0],
+                "color": [16, 185, 129],
+                "material": "Glass",
+                "roughness": 0.1,
+                "metalness": 0.2,
+                "transparency": 0.25,
+                "reflectance": 0.3,
+                "anchored": True,
+                "canCollide": False,
+                "collisionFidelity": "Box",
+                "meshData": sensor_mesh,
+            })
+
+            # Step G: Compare and verify ONLY the real changes appear
+            cmp_edited = backend_main.compare_studio_datamodel({
+                "model_name": model_name,
+                "parts": edited_studio_parts,
+                "sync_scope": "full_model",
+                "explicit_delete_ids": ["fpart-10000005-aaaa4bbb-8ccc00000005"],
+            })
+            diff_edited = cmp_edited["diff"]
+            assert diff_edited["in_sync"] is False
+            assert diff_edited["unchanged_count"] == 1  # MainHullChassis is untouched
+            assert len(diff_edited["modified_parts"]) == 3  # PlasmaCoreReactor, FrontReactiveArmor, HeavyRailCannon
+            assert diff_edited["added_in_studio"] == ["AuxSensorPod"]
+            assert diff_edited["removed_in_studio"] == ["RearStabilizerFin"]
+
+            # Verify granular incremental_operations and part_diffs are emitted
+            inc_ops = diff_edited["incremental_operations"]
+            assert "MainHullChassis" in inc_ops["unchanged"]
+            assert "PlasmaCoreReactor" in inc_ops["update_transform"]
+            assert "FrontReactiveArmor" in inc_ops["update_material"]
+            assert "HeavyRailCannon" in inc_ops["update_hierarchy"]
+            assert "RearStabilizerFin" in inc_ops["delete"]
+            assert "AuxSensorPod" in inc_ops["add"]
+
+            ops_by_id = {pd["partId"]: pd["operations"] for pd in diff_edited["part_diffs"]}
+            assert "unchanged" in ops_by_id["fpart-10000001-aaaa4bbb-8ccc00000001"]
+            assert "update_transform" in ops_by_id["fpart-10000002-aaaa4bbb-8ccc00000002"]
+            assert "update_material" in ops_by_id["fpart-10000003-aaaa4bbb-8ccc00000003"]
+            assert "update_hierarchy" in ops_by_id["fpart-10000004-aaaa4bbb-8ccc00000004"]
+            assert "delete" in ops_by_id["fpart-10000005-aaaa4bbb-8ccc00000005"]
+            assert "add" in ops_by_id["fpart-10000006-aaaa4bbb-8ccc00000006"]
+
+            # Step H: Push changes from Studio to Forge
+            push_res = backend_main.receive_studio_incremental_push({
+                "model_name": model_name,
+                "parts": edited_studio_parts,
+                "sync_scope": "full_model",
+                "explicit_delete_ids": ["fpart-10000005-aaaa4bbb-8ccc00000005"],
+                "conflict_policy": "smart_merge",
+            })
+            assert push_res["success"] is True
+            synced_asset = push_res["asset"]
+            assert len(synced_asset["parts"]) == 5  # 5 original - 1 deleted + 1 added = 5
+
+            # Step I: Reconstruct from Forge (.rbxmx and library) and verify all invariants
+            synced_by_id = {p["partId"]: p for p in synced_asset["parts"]}
+            # 1. Renamed part kept its exact partId and published MeshId without turning into a cube
+            armor_part = synced_by_id["fpart-10000003-aaaa4bbb-8ccc00000003"]
+            assert armor_part["name"] == "FrontReactiveArmor"
+            assert armor_part["meshId"] == "rbxassetid://9988776655"
+            assert armor_part["geometrySource"] == "PublishedCloudMeshId"
+            assert not (armor_part.get("meshData") and armor_part["meshData"].get("faces"))
+            # 2. PBR material on MainHullChassis is preserved
+            hull_part = synced_by_id["fpart-10000001-aaaa4bbb-8ccc00000001"]
+            assert hull_part["pbrMaterial"]["colorMapAssetId"] == "rbxassetid://5500112201"
+            assert hull_part["pbrMaterial"]["normalMapAssetId"] == "rbxassetid://5500112202"
+            # 3. Complex geometry on PlasmaCoreReactor is preserved
+            reactor_part = synced_by_id["fpart-10000002-aaaa4bbb-8ccc00000002"]
+            assert len(reactor_part["meshData"]["vertices"]) == len(complex_sphere_mesh["vertices"])
+
+            # Step J: Re-compare Studio state with Forge -> 0 false differences (`in_sync == True`)
+            cmp_after_push = backend_main.compare_studio_datamodel({
+                "model_name": model_name,
+                "parts": edited_studio_parts,
+                "sync_scope": "full_model",
+            })
+            assert cmp_after_push["diff"]["in_sync"] is True, f"Step J failed: {cmp_after_push['diff']}"
+            assert cmp_after_push["diff"]["unchanged_count"] == 5
+
+            # Step K & L: Restore version 1 and verify library, .luau, and .rbxmx on disk are updated
+            restore_res = backend_main.pull_asset_changes_from_rojo({
+                "asset_id": synced_asset["id"],
+                "asset_name": model_name,
+                "restore_version": 1,
+            })
+            assert restore_res["success"] is True
+            restored_asset = restore_res["asset"]
+            restored_names = {p["name"] for p in restored_asset["parts"]}
+            assert "RearStabilizerFin" in restored_names
+            assert "PublishedArmorPlate" in restored_names
+            assert "AuxSensorPod" not in restored_names
+
+            rbxmx_disk = Path(tmp_dir) / "src" / "shared" / "Assets3D" / f"{model_name}.rbxmx"
+            luau_disk = Path(tmp_dir) / "src" / "shared" / "Assets3D" / f"{model_name}.luau"
+            assert "RearStabilizerFin" in rbxmx_disk.read_text(encoding="utf-8")
+            assert "RearStabilizerFin" in luau_disk.read_text(encoding="utf-8")
+        finally:
+            backend_main.RUNTIME_CONFIG["rojo_project_path"] = old_rojo_path
+
+
 if __name__ == "__main__":
     test_1_canonical_hash_parity_and_middle_vertex_sensitivity()
     print("PASS: test_1_canonical_hash_parity_and_middle_vertex_sensitivity")
@@ -757,4 +1313,9 @@ if __name__ == "__main__":
     print("PASS: test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy")
     test_3_external_meshparts_never_replaced_with_cube_and_safety_guards()
     print("PASS: test_3_external_meshparts_never_replaced_with_cube_and_safety_guards")
+    test_4_shared_equivalence_vectors_and_png_validation()
+    print("PASS: test_4_shared_equivalence_vectors_and_png_validation")
+    test_5_master_plan_end_to_end_five_meshpart_scenario()
+    print("PASS: test_5_master_plan_end_to_end_five_meshpart_scenario")
     print("ALL E2E BIDIRECTIONAL SYNC TESTS PASSED!")
+

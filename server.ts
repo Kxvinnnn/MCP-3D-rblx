@@ -1611,13 +1611,18 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
       syncScope = 'selection';
     }
 
-    const conflictPolicy: 'reject' | 'smart_merge' | 'prefer_studio' | 'prefer_forge' =
-      rawConflictPolicy === 'reject' ||
-      rawConflictPolicy === 'smart_merge' ||
-      rawConflictPolicy === 'prefer_studio' ||
-      rawConflictPolicy === 'prefer_forge'
-        ? rawConflictPolicy
-        : 'smart_merge';
+    const rawPolicyStr = String(rawConflictPolicy || 'smart_merge').trim().toLowerCase();
+    const policyAliasMap: Record<string, 'manual_resolution' | 'smart_merge' | 'accept_studio' | 'keep_forge'> = {
+      keep_forge: 'keep_forge',
+      prefer_forge: 'keep_forge',
+      accept_studio: 'accept_studio',
+      prefer_studio: 'accept_studio',
+      smart_merge: 'smart_merge',
+      manual_resolution: 'manual_resolution',
+      reject: 'manual_resolution',
+      abort_on_conflict: 'manual_resolution',
+    };
+    const conflictPolicy = policyAliasMap[rawPolicyStr] || 'smart_merge';
     const effectiveMergeMode =
       merge_mode || (syncScope === 'full_model' ? 'replace' : 'incremental');
 
@@ -1652,7 +1657,8 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
         const inc = { ...rawInc };
         const incId = String(inc.partId || inc.id || '').trim();
         const pname = String(inc.name || `MeshPart_${idx + 1}`).trim();
-        const matchedExisting = (incId ? existingById.get(incId) : undefined) || existingByName.get(pname);
+        const matchedExisting =
+          (incId ? existingById.get(incId) : undefined) || (!incId ? existingByName.get(pname) : undefined);
 
         const incMd = inc.meshData && typeof inc.meshData === 'object' ? inc.meshData : null;
         const hasIncBuffers = Boolean(
@@ -1709,6 +1715,7 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
           partId: inc.partId || undefined,
           name: pname,
           parentName: inc.parentName || matchedExisting?.parentName || 'Root',
+          parentContainerClass: inc.parentContainerClass || matchedExisting?.parentContainerClass || 'Model',
           hierarchyPath: inc.hierarchyPath || matchedExisting?.hierarchyPath || pname,
           shape: 'MeshPart' as const,
           size: Array.isArray(inc.size) ? inc.size : matchedExisting?.size || [2, 2, 2],
@@ -1720,6 +1727,7 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
           roughness: typeof inc.roughness === 'number' ? inc.roughness : matchedExisting?.roughness ?? 0.35,
           metalness: typeof inc.metalness === 'number' ? inc.metalness : matchedExisting?.metalness ?? 0.65,
           transparency: typeof inc.transparency === 'number' ? inc.transparency : matchedExisting?.transparency ?? 0,
+          reflectance: typeof inc.reflectance === 'number' ? inc.reflectance : matchedExisting?.reflectance ?? 0,
           canCollide: inc.canCollide !== false,
           anchored: inc.anchored !== false,
           collisionFidelity: inc.collisionFidelity || matchedExisting?.collisionFidelity || 'Hull',
@@ -1750,11 +1758,23 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
       });
     }
 
+    // 1b. Reject circular hierarchy cycles
+    if (syncDiff.has_hierarchy_cycles) {
+      return res.json({
+        success: false,
+        status: 'hierarchy_cycle_detected',
+        error: 'Push rechazado: se detectaron ciclos circulares en la jerarquía de contenedores.',
+        hierarchy_cycles: syncDiff.hierarchy_cycles,
+        sync_diff: syncDiff,
+      });
+    }
+
     // 2. Enforce conflict policy when 3-way conflicts exist
-    if (syncDiff.has_conflicts && conflictPolicy === 'reject') {
+    if (syncDiff.has_conflicts && conflictPolicy === 'manual_resolution') {
       return res.json({
         success: false,
         status: 'conflict_detected',
+        conflict_policy: rawPolicyStr,
         error:
           'Push rechazado por política de conflictos: el modelo cambió tanto en Forge como en Studio desde el último snapshot base.',
         conflicts: syncDiff.conflicts,
@@ -1785,10 +1805,11 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
         const pname = String(inc.name || `MeshPart_${idx + 1}`);
         if (explicitDeleteSet.has(incId) || explicitDeleteSet.has(pname)) continue;
 
-        const fPart = existingById.get(incId) || existingByName.get(pname);
+        const fPart = existingById.get(incId) || (!incId ? existingByName.get(pname) : undefined);
         const resolvedId = incId || (fPart ? String(fPart.partId) : `forge-part-${idx + 1}-${pname.toLowerCase()}`);
         seenIds.add(resolvedId);
         seenNames.add(pname);
+        if (fPart?.name) seenNames.add(String(fPart.name));
 
         if (!fPart) {
           mergedParts.push(inc);
@@ -1796,7 +1817,7 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
         }
 
         const hasConflict = conflictById.has(resolvedId);
-        if (hasConflict && conflictPolicy === 'prefer_forge') {
+        if (hasConflict && conflictPolicy === 'keep_forge') {
           mergedParts.push(fPart);
           continue;
         }
@@ -1806,22 +1827,29 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
           const studioGeomChanged = inc.geometryHash !== bPart.geometryHash;
           const studioMatChanged = inc.materialHash !== bPart.materialHash;
           const studioTransChanged = inc.transformHash !== bPart.transformHash;
+          const studioHierChanged = inc.hierarchyHash !== bPart.hierarchyHash;
+          const studioNameChanged = inc.name !== bPart.name;
+          const resolvedName = studioNameChanged ? pname : String(fPart.name || pname);
           mergedParts.push({
             ...fPart,
             partId: resolvedId,
-            name: pname,
-            parentId: studioTransChanged ? inc.parentId : fPart.parentId,
-            parentName: studioTransChanged ? inc.parentName : fPart.parentName || 'Root',
-            hierarchyPath: studioTransChanged ? inc.hierarchyPath : fPart.hierarchyPath || pname,
+            name: resolvedName,
+            parentId: studioHierChanged ? inc.parentId : fPart.parentId,
+            parentName: studioHierChanged ? inc.parentName : fPart.parentName || 'Root',
+            parentContainerClass: studioHierChanged
+              ? inc.parentContainerClass
+              : fPart.parentContainerClass || 'Model',
+            hierarchyPath: studioHierChanged ? inc.hierarchyPath : fPart.hierarchyPath || `Root/${resolvedName}`,
             size: studioTransChanged ? inc.size : fPart.size || [2, 2, 2],
             position: studioTransChanged ? inc.position : fPart.position || [0, 1, 0],
             rotation: studioTransChanged ? inc.rotation : fPart.rotation || [0, 0, 0],
             rotationMatrix: studioTransChanged ? inc.rotationMatrix : fPart.rotationMatrix,
-            color: studioTransChanged || studioMatChanged ? inc.color : fPart.color || [148, 163, 184],
+            color: studioMatChanged ? inc.color : fPart.color || [148, 163, 184],
             material: studioMatChanged ? inc.material : fPart.material || 'Metal',
             roughness: studioMatChanged ? inc.roughness : fPart.roughness ?? 0.35,
             metalness: studioMatChanged ? inc.metalness : fPart.metalness ?? 0.65,
             transparency: studioMatChanged ? inc.transparency : fPart.transparency ?? 0,
+            reflectance: studioMatChanged ? inc.reflectance : fPart.reflectance ?? 0,
             pbrMaterial: studioMatChanged ? inc.pbrMaterial || fPart.pbrMaterial : fPart.pbrMaterial,
             meshId: studioGeomChanged ? inc.meshId : fPart.meshId,
             assetId: studioGeomChanged ? inc.assetId : fPart.assetId,
@@ -1836,6 +1864,7 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
             partId: resolvedId,
             name: pname,
             parentName: inc.parentName || fPart.parentName || 'Root',
+            parentContainerClass: inc.parentContainerClass || fPart.parentContainerClass || 'Model',
             hierarchyPath: inc.hierarchyPath || fPart.hierarchyPath || pname,
             shape: 'MeshPart',
             meshData: inc.meshData !== undefined ? inc.meshData : fPart.meshData,
