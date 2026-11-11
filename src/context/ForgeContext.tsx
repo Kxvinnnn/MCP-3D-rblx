@@ -11,6 +11,7 @@ import {
   MeshPart3DSpec,
   OperationHistoryEntry,
 } from '../utils/roblox3DEngine.ts';
+import { computeCanonicalAssetHash } from '../utils/canonicalHash.ts';
 
 export type UIMode = 'simple' | 'advanced';
 
@@ -260,76 +261,13 @@ export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
 }
 
 /**
- * Computes a deterministic canonical string representation of the asset contents
- * incorporating all model metadata, PBR profiles, part hierarchy, transforms, visual,
+ * Computes a 64-character SHA-256 cryptographic digest of the canonical JSON representation
+ * of the 3D asset model incorporating all model metadata, PBR profiles, part hierarchy, transforms, visual,
  * physical properties, and vertex/face/normal/UV buffers.
  */
 export function computeAssetContentHash(asset: Forge3DAsset | null): string {
   if (!asset) return '';
-
-  const partsSummary = (asset.parts || []).map((p, idx) => {
-    const id = p.partId || `part_${idx}`;
-    const hier = `${p.parentId || ''}/${p.parentName || ''}/${p.hierarchyPath || ''}`;
-    const pos = (p.position || [0, 0, 0]).map((n) => Number(n).toFixed(5)).join(',');
-    const rot = (p.rotation || [0, 0, 0]).map((n) => Number(n).toFixed(5)).join(',');
-    const rotMat = Array.isArray(p.rotationMatrix) ? p.rotationMatrix.map((n) => Number(n).toFixed(5)).join(',') : '';
-    const sz = (p.size || [1, 1, 1]).map((n) => Number(n).toFixed(5)).join(',');
-    const col = (p.color || [163, 162, 165]).join(',');
-    const trans = Number(p.transparency ?? 0).toFixed(4);
-    const anch = p.anchored ? '1' : '0';
-    const coll = p.canCollide !== false ? '1' : '0';
-    const doubleSided = p.doubleSided ? '1' : '0';
-    const castShadow = p.castShadow !== false ? '1' : '0';
-    const collFid = p.collisionFidelity || 'Default';
-    const rendFid = p.renderFidelity || 'Automatic';
-    const meshRef = `${p.meshId || ''}:${p.assetId || ''}:${p.textureId || ''}`;
-    const mat = `${p.material || 'Plastic'}_${Number(p.roughness ?? 0.5).toFixed(4)}_${Number(p.metalness ?? 0).toFixed(4)}_${Number(p.reflectance ?? 0).toFixed(4)}`;
-
-    // Part-level PBR specs with full DataURL content signatures
-    let partPbrStr = 'none';
-    if (p.pbrMaterial) {
-      const pm = p.pbrMaterial;
-      partPbrStr = `${pm.pattern || ''}_${pm.albedoHex || ''}_${pm.emissiveHex || ''}_${pm.roughness ?? ''}_${pm.metalness ?? ''}_${pm.colorMapAssetId || ''}_${pm.normalMapAssetId || ''}_${pm.roughnessMapAssetId || ''}_${pm.metalnessMapAssetId || ''}_alb:${pm.albedoDataUrl || ''}_norm:${pm.normalDataUrl || ''}_rgh:${pm.roughnessDataUrl || ''}_met:${pm.metalnessDataUrl || ''}`;
-    }
-
-    // Canonical representation of mesh geometry data (coordinates, faces, normals, uvs, vertexColors)
-    let meshHash = 'none';
-    if (p.meshData) {
-      const vCoords = Array.isArray(p.meshData.vertices)
-        ? p.meshData.vertices.map((v: number[]) => (Array.isArray(v) ? v.map((c) => Number(c).toFixed(5)).join(',') : String(v))).join(';')
-        : '';
-      const fIndices = Array.isArray(p.meshData.faces)
-        ? p.meshData.faces.map((f: any) => (Array.isArray(f) ? f.join(',') : String(f))).join(';')
-        : '';
-      const nCoords = Array.isArray(p.meshData.normals)
-        ? p.meshData.normals.map((n: number[]) => (Array.isArray(n) ? n.map((c) => Number(c).toFixed(4)).join(',') : String(n))).join(';')
-        : '';
-      const uvCoords = Array.isArray(p.meshData.uvs)
-        ? p.meshData.uvs.map((uv: number[]) => (Array.isArray(uv) ? uv.map((c) => Number(c).toFixed(5)).join(',') : String(uv))).join(';')
-        : '';
-      const vColors = Array.isArray(p.meshData.vertexColors)
-        ? p.meshData.vertexColors.map((vc: number[]) => (Array.isArray(vc) ? vc.map((c) => Number(c).toFixed(3)).join(',') : String(vc))).join(';')
-        : '';
-
-      meshHash = `v[${p.meshData.vertices?.length || 0}:${vCoords}]_f[${p.meshData.faces?.length || 0}:${fIndices}]_n[${nCoords}]_uv[${uvCoords}]_vc[${vColors}]_${p.meshData.objFileName || ''}`;
-    }
-
-    // Base mesh data representation if part was modified from a base mesh
-    let baseMeshHash = 'none';
-    if (p.baseMeshData) {
-      baseMeshHash = `bv:${p.baseMeshData.vertices?.length || 0}_bf:${p.baseMeshData.faces?.length || 0}`;
-    }
-
-    return `${id}|${p.name}|${p.shape}|${hier}|${pos}|${rot}|rmat:${rotMat}|${sz}|${col}|t:${trans}|a:${anch}|c:${coll}|ds:${doubleSided}|cs:${castShadow}|cf:${collFid}|rf:${rendFid}|${mat}|${meshRef}|pbr:${partPbrStr}|mesh:${meshHash}|basemesh:${baseMeshHash}`;
-  });
-
-  const pbr = asset.pbr_profile
-    ? `${asset.pbr_profile.pattern}_${asset.pbr_profile.albedo_hex}_${asset.pbr_profile.emissive_hex || ''}_${asset.pbr_profile.roughness}_${asset.pbr_profile.metalness}_${asset.pbr_profile.roblox_material || ''}_${asset.pbr_profile.color_map_asset_id || ''}_${asset.pbr_profile.normal_map_asset_id || ''}_${asset.pbr_profile.roughness_map_asset_id || ''}_${asset.pbr_profile.metalness_map_asset_id || ''}_${asset.pbr_profile.albedo_asset_path || ''}_${asset.pbr_profile.normal_asset_path || ''}_${asset.pbr_profile.roughness_asset_path || ''}_${asset.pbr_profile.metalness_asset_path || ''}`
-    : '';
-
-  const meta = `${asset.name}#${asset.category || 'Props'}#${asset.asset_type || 'Model3D'}#${asset.collision_fidelity || 'Hull'}#${asset.description || ''}#${asset.rojo_target_folder || ''}#${asset.file_name || ''}`;
-
-  return `${meta}#pbr:${pbr}#[${partsSummary.join(';;')}]`;
+  return computeCanonicalAssetHash(asset);
 }
 
 /**
