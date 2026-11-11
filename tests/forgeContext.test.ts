@@ -155,6 +155,48 @@ test('1. computeAssetContentHash es exhaustivo: detecta cambios en geometría, j
   const alteredColor: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
   alteredColor.parts[0].color = [255, 10, 10];
   assert.notEqual(computeAssetContentHash(alteredColor), hashA, 'Modificar color debe cambiar el hash');
+
+  // 1G. Data URL de textura con el mismo tamaño pero contenido distinto
+  const pbrPartAsset: Forge3DAsset = {
+    ...assetA,
+    parts: [
+      {
+        ...assetA.parts[0],
+        pbrMaterial: {
+          albedoDataUrl: 'data:image/png;base64,AAAA',
+        },
+      },
+    ],
+  };
+  const hashPbr1 = computeAssetContentHash(pbrPartAsset);
+  const pbrPartAsset2: Forge3DAsset = JSON.parse(JSON.stringify(pbrPartAsset));
+  pbrPartAsset2.parts[0].pbrMaterial!.albedoDataUrl = 'data:image/png;base64,BBBB';
+  assert.notEqual(computeAssetContentHash(pbrPartAsset2), hashPbr1, 'Modificar el contenido de Data URL debe alterar el hash');
+
+  // 1H. Colores por vértice (vertexColors)
+  const vColorMesh: Forge3DAsset = {
+    ...meshAsset,
+    parts: [
+      {
+        ...meshAsset.parts[0],
+        meshData: {
+          ...meshAsset.parts[0].meshData!,
+          vertexColors: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        },
+      },
+    ],
+  };
+  assert.notEqual(computeAssetContentHash(vColorMesh), originalMeshHash, 'Añadir vertexColors debe alterar el hash');
+
+  // 1I. Matriz de rotación (rotationMatrix)
+  const rotMatAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  rotMatAsset.parts[0].rotationMatrix = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  assert.notEqual(computeAssetContentHash(rotMatAsset), hashA, 'Añadir rotationMatrix debe alterar el hash');
+
+  // 1J. Precisión decimal en 4º decimal (0.0001 vs 0.0002)
+  const subMMShift: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  subMMShift.parts[0].position = [0.0001, 0.5, 0];
+  assert.notEqual(computeAssetContentHash(subMMShift), hashA, 'Desplazamiento sub-milimétrico (0.0001) debe cambiar el hash');
 });
 
 test('2. calculateAssetMetrics valida índices y rechaza triángulos degenerados o de área cero', () => {

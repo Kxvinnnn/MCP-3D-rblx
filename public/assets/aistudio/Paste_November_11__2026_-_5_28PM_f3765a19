@@ -1,0 +1,988 @@
+# MISIÓN: FASE DE ESTABILIZACIÓN INTEGRAL, CORRECCIÓN DE DEFECTOS Y VALIDACIÓN REAL DE FORGE AI STUDIO
+
+## 0. CONTEXTO DEL PROYECTO
+
+Trabaja exclusivamente sobre el proyecto:
+
+**Repositorio local:**
+`C:\Users\dadada\Desktop\MCP-3D-rblx`
+
+**Repositorio GitHub:**
+`https://github.com/Kxvinnnn/MCP-3D-rblx`
+
+**Último commit publicado que debes tomar como referencia:**
+`f8556edb6a99d73fc1ee967cc8d41ff90db5940b`
+
+Forge AI Studio es una plataforma para crear, importar, editar, optimizar, visualizar y sincronizar modelos 3D destinados a Roblox.
+
+La arquitectura incluye:
+
+- Frontend React + TypeScript + Three.js.
+- Backend Express.
+- Backend FastAPI.
+- Integración con Google Gemini.
+- Motor de geometría 3D.
+- Exportación GLB, GLTF, OBJ, MTL y RBXMX.
+- Materiales PBR.
+- Persistencia de modelos.
+- Integración con Rojo.
+- Plugin Luau para Roblox Studio.
+- Forge Local Bridge para comunicación entre el entorno local, Roblox Studio y los servicios remotos.
+- Sincronización bidireccional entre Forge y Roblox Studio.
+
+Esta misión NO consiste en crear otro proyecto ni en sustituir la arquitectura actual. Debes inspeccionar, corregir y demostrar la fiabilidad de los sistemas existentes.
+
+---
+
+# 1. REGLAS INNEGOCIABLES
+
+1. Trabaja exclusivamente dentro de `MCP-3D-rblx`.
+2. No modifiques `C:\Users\dadada\Desktop\NIGHTMARE-Juego`.
+3. No copies, muevas ni elimines archivos de NIGHTMARE.
+4. No realices commits ni pushes.
+5. No despliegues servicios en Cloud Run ni modifiques infraestructura remota sin autorización.
+6. No publiques modelos ni assets en Roblox.
+7. No modifiques credenciales, tokens, secretos o permisos externos.
+8. No sustituyas funcionalidades reales por mocks, simulaciones, botones decorativos o respuestas ficticias.
+9. No elimines herramientas avanzadas para simplificar la interfaz.
+10. No declares una operación exitosa únicamente porque un endpoint devolvió HTTP 200.
+11. No declares pruebas de Roblox Studio ejecutadas si no se realizaron en una instancia real.
+12. No sobrescribas cambios locales del usuario.
+13. No reviertas archivos ni ejecutes comandos destructivos sin autorización.
+14. Antes de modificar cualquier componente, identifica sus dependencias y los contratos que utiliza.
+
+Puedes modificar código local, agregar pruebas, corregir errores, instalar dependencias necesarias y documentar los resultados.
+
+**IMPORTANTE:** La carpeta local puede contener cambios sin commit que todavía no aparecen en GitHub, especialmente dentro de `forge-bridge/`. Debes tratarlos como trabajo existente que se debe preservar y auditar, no como archivos descartables.
+
+---
+
+# 2. FASE 0: AUDITORÍA DEL ESTADO REAL
+
+Antes de escribir código:
+
+### 2.1. Inspección Git
+
+Ejecuta y documenta:
+
+- `git status`
+- `git branch`
+- `git log -10 --oneline`
+- `git diff`
+- `git diff --cached`
+- `git ls-files`
+- Estado de archivos sin seguimiento.
+- Diferencias entre el último commit publicado y el contenido local.
+
+No limpies el directorio de trabajo.
+
+Identifica:
+
+- Cambios locales sin commit.
+- Archivos nuevos.
+- Archivos modificados.
+- Dependencias instaladas.
+- Código de Forge Bridge.
+- Configuraciones locales.
+- Archivos que podrían contener secretos.
+
+No muestres tokens ni secretos en el informe.
+
+### 2.2. Auditoría arquitectónica
+
+Inspecciona, como mínimo:
+
+- `src/context/ForgeContext.tsx`
+- `src/utils/roblox3DEngine.ts`
+- `src/utils/sseParser.ts`
+- `src/components/RobloxWorldViewport3D.tsx`
+- `src/components/views/CreateWizardView.tsx`
+- `src/components/views/EditView.tsx`
+- `src/components/views/MaterialsView.tsx`
+- `src/components/views/StudioSyncView.tsx`
+- `server.ts`
+- `backend/main.py`
+- `backend/roblox_plugin/ForgeAIStudioPlugin.server.luau`
+- `forge-bridge/`
+- `src/server/engines/`
+- `tests/`
+- Configuración de Rojo.
+- Documentación.
+
+Construye un mapa de las operaciones principales:
+
+1. Generación.
+2. Importación.
+3. Visualización.
+4. Edición.
+5. Materiales.
+6. Persistencia.
+7. Exportación.
+8. Push a Studio.
+9. Pull desde Studio.
+10. Sincronización Rojo.
+11. Historial y recuperación.
+12. Comunicación Cloud-Bridge-Plugin.
+
+Identifica qué componentes son funcionales, cuáles están parcialmente implementados y cuáles no tienen evidencia de funcionamiento.
+
+---
+
+# 3. PRIORIDAD CRÍTICA: INTEGRIDAD DEL MODELO Y HASHES
+
+Audita `computeAssetContentHash()`.
+
+El objetivo es que Forge pueda detectar de manera fiable si un modelo cambió, incluyendo geometría, transformaciones, jerarquía, materiales, texturas y propiedades de Roblox.
+
+### 3.1. Problemas que debes investigar
+
+El código actual utiliza redondeos como `toFixed(3)` y, para determinados datos de textura, utiliza longitudes de Data URL.
+
+Investiga también si se omiten:
+
+- `vertexColors`.
+- `baseMeshData`.
+- Texturas `roughnessDataUrl`.
+- Texturas `metalnessDataUrl`.
+- Datos completos de `albedoDataUrl`.
+- Datos completos de `normalDataUrl`.
+- Mapas PBR.
+- Matrices de rotación.
+- Metadatos persistentes.
+- Propiedades que se exportan a Roblox.
+- Archivos y referencias asociados al modelo.
+- Propiedades de jerarquía.
+
+### 3.2. Implementación requerida
+
+Diseña una serialización canónica, determinista y completa.
+
+Requisitos:
+
+- Dos modelos idénticos deben producir el mismo hash.
+- Cambiar un vértice debe modificar el hash.
+- Cambiar una textura por otra de igual tamaño debe modificar el hash.
+- Cambiar normales o UV debe modificar el hash.
+- Cambiar una propiedad física debe modificar el hash.
+- Cambiar jerarquía o identidad de una pieza debe modificarlo.
+- No debe depender del orden accidental de propiedades de objetos JavaScript.
+- No debe ignorar datos persistentes.
+- No debe producir colisiones triviales por truncamiento o redondeo.
+
+Si resulta conveniente, usa SHA-256 mediante Web Crypto o una implementación apropiada al entorno de ejecución.
+
+No confundas un hash de contenido con los hashes de geometría, material y transformación que pueda proporcionar Roblox Studio.
+
+Documenta qué campos se incluyen y cuáles se excluyen deliberadamente.
+
+### 3.3. Pruebas obligatorias
+
+Crea pruebas que demuestren:
+
+- Igualdad de modelos idénticos.
+- Diferencia por desplazamiento mínimo de vértices.
+- Diferencia por cambios de textura con igual longitud.
+- Diferencia por cambios de normales.
+- Diferencia por cambios UV.
+- Diferencia por vertexColors.
+- Diferencia por propiedades PBR.
+- Diferencia por propiedades físicas.
+- Diferencia por jerarquía.
+- Diferencia por matrices de rotación.
+- Estabilidad después de serializar y volver a cargar.
+
+---
+
+# 4. PRIORIDAD CRÍTICA: MOTOR GEOMÉTRICO
+
+Audita `calculateAssetMetrics()` y las funciones relacionadas del motor 3D.
+
+### 4.1. Triangulación
+
+El algoritmo actual triangula polígonos mediante un abanico desde el primer vértice.
+
+Investiga las limitaciones con:
+
+- Polígonos convexos.
+- Polígonos cóncavos.
+- Polígonos no coplanares.
+- Caras con vértices duplicados.
+- Índices negativos.
+- Índices fuera de rango.
+- Vértices NaN o Infinity.
+- Triángulos degenerados.
+- Caras de longitud insuficiente.
+- Mallas con datos incompletos.
+
+Implementa una estrategia geométrica robusta y explícita.
+
+No afirmes que la triangulación es exacta si solo estás utilizando una aproximación.
+
+Si una geometría no puede triangularse correctamente, informa el error y no inventes métricas.
+
+### 4.2. Métricas
+
+Diferencia claramente:
+
+- Vértices reales.
+- Triángulos reales.
+- Vértices estimados.
+- Triángulos estimados.
+- Piezas.
+- Geometría inválida.
+- Geometría incompleta.
+
+No mezcles `poly_count` con un número real de triángulos si no está demostrado que representan lo mismo.
+
+### 4.3. División de mallas grandes
+
+Audita `splitOversizedMeshPart()`.
+
+Comprueba:
+
+- Conservación de todos los triángulos.
+- Conservación de normales.
+- Conservación de UV.
+- Conservación de vertexColors.
+- Remapeo correcto de índices.
+- IDs estables de las subpiezas.
+- Ausencia de triángulos degenerados introducidos.
+- Límites reales de EditableMesh.
+- Comportamiento con geometrías inválidas.
+
+No permitas que una geometría inválida sea reemplazada silenciosamente por vértices ficticios o por el índice cero.
+
+### 4.4. Pruebas
+
+Utiliza geometrías convexas, cóncavas, grandes, degeneradas y con índices incorrectos.
+
+Incluye casos de importación real y pruebas automatizadas reproducibles.
+
+---
+
+# 5. PRIORIDAD CRÍTICA: ESTADO DE FORGECONTEXT
+
+Audita profundamente `src/context/ForgeContext.tsx`.
+
+No te limites a revisar funciones aisladas. Comprueba el ciclo de vida completo del estado.
+
+### 5.1. Cambios sin guardar
+
+Revisa:
+
+- `savedAssetHashRef`.
+- `savedAssetSnapshotRef`.
+- `pendingChanges`.
+- `setActiveAsset`.
+- `applyActiveAssetDirectly`.
+- `applyAssetChange`.
+- `saveAssetToDisk`.
+- `confirmSwitchDiscard`.
+- `confirmSwitchSaveAndProceed`.
+- `safeNavigateTab`.
+- `cancelSwitch`.
+
+El sistema debe distinguir:
+
+1. Modelo recién generado.
+2. Modelo cargado desde biblioteca.
+3. Modelo modificado.
+4. Modelo guardado.
+5. Modelo descartado.
+6. Modelo sincronizado con Studio.
+7. Modelo modificado externamente en Studio.
+
+El snapshot guardado debe representar el último estado realmente persistido, no simplemente el último modelo cargado.
+
+### 5.2. Descartar cambios
+
+La operación de descarte debe restaurar realmente el snapshot persistido.
+
+Prueba:
+
+- Descartar y permanecer en el mismo modelo.
+- Descartar y cambiar de modelo.
+- Descartar y navegar a otra pestaña.
+- Cancelar el modal.
+- Guardar y cambiar.
+- Fallo al guardar.
+- Modelo sin snapshot persistido.
+- Modelo eliminado de la biblioteca.
+- Restauración después de varias operaciones.
+
+Comprueba que el historial, la selección, el hash y `pendingChanges` queden sincronizados.
+
+### 5.3. Generación y estado guardado
+
+Investiga especialmente el flujo de `CreateWizardView.tsx`:
+
+- `applyAssetChange(completedAsset, ...)`.
+- `setActiveAsset(completedAsset)`.
+- `fetchAssetLibrary()`.
+- Respuesta del backend.
+- Persistencia real del modelo.
+
+Evita que la generación borre accidentalmente el historial o marque como guardado un modelo que no se ha persistido.
+
+Un modelo generado no debe considerarse guardado únicamente porque se haya recibido un evento SSE `done`.
+
+La condición de persistencia debe estar respaldada por una respuesta verificable del backend.
+
+### 5.4. Undo y Redo
+
+Prueba los siguientes escenarios:
+
+- Una modificación.
+- Varias modificaciones.
+- Deshacer hasta el estado guardado.
+- Rehacer.
+- Crear una nueva rama de modificaciones después de deshacer.
+- Eliminar una pieza.
+- Agregar una pieza.
+- Modificar geometría.
+- Modificar PBR.
+- Cambiar de modelo.
+
+El historial debe representar operaciones reales y no estados ficticios.
+
+---
+
+# 6. PRIORIDAD CRÍTICA: GENERACIÓN Y SSE
+
+Audita `SseStreamParser` y `CreateWizardView.tsx`.
+
+### 6.1. Parser SSE
+
+Verifica el comportamiento con:
+
+- LF.
+- CRLF.
+- CR.
+- CRLF dividido entre chunks.
+- Eventos fragmentados.
+- Varios eventos en un chunk.
+- Eventos sin `data`.
+- Varias líneas `data`.
+- Comentarios.
+- Identificadores `id`.
+- Campo `retry`.
+- Buffer residual.
+- Cierre inesperado.
+- Respuestas incompletas.
+- Eventos de error.
+
+Revisa el comportamiento de `flush()`.
+
+No debe perder líneas residuales ni emitir eventos duplicados.
+
+### 6.2. Lector y cancelación
+
+Comprueba que:
+
+- AbortController cancela realmente la petición.
+- Se cancela el reader cuando corresponde.
+- Se libera el reader.
+- Se manejan errores de lectura.
+- Se maneja un cierre inesperado.
+- La interfaz no permanece indefinidamente en estado de generación.
+- Una generación anterior no sobrescribe el resultado de una generación nueva.
+
+### 6.3. Validación de respuesta
+
+El guard `isValidForgeAsset()` debe validar mucho más que nombre y existencia de piezas.
+
+Comprueba:
+
+- Tipo de asset.
+- Piezas.
+- Dimensiones.
+- Posiciones.
+- Rotaciones.
+- Colores.
+- Geometría.
+- Índices.
+- Materiales.
+- PBR.
+- Límites de tamaño.
+- Datos numéricos finitos.
+
+Rechaza respuestas mal formadas con mensajes útiles.
+
+No permitas que un modelo inválido llegue al editor como si fuera correcto.
+
+### 6.4. Pruebas
+
+Prueba el parser de manera independiente y el flujo real de generación con un backend controlado.
+
+Distingue pruebas de parser, pruebas de integración HTTP y generación real con Gemini.
+
+---
+
+# 7. PRIORIDAD CRÍTICA: SINCRONIZACIÓN BIDIRECCIONAL CON ROBLOX STUDIO
+
+Esta es una de las áreas más importantes del producto.
+
+La sincronización debe funcionar como un sistema de ingeniería fiable, no como un botón que envía una petición HTTP.
+
+Audita:
+
+- `pushToStudio()`.
+- `pullFromStudio()`.
+- `/api/v1/bridge/enqueue`.
+- `/api/v1/assets/rebuild-luau`.
+- `/api/v1/assets/studio-push`.
+- `/api/v1/assets/pull-from-rojo`.
+- `forge-bridge/src/`.
+- `backend/roblox_plugin/ForgeAIStudioPlugin.server.luau`.
+- `bridgeCoordinatorEngine.ts`.
+- `studioQueue.ts`.
+- `cloudClient.ts`.
+
+### 7.1. Estados de operación
+
+Distingue estrictamente:
+
+- Preparando.
+- Guardando.
+- Enviando.
+- Encolado.
+- Esperando a Studio.
+- Procesando.
+- Aplicado correctamente.
+- Aplicado parcialmente.
+- Rechazado.
+- Error.
+- Timeout.
+- Cancelado.
+- Desconectado.
+
+Una tarea encolada no es una tarea aplicada.
+
+Una respuesta HTTP 200 no es una confirmación de aplicación.
+
+Un ACK no es necesariamente una confirmación de modificación del DataModel.
+
+### 7.2. Confirmación real
+
+Para declarar `applied_successfully`, exige:
+
+1. Task ID válido.
+2. ACK correspondiente a la tarea.
+3. Resultado del plugin.
+4. Estado de ejecución correcto.
+5. Confirmación de que la operación se aplicó.
+6. Evidencia coherente de los objetos afectados.
+
+Si el plugin informa un error, la operación no puede aparecer como exitosa.
+
+Si hay un resultado ambiguo, informa estado indeterminado y permite consultar el estado de la tarea.
+
+No conviertas estados desconocidos en `completed` por defecto.
+
+### 7.3. Push
+
+Verifica:
+
+- Guardado real en Rojo.
+- Construcción del paquete.
+- Envío al Bridge.
+- Entrega al plugin.
+- Reconstrucción en Workspace.
+- Verificación del número de piezas.
+- Verificación de identidad.
+- Verificación de geometría.
+- Verificación de materiales.
+- Manejo de errores parciales.
+- Manejo de timeouts.
+- Idempotencia.
+
+El usuario debe saber si el modelo fue:
+
+- Guardado solamente.
+- Enviado al Bridge.
+- Recibido por el plugin.
+- Aplicado en Studio.
+- Verificado en Studio.
+
+### 7.4. Pull
+
+Determina con precisión qué significa actualmente Pull.
+
+No confundas:
+
+- Leer archivos de Rojo.
+- Leer la biblioteca del backend.
+- Leer la selección de Roblox Studio.
+- Serializar un modelo del DataModel.
+- Importar un modelo de Studio a Forge.
+
+El Pull desde Studio debe obtener información real del DataModel y preservar:
+
+- Identidad de piezas.
+- Jerarquía.
+- Transformaciones.
+- Materiales.
+- Propiedades físicas.
+- MeshIds.
+- Geometry hashes.
+- Material hashes.
+- Transform hashes.
+- Geometría editable cuando Roblox permita acceder a ella.
+
+Cuando una MeshPart externa no permita leer su geometría, debe identificarse como tal. No inventes buffers de geometría.
+
+### 7.5. Conflictos
+
+Audita:
+
+- `smart_merge`.
+- `keep_forge`.
+- `accept_studio`.
+
+Verifica que la opción elegida en la interfaz se envíe realmente al backend.
+
+No dejes valores seleccionables que luego se ignoren.
+
+Implementa un comportamiento coherente ante:
+
+- Cambios simultáneos.
+- Piezas eliminadas.
+- Piezas renombradas.
+- Piezas duplicadas.
+- Piezas nuevas.
+- Conflictos de geometría.
+- Conflictos de materiales.
+- Cambios de jerarquía.
+
+### 7.6. Idempotencia y concurrencia
+
+Comprueba:
+
+- Repetición de una tarea.
+- Doble clic.
+- Reintento después de timeout.
+- Pérdida de conexión.
+- Plugin reconectado.
+- Tareas duplicadas.
+- Dos modelos enviados simultáneamente.
+- Tareas antiguas recibidas después de una nueva.
+
+Una tarea no debe aplicar modificaciones dos veces por un simple reintento de transporte.
+
+---
+
+# 8. PRIORIDAD ALTA: FORGE LOCAL BRIDGE Y SEGURIDAD
+
+Inspecciona el estado local completo de `forge-bridge/`.
+
+No asumas que el código publicado y el código local son idénticos.
+
+### 8.1. Seguridad
+
+Audita:
+
+- Bind exclusivo a `127.0.0.1`.
+- Validación de origen.
+- CORS.
+- Protección CSRF.
+- HMAC.
+- Comparación constante de tokens.
+- Expiración de sesiones.
+- Path traversal.
+- Allowlist de operaciones.
+- Validación de payloads.
+- Límites de tamaño.
+- Escrituras atómicas.
+- Rollback.
+- Ejecución de procesos sin shell.
+- Exposición de logs.
+- Filtrado de secretos.
+
+### 8.2. Comunicación
+
+Comprueba:
+
+- WebSocket outbound.
+- Fallback HTTPS polling.
+- Heartbeat.
+- Reconexión.
+- ACK.
+- Resultado de tareas.
+- Expiración de sesiones.
+- Pérdida de conexión.
+- Recuperación de tareas pendientes.
+- Cierre limpio del proceso.
+
+### 8.3. Estado del Bridge
+
+La interfaz debe distinguir:
+
+- Bridge instalado.
+- Bridge ejecutándose.
+- Bridge conectado al backend.
+- Plugin instalado.
+- Plugin conectado.
+- Roblox Studio abierto.
+- Proyecto Rojo detectado.
+- Rojo ejecutándose.
+- Sincronización disponible.
+
+No marques todo como conectado cuando solo uno de esos componentes responde.
+
+### 8.4. Pruebas
+
+Utiliza pruebas de integración con servicios locales controlados.
+
+No declares que una conexión Cloud Run funciona si no la has comprobado.
+
+No cambies el servicio remoto ni publiques cambios.
+
+---
+
+# 9. PRIORIDAD ALTA: IMPORTACIÓN, EXPORTACIÓN Y PERSISTENCIA 3D
+
+Audita los formatos:
+
+- GLB.
+- GLTF.
+- OBJ.
+- MTL.
+- FBX.
+- RBXMX.
+
+Prueba archivos reales, no únicamente modelos creados en memoria.
+
+Comprueba:
+
+- Geometría.
+- Normales.
+- UV.
+- VertexColors.
+- Materiales.
+- Texturas.
+- Escala.
+- Rotación.
+- Jerarquía.
+- Nombres.
+- IDs.
+- PBR.
+- Mallas múltiples.
+- Mallas grandes.
+
+La exportación debe preservar el contenido que el formato soporta.
+
+La importación debe informar qué propiedades se conservaron, cuáles se transformaron y cuáles no se pudieron importar.
+
+### Persistencia
+
+Verifica:
+
+- Guardado en biblioteca.
+- Guardado en Rojo.
+- Recuperación.
+- Versiones.
+- Historial.
+- Archivos RBXMX.
+- Archivos GLTF.
+- Archivos OBJ/MTL.
+- Integridad después de reiniciar el backend.
+
+No muestres éxito si solo se guardó una representación parcial.
+
+---
+
+# 10. PRIORIDAD ALTA: EDITOR 3D Y VISUALIZACIÓN
+
+Audita `RobloxWorldViewport3D.tsx` y las herramientas de edición.
+
+Comprueba:
+
+- Orbit.
+- Zoom.
+- Pan.
+- Fit to view.
+- Selección.
+- Deselección.
+- Selección de piezas.
+- Transformaciones.
+- Materiales.
+- Iluminación.
+- Sombras.
+- Texturas.
+- PBR.
+- Importación.
+- Exportación.
+- Limpieza de recursos Three.js.
+
+Revisa fugas de memoria en geometrías, materiales, texturas, renderers y listeners.
+
+La selección visual debe corresponder exactamente a la pieza seleccionada en ForgeContext.
+
+Las modificaciones deben generar cambios reales en el modelo y actualizar correctamente el historial.
+
+---
+
+# 11. PRIORIDAD ALTA: EXPERIENCIA DE USUARIO
+
+La interfaz ya tiene una organización por secciones y modo simple/avanzado.
+
+No hagas otro rediseño completo ni vuelvas a introducir una multitud de botones.
+
+Evalúa si el usuario puede completar sin ayuda estas tareas:
+
+1. Crear un modelo desde texto.
+2. Crear un modelo desde imagen.
+3. Importar un modelo.
+4. Visualizarlo.
+5. Seleccionar una pieza.
+6. Cambiar su geometría.
+7. Modificar materiales.
+8. Guardar.
+9. Exportar.
+10. Enviar a Roblox Studio.
+11. Recuperar cambios desde Studio.
+
+Corrige únicamente los problemas de usabilidad que dificulten estas operaciones.
+
+Requisitos:
+
+- Modo simple como predeterminado.
+- Herramientas avanzadas accesibles sin saturar.
+- Mensajes que expliquen qué está ocurriendo.
+- Errores accionables.
+- Tooltips útiles.
+- Indicadores de estado reales.
+- No mostrar botones que no funcionan.
+- No ocultar errores detrás de mensajes genéricos.
+- No duplicar controles innecesariamente.
+
+No sacrifiques capacidades técnicas para obtener una interfaz aparentemente más sencilla.
+
+---
+
+# 12. PRUEBAS OBLIGATORIAS
+
+Debes ejecutar las pruebas que correspondan al entorno disponible.
+
+### 12.1. Calidad de código
+
+- TypeScript.
+- Build de producción.
+- Tests unitarios.
+- Tests de integración.
+- Validación de dependencias.
+- Revisión de errores de consola.
+- Revisión de advertencias.
+- Seguridad de dependencias.
+
+### 12.2. React
+
+Monta `ForgeProvider` en un entorno de pruebas real de React.
+
+No simules manualmente el comportamiento del contexto cuando puedes invocar sus funciones reales.
+
+Prueba cambios pendientes, snapshots, descarte, guardado, undo, redo, selección y navegación.
+
+### 12.3. SSE
+
+Prueba el parser y el consumo del stream completo.
+
+Incluye errores, cancelaciones, cierre inesperado y respuestas fragmentadas.
+
+### 12.4. Backend
+
+Prueba los endpoints reales en un entorno local.
+
+Incluye:
+
+- Respuestas válidas.
+- Respuestas inválidas.
+- HTTP 400.
+- HTTP 401.
+- HTTP 403.
+- HTTP 404.
+- HTTP 500.
+- Timeout.
+- Conexión perdida.
+- Payload incompleto.
+- Tarea duplicada.
+
+### 12.5. Rojo
+
+Si Rojo está disponible:
+
+- Detecta el proyecto.
+- Comprueba configuración.
+- Ejecuta build.
+- Verifica los archivos generados.
+- Comprueba que no se alteren archivos fuera del proyecto.
+
+### 12.6. Roblox Studio
+
+Si existe una instancia real disponible, verifica:
+
+1. Conexión del plugin.
+2. Heartbeat.
+3. Estado de Studio.
+4. Lectura de selección.
+5. Serialización de un modelo.
+6. Push de un modelo de prueba.
+7. Confirmación de aplicación.
+8. Pull del modelo.
+9. Comparación de hashes.
+10. Manejo de errores.
+
+Diferencia claramente:
+
+- Test unitario.
+- Test con mocks.
+- Test de integración local.
+- Test con Bridge real.
+- Test con plugin real.
+- Test interactivo de Roblox Studio.
+
+Si Roblox Studio no está abierto o no puedes ejecutar una prueba, declara `NO VERIFICADO`.
+
+No fabriques logs ni resultados.
+
+---
+
+# 13. CORRECCIÓN POR FASES
+
+No intentes corregir todo simultáneamente.
+
+Trabaja en este orden:
+
+**Fase A:** Estado Git y auditoría de arquitectura.
+
+**Fase B:** Hashes, integridad de geometría y métricas.
+
+**Fase C:** ForgeContext, snapshots, persistencia, descarte y Undo/Redo.
+
+**Fase D:** SSE y generación.
+
+**Fase E:** Bridge, plugin y sincronización Push/Pull.
+
+**Fase F:** Importación, exportación y editor 3D.
+
+**Fase G:** UX, documentación y pruebas de regresión.
+
+Al terminar cada fase:
+
+1. Explica qué encontraste.
+2. Corrige los defectos confirmados.
+3. Ejecuta pruebas.
+4. Comprueba que no rompiste funcionalidades anteriores.
+5. Documenta los cambios.
+6. Continúa con la siguiente fase.
+
+Si una fase depende de una operación externa que no puedes ejecutar, continúa con las pruebas locales posibles y documenta el bloqueo.
+
+---
+
+# 14. CRITERIOS DE ACEPTACIÓN
+
+La misión no se considera completada hasta que se demuestre:
+
+- Los hashes detectan cambios relevantes del modelo.
+- Las métricas geométricas no inventan triángulos.
+- La triangulación maneja adecuadamente las geometrías admitidas.
+- El descarte restaura el snapshot persistido.
+- Undo/Redo funcionan sobre el contexto React real.
+- La generación no confunde creación con persistencia.
+- SSE no pierde eventos ni datos.
+- Los errores de generación se comunican correctamente.
+- La importación y exportación conservan las propiedades compatibles.
+- Push no declara éxito antes de una confirmación real.
+- Pull recupera datos de la fuente correcta.
+- Los conflictos tienen un comportamiento definido.
+- Las tareas duplicadas no provocan modificaciones duplicadas.
+- Bridge y plugin informan estados diferenciados.
+- No hay secretos expuestos.
+- El proyecto compila.
+- Las pruebas automatizadas relevantes pasan.
+- No se han introducido botones decorativos o funcionalidades ficticias.
+- La interfaz permite completar los flujos principales sin confusión.
+
+---
+
+# 15. INFORME FINAL OBLIGATORIO
+
+Al finalizar, entrega un informe estructurado con:
+
+## A. Estado inicial
+- Commit publicado.
+- Rama.
+- Cambios locales.
+- Archivos sin seguimiento.
+- Estado de Forge Bridge.
+
+## B. Defectos encontrados
+Para cada uno:
+- Archivo.
+- Función.
+- Problema.
+- Impacto.
+- Prioridad.
+- Evidencia.
+
+## C. Correcciones realizadas
+- Archivos modificados.
+- Funciones corregidas.
+- Decisiones técnicas.
+- Compatibilidad preservada.
+
+## D. Pruebas
+Incluye el comando ejecutado, resultado, número de pruebas y errores.
+
+Diferencia pruebas automatizadas, integración local y pruebas reales de Roblox Studio.
+
+## E. Sincronización
+Describe por separado:
+- Forge.
+- Backend Express.
+- Backend FastAPI.
+- Local Bridge.
+- Plugin Roblox Studio.
+- Rojo.
+- Cloud Run.
+
+Indica qué conexiones se verificaron realmente.
+
+## F. Funcionalidades pendientes
+No ocultes funcionalidades incompletas.
+
+## G. Estado de cada criterio
+
+Utiliza exclusivamente:
+
+- `COMPLETADO`
+- `PARCIAL`
+- `NO COMPLETADO`
+- `NO VERIFICADO`
+
+## H. Riesgos restantes
+Explica qué impide considerar Forge AI Studio un producto estable y fiable.
+
+## I. Próxima prioridad
+Propón únicamente las siguientes tareas que aporten valor real.
+
+---
+
+# 16. INSTRUCCIÓN FINAL
+
+No quiero que simplemente me entregues otra auditoría con una lista de recomendaciones.
+
+Quiero que inspecciones el proyecto local, identifiques los defectos que siguen presentes, corrijas los que puedas resolver de forma segura, implementes las pruebas necesarias y documentes los resultados.
+
+Prioriza integridad, fiabilidad, seguridad y funcionamiento real por encima de agregar funcionalidades nuevas.
+
+No rehagas módulos que ya funcionan sin una justificación técnica.
+
+No rompas contratos existentes para resolver un problema local.
+
+No marques como terminado algo que solo parece funcionar en la interfaz.
+
+No realices commit, push, publicación de assets ni despliegues.
+
+**El objetivo es dejar Forge AI Studio en un estado técnicamente sólido, verificable y preparado para una siguiente etapa de pruebas reales con Roblox Studio.**
