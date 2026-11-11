@@ -12,6 +12,7 @@ import {
   FORGE_ROADMAP_STATUS,
   SPECIALIZED_AGENTS,
 } from './src/server/engines/architectureManifest.ts';
+import { cloudBridgeCoordinator } from './src/server/engines/bridgeCoordinatorEngine.ts';
 import {
   AI_MODULE_CONTRACTS,
   buildAiSelfUnderstandingManifest,
@@ -196,6 +197,15 @@ function writeToRojoWorkspace(rojoTargetFolder: string, fileName: string, luauCo
   const safeCode = validateAndSanitizeLuau(luauCode);
   const absTarget = resolveSafeProjectPath(rojoTargetFolder, fileName);
   fs.writeFileSync(absTarget, safeCode, 'utf-8');
+  const rojoRoot = path.resolve(runtimeRojoPath);
+  const relToRojo = path.relative(rojoRoot, absTarget).replace(/\\/g, '/');
+  if (cloudBridgeCoordinator.isBridgeConnected()) {
+    void cloudBridgeCoordinator.enqueueTask('rojo.write_file', {
+      relativePath: relToRojo,
+      content: safeCode,
+      encoding: 'utf-8',
+    });
+  }
   const relToRoot = path.relative(process.cwd(), absTarget).replace(/\\/g, '/');
   return `./${relToRoot}`;
 }
@@ -206,6 +216,15 @@ function writeRawAssetToRojoWorkspace(rojoTargetFolder: string, fileName: string
     fs.writeFileSync(absTarget, content, 'utf-8');
   } else {
     fs.writeFileSync(absTarget, content);
+  }
+  const rojoRoot = path.resolve(runtimeRojoPath);
+  const relToRojo = path.relative(rojoRoot, absTarget).replace(/\\/g, '/');
+  if (cloudBridgeCoordinator.isBridgeConnected()) {
+    void cloudBridgeCoordinator.enqueueTask('rojo.write_file', {
+      relativePath: relToRojo,
+      content: typeof content === 'string' ? content : content.toString('base64'),
+      encoding: typeof content === 'string' ? 'utf-8' : 'base64',
+    });
   }
   const relToRoot = path.relative(process.cwd(), absTarget).replace(/\\/g, '/');
   return `./${relToRoot}`;
@@ -482,7 +501,110 @@ app.get('/api/v1/health', async (_req, res) => {
 });
 
 app.get('/api/v1/rojo/status', async (_req, res) => {
-  res.json(await getRojoFullStatus());
+  const localStatus = await getRojoFullStatus();
+  const bridgeStatus = cloudBridgeCoordinator.getPublicBridgeStatus();
+  if (bridgeStatus.bridgeConnected && bridgeStatus.rojo) {
+    return res.json({
+      ...localStatus,
+      rojo_cli_installed: bridgeStatus.rojo.rojoCliInstalled || localStatus.rojo_cli_installed,
+      rojo_version: bridgeStatus.rojo.rojoVersion || localStatus.rojo_version,
+      rojo_serve_port: bridgeStatus.rojo.rojoServePort || localStatus.rojo_serve_port,
+      rojo_server_active: bridgeStatus.rojo.rojoServerListening || localStatus.rojo_server_active,
+      rojo_server_listening: bridgeStatus.rojo.rojoServerListening || localStatus.rojo_server_active,
+      default_project_name: bridgeStatus.rojo.projectName,
+      synced_files_count: bridgeStatus.rojo.syncedFilesCount,
+      bridge_connected: true,
+      bridge_status: bridgeStatus,
+    });
+  }
+  res.json({
+    ...localStatus,
+    bridge_connected: false,
+    bridge_status: bridgeStatus,
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 4b. Forge Local Bridge Cloud Coordinator Endpoints (Fase 3, 5, 6, 7, 8)
+// -----------------------------------------------------------------------------
+
+app.post('/api/v1/bridge/auth/handshake', (req, res) => {
+  const providedHeader = String(req.headers['x-forge-token'] || '').trim();
+  const result = cloudBridgeCoordinator.handleHandshake(req.body || {}, providedHeader);
+  if (!result.accepted) {
+    return res.status(401).json({ error: result.error || 'Handshake no autorizado.' });
+  }
+  res.json(result);
+});
+
+app.post('/api/v1/bridge/heartbeat', (req, res) => {
+  const authHeader = String(req.headers.authorization || '');
+  const sessionHeader = String(req.headers['x-bridge-session'] || '');
+  const forgeTokenHeader = String(req.headers['x-forge-token'] || '');
+  if (!cloudBridgeCoordinator.verifySessionRequest(authHeader, sessionHeader, forgeTokenHeader)) {
+    return res.status(401).json({ error: 'Sesión del puente expirada o no autenticada.' });
+  }
+  const resp = cloudBridgeCoordinator.handleHeartbeat(req.body || {});
+  res.json(resp);
+});
+
+app.post('/api/v1/bridge/task-ack', (req, res) => {
+  const authHeader = String(req.headers.authorization || '');
+  const sessionHeader = String(req.headers['x-bridge-session'] || '');
+  const forgeTokenHeader = String(req.headers['x-forge-token'] || '');
+  if (!cloudBridgeCoordinator.verifySessionRequest(authHeader, sessionHeader, forgeTokenHeader)) {
+    return res.status(401).json({ error: 'Sesión del puente expirada o no autenticada.' });
+  }
+  const { taskId } = req.body || {};
+  const acked = cloudBridgeCoordinator.handleTaskAck(String(taskId || ''));
+  res.json({ acked });
+});
+
+app.post('/api/v1/bridge/task-result', (req, res) => {
+  const authHeader = String(req.headers.authorization || '');
+  const sessionHeader = String(req.headers['x-bridge-session'] || '');
+  const forgeTokenHeader = String(req.headers['x-forge-token'] || '');
+  if (!cloudBridgeCoordinator.verifySessionRequest(authHeader, sessionHeader, forgeTokenHeader)) {
+    return res.status(401).json({ error: 'Sesión del puente expirada o no autenticada.' });
+  }
+  const accepted = cloudBridgeCoordinator.handleTaskResult(req.body || {});
+  res.json({ accepted });
+});
+
+app.get('/api/v1/bridge/status', (_req, res) => {
+  res.json(cloudBridgeCoordinator.getPublicBridgeStatus());
+});
+
+app.post('/api/v1/bridge/reconnect', (_req, res) => {
+  cloudBridgeCoordinator.requestReconnect();
+  res.json({
+    reconnecting: true,
+    message: 'Se solicitó renovación de sesión al puente local.',
+    status: cloudBridgeCoordinator.getPublicBridgeStatus(),
+  });
+});
+
+app.post('/api/v1/bridge/enqueue', async (req, res) => {
+  try {
+    const {
+      operation,
+      payload = {},
+      wait_for_completion = true,
+      timeout_ms = 20000,
+    } = req.body || {};
+    if (!operation || typeof operation !== 'string') {
+      return res.status(400).json({ error: 'Se requiere el campo operation.' });
+    }
+    const result = await cloudBridgeCoordinator.enqueueTask(
+      operation,
+      payload,
+      Boolean(wait_for_completion),
+      Number(timeout_ms)
+    );
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post('/api/v1/rojo/configure', async (req, res) => {
@@ -994,6 +1116,18 @@ app.post('/api/v1/assets/export-roblox-package', (req, res) => {
 
     const finalAsset = save_to_library ? saveAssetToLibrary(updatedAsset) : updatedAsset;
 
+    let studioBridgeTask: any = null;
+    if (req.body.sync_to_studio && cloudBridgeCoordinator.isBridgeConnected()) {
+      studioBridgeTask = await cloudBridgeCoordinator.enqueueTask(
+        'studio.apply_modifications',
+        {
+          modelName: safeName,
+          asset: finalAsset,
+        },
+        false
+      );
+    }
+
     res.json({
       success: allFiveExist,
       all_five_exist: allFiveExist,
@@ -1001,6 +1135,7 @@ app.post('/api/v1/assets/export-roblox-package', (req, res) => {
       verified_files: verifiedFiles,
       asset: finalAsset,
       saved_files: savedFiles,
+      studio_bridge_task: studioBridgeTask,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -1961,6 +2096,24 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
       throw new Error(`Atomic studio-push failed and was rolled back: ${writeErr.message}`);
     }
 
+    if (cloudBridgeCoordinator.isBridgeConnected() && !req.headers['x-bridge-session']) {
+      const cleanRelFolder = String(targetFolder || 'src/shared/Assets3D').replace(/^[/\\]+/, '');
+      void cloudBridgeCoordinator.enqueueTask('rojo.write_package', {
+        files: [
+          {
+            relativePath: `${cleanRelFolder}/${safeName}.luau`,
+            content: validateAndSanitizeLuau(luauCode),
+            encoding: 'utf-8',
+          },
+          {
+            relativePath: `${cleanRelFolder}/${safeName}.rbxmx`,
+            content: rbxmxOut,
+            encoding: 'utf-8',
+          },
+        ],
+      });
+    }
+
     res.json({
       success: true,
       status: 'synced',
@@ -1969,6 +2122,8 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
       conflict_policy: conflictPolicy,
       asset: saved,
       sync_diff: syncDiff,
+      luau_code: validateAndSanitizeLuau(luauCode),
+      rbxmx_content: rbxmxOut,
       luau_saved_path: luauSavedPath,
       rbxmx_saved_path: rbxmxSavedPath,
       updated_part_count: finalParts.length,

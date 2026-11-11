@@ -17,6 +17,7 @@ import {
   Terminal,
   AlertTriangle,
 } from 'lucide-react';
+import { LocalBridgeStatusPanel } from './LocalBridgeStatusPanel.tsx';
 
 interface RojoStatusData {
   project_path: string;
@@ -143,6 +144,9 @@ end`;
 
   return (
     <div className="flex flex-col gap-6">
+      {/* Fase 8: Conexión Local — Forge Local Bridge */}
+      <LocalBridgeStatusPanel />
+
       {/* Live Rojo Project Configurator & Diagnostics */}
       <div className="p-6 rounded-2xl bg-[#0d1117] border border-slate-800 shadow-xl flex flex-col gap-5">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">

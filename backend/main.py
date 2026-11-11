@@ -432,7 +432,266 @@ def get_rojo_status():
         "rojo_serve_port": rojo_port,
         "rojo_server_active": rojo_server_active,
         "audit": audit,
+        "bridge_connected": _bridge_is_connected(),
+        "bridge_status": _get_public_bridge_status(),
     }
+
+
+# ------------------------------------------------------------------------------
+# 5b. Forge Local Bridge Cloud Coordinator State & Endpoints (FastAPI Parity)
+# ------------------------------------------------------------------------------
+
+_BRIDGE_STATE: Dict[str, Any] = {
+    "session_id": None,
+    "session_token": None,
+    "session_expires_at": 0.0,
+    "bridge_version": "1.0.0",
+    "last_heartbeat_at": 0.0,
+    "reconnect_requested": False,
+    "rojo_remote_status": None,
+    "studio_remote_state": None,
+    "queue_metrics": {},
+    "pending_tasks": {},
+    "recent_results": [],
+    "recent_errors": [],
+}
+
+
+def _bridge_is_connected() -> bool:
+    sid = _BRIDGE_STATE["session_id"]
+    if not sid or time.time() > _BRIDGE_STATE["session_expires_at"] or _BRIDGE_STATE["reconnect_requested"]:
+        return False
+    return (time.time() - _BRIDGE_STATE["last_heartbeat_at"]) < 12.0
+
+
+def _get_public_bridge_status() -> Dict[str, Any]:
+    pending_list = [
+        {
+            "taskId": item["envelope"]["taskId"],
+            "operation": item["envelope"]["operation"],
+            "status": item["status"],
+            "correlationId": item["envelope"]["correlationId"],
+            "timestamp": item["envelope"]["timestamp"],
+        }
+        for item in _BRIDGE_STATE["pending_tasks"].values()
+    ]
+    return {
+        "bridgeConnected": _bridge_is_connected(),
+        "bridgeVersion": _BRIDGE_STATE["bridge_version"],
+        "protocolVersion": "1.0",
+        "sessionActive": bool(_BRIDGE_STATE["session_id"] and time.time() < _BRIDGE_STATE["session_expires_at"]),
+        "lastHeartbeatAt": (
+            datetime.utcfromtimestamp(_BRIDGE_STATE["last_heartbeat_at"]).isoformat() + "Z"
+            if _BRIDGE_STATE["last_heartbeat_at"] > 0
+            else None
+        ),
+        "activeProject": (_BRIDGE_STATE["rojo_remote_status"] or {}).get("projectName"),
+        "rojo": _BRIDGE_STATE["rojo_remote_status"]
+        or {
+            "projectName": None,
+            "projectConnected": False,
+            "defaultProjectJsonFound": False,
+            "rojoCliInstalled": False,
+            "rojoVersion": None,
+            "rojoServePort": 34872,
+            "rojoServerListening": False,
+            "syncedFilesCount": 0,
+        },
+        "robloxStudio": _BRIDGE_STATE["studio_remote_state"]
+        or {
+            "connected": False,
+            "lastSeenAt": None,
+            "pluginVersion": None,
+            "placeName": None,
+            "selectedModelName": None,
+            "selectedPartCount": 0,
+            "pendingDestructiveConfirmations": 0,
+        },
+        "pendingTasksCount": len(pending_list),
+        "pendingTasks": pending_list,
+        "recentResults": _BRIDGE_STATE["recent_results"][-10:],
+        "recentErrors": _BRIDGE_STATE["recent_errors"][-10:],
+        "queueMetrics": _BRIDGE_STATE["queue_metrics"],
+    }
+
+
+def _bridge_get_shared_secret() -> str:
+    return (
+        os.environ.get("FORGE_BRIDGE_SHARED_SECRET")
+        or os.environ.get("FORGE_SECURITY_TOKEN")
+        or os.environ.get("FORGE_LOCAL_TOKEN")
+        or ""
+    ).strip()
+
+
+def _bridge_sign_envelope(env: Dict[str, Any]) -> str:
+    import hashlib
+    import hmac
+    secret = _bridge_get_shared_secret()
+    if not secret:
+        return ""
+    payload_str = json.dumps(env.get("payload") or {}, separators=(",", ":"))
+    canonical = "|".join([
+        str(env.get("protocolVersion", "1.0")),
+        str(env.get("taskId", "")),
+        str(env.get("sessionId", "")),
+        str(env.get("operation", "")),
+        str(env.get("timestamp", "")),
+        str(env.get("correlationId", "")),
+        payload_str,
+    ])
+    return hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _bridge_verify_session_request(request: Request) -> bool:
+    if (
+        not _BRIDGE_STATE["session_id"]
+        or time.time() > _BRIDGE_STATE["session_expires_at"]
+        or _BRIDGE_STATE["reconnect_requested"]
+    ):
+        return False
+    auth_header = request.headers.get("authorization", "")
+    bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    if bearer and _BRIDGE_STATE["session_token"] and bearer == _BRIDGE_STATE["session_token"]:
+        return True
+    secret = _bridge_get_shared_secret()
+    forge_tok = request.headers.get("x-forge-token", "").strip()
+    sess_hdr = request.headers.get("x-bridge-session", "").strip()
+    if secret and forge_tok == secret and (not sess_hdr or sess_hdr == _BRIDGE_STATE["session_id"]):
+        return True
+    return not secret and bool(_BRIDGE_STATE["session_id"])
+
+
+@app.post("/api/v1/bridge/auth/handshake")
+def bridge_auth_handshake(request: Request, body: Dict[str, Any]):
+    import hashlib
+    import hmac
+    import secrets
+    secret = _bridge_get_shared_secret()
+    bridge_version = str(body.get("bridgeVersion", "1.0.0")).strip()
+    protocol_version = str(body.get("protocolVersion", "1.0")).strip()
+    timestamp = str(body.get("timestamp", "")).strip()
+    nonce = str(body.get("nonce", "")).strip()
+    signature = str(body.get("signature", "")).strip()
+    header_tok = request.headers.get("x-forge-token", "").strip()
+
+    if secret:
+        canonical = f"{bridge_version}|{protocol_version}|{timestamp}|{nonce}"
+        expected_sig = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+        sig_ok = bool(signature) and hmac.compare_digest(signature, expected_sig)
+        tok_ok = bool(header_tok) and hmac.compare_digest(header_tok, secret)
+        if not sig_ok and not tok_ok:
+            raise HTTPException(status_code=401, detail="Invalid HMAC signature or shared secret in handshake.")
+
+    sid = f"sess_{secrets.token_hex(12)}"
+    stoken = secrets.token_hex(24)
+    expires_ms = int((time.time() + 3600) * 1000)
+    _BRIDGE_STATE["session_id"] = sid
+    _BRIDGE_STATE["session_token"] = stoken
+    _BRIDGE_STATE["session_expires_at"] = time.time() + 3600
+    _BRIDGE_STATE["bridge_version"] = bridge_version
+    _BRIDGE_STATE["last_heartbeat_at"] = time.time()
+    _BRIDGE_STATE["reconnect_requested"] = False
+    if isinstance(body.get("rojoStatus"), dict):
+        _BRIDGE_STATE["rojo_remote_status"] = body["rojoStatus"]
+    if isinstance(body.get("studioState"), dict):
+        _BRIDGE_STATE["studio_remote_state"] = body["studioState"]
+    return {
+        "accepted": True,
+        "sessionId": sid,
+        "sessionToken": stoken,
+        "expiresAt": expires_ms,
+        "wsSupported": False,
+    }
+
+
+@app.post("/api/v1/bridge/heartbeat")
+def bridge_heartbeat(request: Request, body: Dict[str, Any]):
+    if not _bridge_verify_session_request(request):
+        raise HTTPException(status_code=401, detail="Bridge session expired or reconnect requested.")
+    _BRIDGE_STATE["last_heartbeat_at"] = time.time()
+    if isinstance(body.get("rojoStatus"), dict):
+        _BRIDGE_STATE["rojo_remote_status"] = body["rojoStatus"]
+    if isinstance(body.get("studioState"), dict):
+        _BRIDGE_STATE["studio_remote_state"] = body["studioState"]
+    if isinstance(body.get("queueMetrics"), dict):
+        _BRIDGE_STATE["queue_metrics"] = body["queueMetrics"]
+    pending = []
+    for item in _BRIDGE_STATE["pending_tasks"].values():
+        if item["status"] == "queued":
+            env = dict(item["envelope"])
+            env["sessionId"] = _BRIDGE_STATE["session_id"] or env.get("sessionId", "")
+            env["signature"] = _bridge_sign_envelope(env)
+            pending.append(env)
+    return {"pendingTasks": pending}
+
+
+@app.post("/api/v1/bridge/task-ack")
+def bridge_task_ack(request: Request, body: Dict[str, Any]):
+    if not _bridge_verify_session_request(request):
+        raise HTTPException(status_code=401, detail="Unauthorized bridge session.")
+    tid = str(body.get("taskId", ""))
+    if tid in _BRIDGE_STATE["pending_tasks"]:
+        _BRIDGE_STATE["pending_tasks"][tid]["status"] = "acked"
+        return {"acked": True}
+    return {"acked": False}
+
+
+@app.post("/api/v1/bridge/task-result")
+def bridge_task_result(request: Request, body: Dict[str, Any]):
+    if not _bridge_verify_session_request(request):
+        raise HTTPException(status_code=401, detail="Unauthorized bridge session.")
+    tid = str(body.get("taskId", ""))
+    _BRIDGE_STATE["pending_tasks"].pop(tid, None)
+    _BRIDGE_STATE["recent_results"].append(body)
+    if body.get("status") in ("failed", "timeout"):
+        _BRIDGE_STATE["recent_errors"].append({
+            "taskId": tid,
+            "operation": body.get("operation", "unknown"),
+            "error": body.get("error", "Error"),
+            "timestamp": body.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+        })
+    return {"accepted": True}
+
+
+@app.get("/api/v1/bridge/status")
+def bridge_get_status():
+    return _get_public_bridge_status()
+
+
+@app.post("/api/v1/bridge/reconnect")
+def bridge_request_reconnect():
+    _BRIDGE_STATE["reconnect_requested"] = True
+    _BRIDGE_STATE["session_expires_at"] = 0.0
+    return {
+        "reconnecting": True,
+        "status": _get_public_bridge_status(),
+    }
+
+
+@app.post("/api/v1/bridge/enqueue")
+def bridge_enqueue_task(body: Dict[str, Any]):
+    import uuid
+    operation = str(body.get("operation", "")).strip()
+    if not operation:
+        raise HTTPException(status_code=400, detail="Operation is required.")
+    tid = f"task_{uuid.uuid4()}"
+    cid = f"corr_{int(time.time() * 1000)}"
+    envelope: Dict[str, Any] = {
+        "protocolVersion": "1.0",
+        "taskId": tid,
+        "sessionId": _BRIDGE_STATE["session_id"] or "pending_session",
+        "operation": operation,
+        "payload": body.get("payload") or {},
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "correlationId": cid,
+    }
+    envelope["signature"] = _bridge_sign_envelope(envelope)
+    _BRIDGE_STATE["pending_tasks"][tid] = {
+        "envelope": envelope,
+        "status": "queued",
+    }
+    return {"queued": True, "taskId": tid, "correlationId": cid}
 
 
 class RojoConfigRequest(BaseModel):

@@ -23,17 +23,31 @@ local StarterGui = game:GetService("StarterGui")
 local StarterPlayer = game:GetService("StarterPlayer")
 local Workspace = game:GetService("Workspace")
 
--- Default unified backend endpoint (FastAPI port 8000 or Gateway port 3000)
+-- Default unified backend endpoint (FastAPI port 8000 or Gateway port 3000) and Local Bridge (127.0.0.1:48720)
 local savedBackendUrl = ""
+local savedBridgeUrl = ""
 local savedSecurityToken = ""
 pcall(function()
     if plugin and type(plugin.GetSetting) == "function" then
         savedBackendUrl = tostring(plugin:GetSetting("ForgeBackendUrl") or "")
+        savedBridgeUrl = tostring(plugin:GetSetting("ForgeLocalBridgeUrl") or "")
         savedSecurityToken = tostring(plugin:GetSetting("ForgeSecurityToken") or "")
     end
 end)
 local BACKEND_URL = if #savedBackendUrl > 0 then savedBackendUrl else "http://127.0.0.1:8000"
-local FORGE_SECURITY_TOKEN = savedSecurityToken
+local LOCAL_BRIDGE_URL = if #savedBridgeUrl > 0 then savedBridgeUrl else "http://127.0.0.1:48720"
+local DEFAULT_LOCAL_TOKEN = "forge-local-dev-token-2026"
+local FORGE_SECURITY_TOKEN = if #savedSecurityToken > 0 then savedSecurityToken else DEFAULT_LOCAL_TOKEN
+
+-- Pending destructive operations queue (Fase 6: Never execute destructive deletions automatically without user confirmation)
+local pendingDestructiveOperations: {
+    {
+        taskId: string?,
+        description: string,
+        instancesToDelete: { Instance },
+        onCompleted: ((boolean) -> ())?,
+    }
+} = {}
 
 local toolbar = plugin:CreateToolbar("Forge AI v2.1")
 local toggleButton = toolbar:CreateButton(
@@ -93,6 +107,37 @@ local function requestBackend(path: string, method: "GET" | "POST" | "DELETE", b
         return false, "Error decodificando JSON del servidor"
     end
 
+    return true, decoded
+end
+
+local function requestLocalBridge(path: string, method: "GET" | "POST", bodyTable: { [string]: any }?): (boolean, any)
+    local headers: { [string]: string } = {
+        ["Content-Type"] = "application/json",
+    }
+    if #FORGE_SECURITY_TOKEN > 0 then
+        headers["X-Plugin-Token"] = FORGE_SECURITY_TOKEN
+        headers["X-Forge-Token"] = FORGE_SECURITY_TOKEN
+    end
+
+    local ok, response = pcall(function()
+        return HttpService:RequestAsync({
+            Url = LOCAL_BRIDGE_URL .. path,
+            Method = method,
+            Headers = headers,
+            Body = bodyTable and HttpService:JSONEncode(bodyTable) or nil,
+        })
+    end)
+
+    if not ok or not response or not response.Success then
+        return false, if response then ("HTTP " .. tostring(response.StatusCode)) else "Bridge offline"
+    end
+
+    local decOk, decoded = pcall(function()
+        return HttpService:JSONDecode(response.Body)
+    end)
+    if not decOk then
+        return false, "Invalid JSON from Bridge"
+    end
     return true, decoded
 end
 
@@ -806,7 +851,8 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
             part.TextureID = partSpec.textureId
         end
 
-        -- Apply 4-channel SurfaceAppearance per MeshPart if pbrMaterial is configured
+        -- Apply 4-channel SurfaceAppearance per MeshPart ONLY if verified cloud rbxassetid:// URIs exist
+        -- (Never declare PBR applied if textures were only saved as local files on disk)
         if type(partSpec.pbrMaterial) == "table" and part:IsA("MeshPart") then
             local pbr = partSpec.pbrMaterial
             local hasColor = isVerifiedRobloxAssetUri(pbr.colorMapAssetId)
@@ -834,7 +880,15 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
                     sa.MetalnessMap = pbr.metalnessMapAssetId
                 end
                 sa.Parent = part
+                part:SetAttribute("ForgePBRApplied", true)
+                part:SetAttribute("ForgePBRStatus", "SurfaceAppearanceApplied")
+            else
+                part:SetAttribute("ForgePBRApplied", false)
+                part:SetAttribute("ForgePBRStatus", "LocalFilesSavedOnly_NoCloudAssetId")
             end
+        else
+            part:SetAttribute("ForgePBRApplied", false)
+            part:SetAttribute("ForgePBRStatus", "NoPBRTextureMaps")
         end
 
         -- Add PointLight for Neon emitter parts
@@ -1500,11 +1554,24 @@ local function applyIncrementalModelUpdateInStudio(
             deleteSet[tostring(did)] = true
         end
     end
+    local candidatesForDeletion: { Instance } = {}
     for pid, partInst in pairs(existingByPartId) do
         if deleteSet[pid] or (not incomingIds[pid] and type(explicitDeleteIds) == "table" and #explicitDeleteIds == 0) then
-            partInst:Destroy()
-            deletedCount += 1
+            table.insert(candidatesForDeletion, partInst)
         end
+    end
+    if #candidatesForDeletion > 0 then
+        -- Fase 6: NUNCA eliminar automáticamente modelos, piezas o carpetas sin confirmación explícita del usuario en Studio
+        table.insert(pendingDestructiveOperations, {
+            taskId = nil,
+            description = string.format(
+                "Eliminar %d pieza(s) en modelo '%s'",
+                #candidatesForDeletion,
+                targetModel.Name
+            ),
+            instancesToDelete = candidatesForDeletion,
+            onCompleted = nil,
+        })
     end
 
     if recordId then
@@ -1575,7 +1642,10 @@ end
 
 -- Verify Rojo Sync Manifest AND live 3D DataModel (geometry, transforms, hierarchies, materials) against Forge
 local function verifyRojoSyncInStudio(): (number, number, string)
-    local ok, data = requestBackend("/api/v1/rojo/sync-manifest", "GET", nil)
+    local ok, data = requestLocalBridge("/local/plugin/rojo-manifest", "GET", nil)
+    if not ok then
+        ok, data = requestBackend("/api/v1/rojo/sync-manifest", "GET", nil)
+    end
     if not ok then
         return 0, 0, tostring(data)
     end
@@ -1650,12 +1720,16 @@ local function verifyRojoSyncInStudio(): (number, number, string)
         end
         local serialized = serializeStudioPartsFromInstances(modelParts, targetModel)
         local baselineSha = targetModel:GetAttribute("ForgeBaselineSnapshotSha256")
-        local okDiff, diffResp = requestBackend("/api/v1/assets/compare-datamodel", "POST", {
+        local diffPayload = {
             model_name = targetModel.Name,
             parts = serialized,
             sync_scope = "full_model",
             baseline_snapshot_sha256 = if type(baselineSha) == "string" then baselineSha else nil,
-        })
+        }
+        local okDiff, diffResp = requestLocalBridge("/local/plugin/compare-datamodel", "POST", diffPayload)
+        if not okDiff then
+            okDiff, diffResp = requestBackend("/api/v1/assets/compare-datamodel", "POST", diffPayload)
+        end
         if okDiff and type(diffResp) == "table" and type(diffResp.diff) == "table" then
             local d = diffResp.diff
             local modCount = if type(d.modified_parts) == "table" then #d.modified_parts else 0
@@ -1776,14 +1850,18 @@ local function pushSelectedModelToForgeStudio(): string
     local serializedParts = serializeStudioPartsFromInstances(collectedParts, targetModel)
     local baselineSha = if targetModel then targetModel:GetAttribute("ForgeBaselineSnapshotSha256") else nil
 
-    local ok, resp = requestBackend("/api/v1/assets/studio-push", "POST", {
+    local pushPayload = {
         model_name = modelName,
         parts = serializedParts,
         sync_scope = syncScope,
         remove_missing = (syncScope == "full_model"),
         conflict_policy = "smart_merge",
         baseline_snapshot_sha256 = if type(baselineSha) == "string" then baselineSha else nil,
-    })
+    }
+    local ok, resp = requestLocalBridge("/local/plugin/studio-push", "POST", pushPayload)
+    if not ok then
+        ok, resp = requestBackend("/api/v1/assets/studio-push", "POST", pushPayload)
+    end
 
     if not ok then
         return "Error en Push Incremental hacia Forge: " .. tostring(resp)
@@ -2052,6 +2130,293 @@ btnPushToForge.MouseButton1Click:Connect(function()
     task.spawn(function()
         outputLog.Text = pushSelectedModelToForgeStudio()
     end)
+end)
+
+-- =============================================================================
+-- Fase 6: Conexión con el Puente Local (127.0.0.1:48720) & Confirmación Destructiva
+-- =============================================================================
+
+local bridgeStatusBanner = Instance.new("TextLabel")
+bridgeStatusBanner.Text = "🔌 Forge Local Bridge: Buscando en " .. LOCAL_BRIDGE_URL .. "..."
+bridgeStatusBanner.Font = Enum.Font.Code
+bridgeStatusBanner.TextSize = 11
+bridgeStatusBanner.TextColor3 = Color3.fromRGB(148, 163, 184)
+bridgeStatusBanner.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
+bridgeStatusBanner.Size = UDim2.new(1, 0, 0, 22)
+bridgeStatusBanner.TextXAlignment = Enum.TextXAlignment.Left
+bridgeStatusBanner.LayoutOrder = 12
+bridgeStatusBanner.Parent = root
+
+local confirmFrame = Instance.new("Frame")
+confirmFrame.Size = UDim2.new(1, 0, 0, 62)
+confirmFrame.BackgroundColor3 = Color3.fromRGB(69, 10, 10)
+confirmFrame.Visible = false
+confirmFrame.LayoutOrder = 13
+confirmFrame.Parent = root
+
+local confirmCorner = Instance.new("UICorner")
+confirmCorner.CornerRadius = UDim.new(0, 6)
+confirmCorner.Parent = confirmFrame
+
+local confirmLabel = Instance.new("TextLabel")
+confirmLabel.Text = "⚠️ Operación destructiva pendiente de confirmación"
+confirmLabel.Font = Enum.Font.GothamBold
+confirmLabel.TextSize = 11
+confirmLabel.TextColor3 = Color3.fromRGB(254, 202, 202)
+confirmLabel.BackgroundTransparency = 1
+confirmLabel.Size = UDim2.new(1, -12, 0, 26)
+confirmLabel.Position = UDim2.new(0, 6, 0, 4)
+confirmLabel.TextXAlignment = Enum.TextXAlignment.Left
+confirmLabel.Parent = confirmFrame
+
+local btnApproveDelete = createSmallButton(confirmFrame, "Confirmar Eliminación", 0.48)
+btnApproveDelete.Size = UDim2.new(0.47, 0, 0, 24)
+btnApproveDelete.Position = UDim2.new(0.02, 0, 0, 32)
+btnApproveDelete.BackgroundColor3 = Color3.fromRGB(220, 38, 38)
+
+local btnRejectDelete = createSmallButton(confirmFrame, "Cancelar / Conservar", 0.48)
+btnRejectDelete.Size = UDim2.new(0.47, 0, 0, 24)
+btnRejectDelete.Position = UDim2.new(0.51, 0, 0, 32)
+btnRejectDelete.BackgroundColor3 = Color3.fromRGB(51, 65, 85)
+
+local function refreshDestructiveConfirmationUI()
+    if #pendingDestructiveOperations > 0 then
+        local top = pendingDestructiveOperations[1]
+        confirmFrame.Visible = true
+        confirmLabel.Text = "⚠️ Confirmar: " .. tostring(top.description)
+    else
+        confirmFrame.Visible = false
+    end
+end
+
+btnApproveDelete.MouseButton1Click:Connect(function()
+    local op = table.remove(pendingDestructiveOperations, 1)
+    if op then
+        local recId = ChangeHistoryService:TryBeginRecording("ForgeAI Confirmed Destructive Action")
+        local removed = 0
+        for _, inst in ipairs(op.instancesToDelete) do
+            if inst and inst.Parent then
+                inst:Destroy()
+                removed += 1
+            end
+        end
+        if recId then
+            ChangeHistoryService:FinishRecording(recId, Enum.FinishRecordingOperation.Commit)
+        end
+        outputLog.Text = string.format("✅ Eliminación confirmada por el usuario (%d instancia(s) eliminadas).", removed)
+        if op.onCompleted then
+            op.onCompleted(true)
+        end
+    end
+    refreshDestructiveConfirmationUI()
+end)
+
+btnRejectDelete.MouseButton1Click:Connect(function()
+    local op = table.remove(pendingDestructiveOperations, 1)
+    if op then
+        outputLog.Text = "🛡️ Operación destructiva cancelada por el usuario. Ninguna instancia fue eliminada."
+        if op.onCompleted then
+            op.onCompleted(false)
+        end
+    end
+    refreshDestructiveConfirmationUI()
+end)
+
+local function inspectCurrentStudioSelection(): {
+    selectedModelName: string?,
+    selectedPartCount: number,
+    selectedItems: { { name: string, className: string, partId: string? } },
+}
+    local sel = Selection:Get()
+    local modelName: string? = nil
+    local partCount = 0
+    local items = {}
+
+    for _, inst in ipairs(sel) do
+        local rootMod = findRootForgeModel(inst)
+        if rootMod and not modelName then
+            modelName = rootMod.Name
+        end
+        if inst:IsA("BasePart") then
+            partCount += 1
+        elseif inst:IsA("Model") then
+            for _, d in ipairs(inst:GetDescendants()) do
+                if d:IsA("BasePart") then
+                    partCount += 1
+                end
+            end
+        end
+        table.insert(items, {
+            name = inst.Name,
+            className = inst.ClassName,
+            partId = if inst:IsA("BasePart") then tostring(inst:GetAttribute("ForgePartId") or "") else nil,
+        })
+    end
+
+    return {
+        selectedModelName = modelName,
+        selectedPartCount = partCount,
+        selectedItems = items,
+    }
+end
+
+-- Ejecuta tareas seguras recibidas desde el Puente Local (Fase 6: lista cerrada de operaciones, sin ejecutar código arbitrario)
+local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
+    local taskId = tostring(taskEnvelope.taskId or "")
+    local operation = tostring(taskEnvelope.operation or "")
+    local payload = if type(taskEnvelope.payload) == "table" then taskEnvelope.payload else {}
+
+    local okExec, resultOrErr = xpcall(function(): any
+        if operation == "studio.ping" then
+            local selInfo = inspectCurrentStudioSelection()
+            return {
+                connected = true,
+                pluginVersion = "2.2.0",
+                selectedModelName = selInfo.selectedModelName,
+                selectedPartCount = selInfo.selectedPartCount,
+            }
+        elseif operation == "studio.get_selection" then
+            return inspectCurrentStudioSelection()
+        elseif operation == "studio.read_datamodel" or operation == "studio.serialize_parts" then
+            local targetModelName = tostring(payload.modelName or payload.model_name or "")
+            local targetModel: Model? = nil
+            if #targetModelName > 0 then
+                local found = Workspace:FindFirstChild(targetModelName, true)
+                if found and found:IsA("Model") then
+                    targetModel = found
+                end
+            end
+            if not targetModel then
+                for _, sel in ipairs(Selection:Get()) do
+                    targetModel = findRootForgeModel(sel)
+                    if targetModel then break end
+                end
+            end
+            local partsToSerialize: { BasePart } = {}
+            if targetModel then
+                for _, desc in ipairs(targetModel:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        table.insert(partsToSerialize, desc)
+                    end
+                end
+            else
+                for _, sel in ipairs(Selection:Get()) do
+                    if sel:IsA("BasePart") then
+                        table.insert(partsToSerialize, sel)
+                    end
+                end
+            end
+            local serialized = serializeStudioPartsFromInstances(partsToSerialize, targetModel)
+            return {
+                modelName = if targetModel then targetModel.Name else "Selection",
+                partCount = #serialized,
+                parts = serialized,
+            }
+        elseif operation == "studio.apply_modifications" then
+            local assetData = if type(payload.asset) == "table" then payload.asset else payload
+            local modelName = tostring(assetData.name or payload.modelName or "ForgeSyncedModel")
+            local existing = Workspace:FindFirstChild(modelName)
+            if existing and existing:IsA("Model") then
+                local explicitDel = if type(payload.explicitDeleteIds) == "table" then payload.explicitDeleteIds else nil
+                local added, updated, unchanged, _ = applyIncrementalModelUpdateInStudio(existing, assetData, explicitDel)
+                refreshDestructiveConfirmationUI()
+                return {
+                    modelName = modelName,
+                    mode = "incremental_update",
+                    added = added,
+                    updated = updated,
+                    unchanged = unchanged,
+                    pendingDestructiveConfirmations = #pendingDestructiveOperations,
+                }
+            else
+                local spawned = construct3DModelFromSpec(assetData, Workspace)
+                return {
+                    modelName = spawned.Name,
+                    mode = "spawned_new",
+                    partCount = #(assetData.parts or {}),
+                }
+            end
+        elseif operation == "studio.reconstruct_model" then
+            local summary = reconstructEditableMeshModelsInStudio()
+            return { summary = summary }
+        elseif operation == "studio.compare_geometry" then
+            local synced, total, report = verifyRojoSyncInStudio()
+            return {
+                syncedModules = synced,
+                totalModules = total,
+                report = report,
+            }
+        elseif operation == "studio.detect_errors" then
+            local selfOk, selfErrors = runForgePluginSelfVerification()
+            local unverifiedParts = 0
+            for _, desc in ipairs(Workspace:GetDescendants()) do
+                if desc:IsA("MeshPart") and desc:GetAttribute("ForgeGeometryVerified") == false then
+                    unverifiedParts += 1
+                end
+            end
+            return {
+                selfVerificationPassed = selfOk,
+                errors = selfErrors,
+                unverifiedMeshPartsInWorkspace = unverifiedParts,
+            }
+        else
+            error("Operación de Studio no reconocida: " .. operation)
+        end
+    end, debug.traceback)
+
+    if okExec then
+        local status = if #pendingDestructiveOperations > 0 and operation == "studio.apply_modifications"
+            then "awaiting_studio_confirmation"
+            else "completed"
+        requestLocalBridge("/local/plugin/result", "POST", {
+            taskId = taskId,
+            status = status,
+            result = resultOrErr,
+            error = nil,
+        })
+    else
+        requestLocalBridge("/local/plugin/result", "POST", {
+            taskId = taskId,
+            status = "failed",
+            result = nil,
+            error = tostring(resultOrErr),
+        })
+    end
+end
+
+-- Bucle periódico de Heartbeat y recepción de tareas desde el Puente Local (127.0.0.1:48720)
+task.spawn(function()
+    while true do
+        local selInfo = inspectCurrentStudioSelection()
+        local okBridge, resp = requestLocalBridge("/local/plugin/heartbeat", "POST", {
+            pluginVersion = "2.2.0",
+            placeName = game.Name,
+            selectedModelName = selInfo.selectedModelName,
+            selectedPartCount = selInfo.selectedPartCount,
+            pendingDestructiveConfirmations = #pendingDestructiveOperations,
+        })
+        if okBridge and type(resp) == "table" then
+            local cloudTag = if resp.cloudConnected then "Cloud Conectado" else "Modo Local"
+            bridgeStatusBanner.Text = string.format(
+                "🟢 Forge Bridge Activo (127.0.0.1:48720 • %s) | Sel: %s",
+                cloudTag,
+                selInfo.selectedModelName or "Ninguno"
+            )
+            bridgeStatusBanner.TextColor3 = Color3.fromRGB(52, 211, 153)
+            local tasks = resp.pendingTasks
+            if type(tasks) == "table" then
+                for _, taskEnv in ipairs(tasks) do
+                    if type(taskEnv) == "table" then
+                        executeBridgeTaskInStudio(taskEnv)
+                    end
+                end
+            end
+        else
+            bridgeStatusBanner.Text = "⚪ Forge Local Bridge desconectado (" .. LOCAL_BRIDGE_URL .. ")"
+            bridgeStatusBanner.TextColor3 = Color3.fromRGB(148, 163, 184)
+        end
+        task.wait(2.5)
+    end
 end)
 
 -- Automatic Edit-Mode .RBXMX Reconstructor:

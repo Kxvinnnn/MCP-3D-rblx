@@ -1,0 +1,36 @@
+{
+  "bridgeVersion": "1.0.0",
+  "protocolVersion": "1.0",
+  "network": {
+    "bindHost": "127.0.0.1",
+    "bindPort": 48720,
+    "cloudUpstreamUrl": "https://your-forge-app.run.app",
+    "preferWebSocket": true,
+    "heartbeatIntervalMs": 2500,
+    "reconnectBaseDelayMs": 1000,
+    "reconnectMaxDelayMs": 30000
+  },
+  "rojo": {
+    "projectRelativeOrLocalPath": "../",
+    "servePort": 34872,
+    "allowedExtensions": [
+      ".luau",
+      ".lua",
+      ".json",
+      ".obj",
+      ".mtl",
+      ".gltf",
+      ".glb",
+      ".rbxmx",
+      ".md",
+      ".png"
+    ],
+    "maxFileSizeBytes": 15728640
+  },
+  "security": {
+    "requireHmacSignature": true,
+    "requirePluginToken": true,
+    "sessionTtlSeconds": 3600,
+    "destructiveOperationsRequireStudioConfirmation": true
+  }
+}
