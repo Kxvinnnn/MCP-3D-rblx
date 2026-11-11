@@ -57,6 +57,11 @@ from engines.generation_3d_engine import (
 from engines.asset_engine import AssetEngine
 from engines.world_engine import WorldEngine
 from engines.agents_engine import AGENT_DEFINITIONS, AutonomousMultiAgentOrchestrator
+from engines.context_pruner import (
+    AI_MODULE_CONTRACTS,
+    build_ai_self_understanding_manifest,
+    build_pruned_domain_context,
+)
 
 # ------------------------------------------------------------------------------
 # 1. Configuration, Security & Initialization
@@ -289,10 +294,10 @@ def audit_project_modules() -> Dict[str, Any]:
     }
 
 
-def load_project_context() -> str:
+def get_pruned_project_context_details(domain: str = "luau") -> Dict[str, Any]:
     """
-    Reads project_context.md AND appends a verified on-disk module manifest
-    so Gemini only requires modules that genuinely exist in the user's project.
+    Reads project_context.md, appends the verified on-disk Rojo module manifest,
+    and slices the context to ONLY the semantic blocks needed for `domain`.
     """
     search_paths = [
         Path(RUNTIME_CONFIG["project_context_file"]),
@@ -321,9 +326,14 @@ Missing core modules: [{", ".join(missing_core) if missing_core else "None - All
 CRITICAL RULE: You may ONLY `require()` modules that are listed in 'Verified existing modules in project'. If a helper like Maid is missing, inline a lightweight local implementation instead of requiring a non-existent path!
 --- END VERIFIED MODULES ---
 """
-    if raw_context:
-        return f"\n\n--- LOCAL PROJECT CONTEXT ---\n{raw_context}\n{verification_note}"
-    return verification_note
+    return build_pruned_domain_context(raw_context, verification_note, domain)
+
+
+def load_project_context(domain: str = "luau") -> str:
+    """
+    Returns the domain-pruned context string ready for Gemini prompt injection.
+    """
+    return get_pruned_project_context_details(domain)["prompt_context"]
 
 
 # ------------------------------------------------------------------------------
@@ -610,7 +620,7 @@ def generate_3d_asset(
     if not gemini_client and not req.uploaded_mesh_obj and not req.uploaded_sub_meshes:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured.")
 
-    context_data = load_project_context()
+    context_data = load_project_context("3d")
     return generation_3d_engine.generate_3d_asset(
         req=req,
         context_data=context_data,
@@ -632,7 +642,7 @@ def generate_3d_asset_stream(
     `rojo_write`, and `done`/`complete` SSE payloads.
     """
     verify_security_token(x_forge_token)
-    context_data = load_project_context()
+    context_data = load_project_context("3d")
     generator = generation_3d_engine.stream_3d_asset(
         req=req,
         context_data=context_data,
@@ -652,18 +662,56 @@ def generate_3d_asset_stream(
 
 @app.get("/api/v1/architecture")
 def get_modular_architecture():
+    domains = ["3d", "pbr", "luau", "ui", "world", "agents"]
+    domain_stats = []
+    for d in domains:
+        pruned = get_pruned_project_context_details(d)
+        domain_stats.append({
+            "domain": pruned["domain"],
+            "includedSections": pruned["included_sections"],
+            "originalChars": pruned["raw_char_count"],
+            "prunedChars": pruned["pruned_char_count"],
+            "reductionPercent": pruned["saved_percentage"],
+        })
     return {
         "engines": [
-            {"id": "3d_generation_engine", "name": "3D Generation Engine", "pythonModule": "backend/engines/generation_3d_engine.py", "status": "ACTIVE"},
-            {"id": "asset_engine", "name": "Asset Engine", "pythonModule": "backend/engines/asset_engine.py", "status": "ACTIVE"},
-            {"id": "luau_engine", "name": "Luau Engine", "pythonModule": "backend/engines/luau_engine.py", "status": "ACTIVE"},
-            {"id": "ui_engine", "name": "UI Engine", "pythonModule": "backend/engines/ui_engine.py", "status": "ACTIVE"},
-            {"id": "world_engine", "name": "World Engine", "pythonModule": "backend/engines/world_engine.py", "status": "ACTIVE"},
-            {"id": "rojo_bridge", "name": "Rojo Bridge", "pythonModule": "backend/engines/rojo_bridge.py", "status": "ACTIVE"},
-            {"id": "agents_engine", "name": "Specialized Agents Engine (P3)", "pythonModule": "backend/engines/agents_engine.py", "status": "ACTIVE"},
+            {"id": "3d_generation_engine", "name": "3D Generation Engine", "pythonModule": "backend/engines/generation_3d_engine.py", "tsModule": "src/server/engines/generation3DEngine.ts", "status": "ACTIVE"},
+            {"id": "asset_engine", "name": "Asset Engine", "pythonModule": "backend/engines/asset_engine.py", "tsModule": "src/server/engines/assetEngine.ts", "status": "ACTIVE"},
+            {"id": "luau_engine", "name": "Luau Engine", "pythonModule": "backend/engines/luau_engine.py", "tsModule": "src/server/engines/luauEngine.ts", "status": "ACTIVE"},
+            {"id": "ui_engine", "name": "UI Engine", "pythonModule": "backend/engines/ui_engine.py", "tsModule": "src/server/engines/uiEngine.ts", "status": "ACTIVE"},
+            {"id": "world_engine", "name": "World Engine", "pythonModule": "backend/engines/world_engine.py", "tsModule": "src/server/engines/worldEngine.ts", "status": "ACTIVE"},
+            {"id": "rojo_bridge", "name": "Rojo Bridge", "pythonModule": "backend/engines/rojo_bridge.py", "tsModule": "src/server/engines/rojoBridge.ts", "status": "ACTIVE"},
+            {"id": "agents_engine", "name": "Specialized Agents Engine (P3)", "pythonModule": "backend/engines/agents_engine.py", "tsModule": "src/server/engines/agentsEngine.ts", "status": "ACTIVE"},
         ],
         "agents": AGENT_DEFINITIONS,
+        "ai_manifest": build_ai_self_understanding_manifest(),
+        "module_contracts": AI_MODULE_CONTRACTS,
+        "domain_pruner_stats": domain_stats,
     }
+
+
+@app.get("/api/v1/ai-manifest")
+def get_ai_manifest():
+    domains = ["3d", "pbr", "luau", "ui", "world", "agents"]
+    domain_stats = []
+    for d in domains:
+        pruned = get_pruned_project_context_details(d)
+        domain_stats.append({
+            "domain": pruned["domain"],
+            "includedSections": pruned["included_sections"],
+            "originalChars": pruned["raw_char_count"],
+            "prunedChars": pruned["pruned_char_count"],
+            "reductionPercent": pruned["saved_percentage"],
+        })
+    return {
+        **build_ai_self_understanding_manifest(),
+        "domainPrunerStats": domain_stats,
+    }
+
+
+@app.get("/api/v1/context/pruned")
+def get_pruned_context(domain: str = "luau"):
+    return get_pruned_project_context_details(domain)
 
 
 @app.post("/api/v1/world/build-scene")

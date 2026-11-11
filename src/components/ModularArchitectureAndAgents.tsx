@@ -49,10 +49,19 @@ interface AgentExecutionState {
   artifact?: string;
 }
 
+interface DomainPrunerStat {
+  domain: string;
+  includedSections: string[];
+  originalChars: number;
+  prunedChars: number;
+  reductionPercent: number;
+}
+
 export const ModularArchitectureAndAgents: React.FC = () => {
   const [engines, setEngines] = useState<EngineDescriptor[]>([]);
   const [roadmap, setRoadmap] = useState<RoadmapMilestone[]>([]);
   const [agents, setAgents] = useState<SpecializedAgentSpec[]>([]);
+  const [domainPrunerStats, setDomainPrunerStats] = useState<DomainPrunerStat[]>([]);
 
   // P3 Specialized Agents Orchestrator State
   const [missionPrompt, setMissionPrompt] = useState<string>(
@@ -87,6 +96,7 @@ export const ModularArchitectureAndAgents: React.FC = () => {
         if (data.engines) setEngines(data.engines);
         if (data.roadmap) setRoadmap(data.roadmap);
         if (data.agents) setAgents(data.agents);
+        if (data.domain_pruner_stats) setDomainPrunerStats(data.domain_pruner_stats);
       })
       .catch((err) => console.error('Error loading architecture manifest:', err));
   }, []);
@@ -288,12 +298,62 @@ export const ModularArchitectureAndAgents: React.FC = () => {
               </div>
 
               <div className="pt-2.5 border-t border-slate-800/80 flex flex-col gap-1 font-mono text-[10px]">
-                <span className="text-cyan-300 truncate">{eng.pythonModule}</span>
+                <span className="text-cyan-300 truncate" title={eng.pythonModule}>
+                  PY: {eng.pythonModule}
+                </span>
+                {eng.tsModule && (
+                  <span className="text-emerald-300 truncate" title={eng.tsModule}>
+                    TS: {eng.tsModule}
+                  </span>
+                )}
                 <span className="text-slate-500 truncate">{eng.endpoints.join(' • ')}</span>
               </div>
             </div>
           ))}
         </div>
+
+        {/* AI Self-Understanding & Domain Context Pruner Panel */}
+        {domainPrunerStats.length > 0 && (
+          <div className="p-4 rounded-xl bg-slate-950/90 border border-indigo-500/30 flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Eye className="w-4 h-4 text-indigo-400" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider font-mono">
+                  Podador de Contexto IA por Dominio (Auto-Comprensión Modular · AI_ARCHITECTURE_MAP.md)
+                </span>
+              </div>
+              <span className="px-2.5 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-mono text-[10px]">
+                GET /api/v1/ai-manifest · GET /api/v1/context/pruned
+              </span>
+            </div>
+            <p className="text-xs text-slate-400">
+              En lugar de inyectar todo el contexto en cada llamada a Gemini, el motor <code className="text-indigo-300">contextPrunerEngine.ts</code> / <code className="text-indigo-300">context_pruner.py</code> envía únicamente los bloques semánticos necesarios para el dominio activo, reduciendo el contexto extra sin perder la lista de módulos Rojo verificados en disco:
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+              {domainPrunerStats.map((stat) => (
+                <div
+                  key={stat.domain}
+                  className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 flex flex-col justify-between gap-1.5"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono font-bold text-xs uppercase text-cyan-300">
+                      {stat.domain}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-mono text-[10px]">
+                      -{stat.reductionPercent}% ctx
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400">
+                    {stat.prunedChars} / {stat.originalChars} chars
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-500 truncate" title={stat.includedSections.join(', ')}>
+                    {stat.includedSections.join(' + ')}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Bottom Tier: Roblox Studio Plugin Bridge */}
         <div className="p-4 rounded-xl bg-gradient-to-r from-slate-950 via-cyan-950/20 to-slate-950 border border-cyan-500/30 flex flex-wrap items-center justify-between gap-4">
@@ -301,10 +361,10 @@ export const ModularArchitectureAndAgents: React.FC = () => {
             <Terminal className="w-5 h-5 text-cyan-400 shrink-0" />
             <div>
               <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
-                Roblox Studio Plugin v2.0 (ForgeAIStudioPlugin.server.luau)
+                Roblox Studio Plugin v2.1 (ForgeAIStudioPlugin.server.luau)
               </h4>
               <p className="text-xs text-slate-400 mt-0.5">
-                Inserción directa en Workspace/StarterGui, selector Server/Client/Module, optimizador de Selection y verificación de sincronización Rojo.
+                Reconstrucción EditableMesh in-place en modo edición, importador 3D, publicación PBR y verificación de sincronización Rojo.
               </p>
             </div>
           </div>

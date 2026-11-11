@@ -1,74 +1,60 @@
-# Arquitectura de Software Detallada — Forge AI Studio v2.0
+# Arquitectura de Software Modular — Forge AI Studio v2.2 (AI-First Edition)
 
-Este documento describe la arquitectura interna de **Forge AI Studio v2.0**, el diseño desacoplado de sus **7 motores de dominio**, el protocolo de sincronización con **Rojo 7.x**, el motor gráfico **3D WebGL (Three.js)** y las capas de seguridad.
+Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**, diseñada con **paridad modular 1:1 entre Python (`backend/engines/`) y TypeScript (`src/server/engines/`)**, más un **Podador de Contexto por Dominio (`ContextPruner`)** que reduce en ~65% el contexto extra enviado a Gemini en cada generación.
+
+> **Índice Rápido para IA**: Consulta `AI_ARCHITECTURE_MAP.md` en la raíz del proyecto o invoca `GET /api/v1/ai-manifest` para obtener los contratos e invariantes de cada módulo en formato compacto.
 
 ---
 
-## 1. Principio Arquitectónico: Orquestador Central + 7 Motores Desacoplados
+## 1. Mapa de los 8 Motores Modulares (`backend/engines/` ↔ `src/server/engines/`)
 
-En lugar de concentrar la lógica de generación de scripts, interfaces, geometría 3D, texturas PBR, mundos y sincronización de archivos en un único archivo monolítico, el sistema divide las responsabilidades en **7 motores especializados**:
+### 1.0 `Context Pruner Engine` (`backend/engines/context_pruner.py` | `src/server/engines/contextPrunerEngine.ts`)
+- **Problema que resuelve**: Enviar todo el archivo `project_context.md` en cada llamada al modelo desperdicia tokens y añade ruido de dominios no relacionados.
+- **Solución**: Divide `project_context.md` en bloques semánticos (`ROJO_MAPPING`, `LUAU_STANDARDS`, `MAID_PATTERN`, `UI_FORGEGUI`, `EXISTING_MODULES`) e inyecta únicamente los bloques requeridos por el dominio activo (`3d`, `pbr`, `luau`, `ui`, `world`, `agents`), manteniendo siempre la lista verificada de módulos Rojo en disco.
 
-### 1.1 `3D Generation Engine` (`backend/engines/generation_3d_engine.py`)
-- **Entrada**: Descripción textual o imagen de referencia en Base64, presupuesto máximo de polígonos (`target_poly_budget`) y fidelidad de colisión (`CollisionFidelity`).
-- **Proceso**:
-  - Utiliza Structured Outputs (`response_schema=Model3DResponse`) con Gemini (`gemini-2.5-flash` o `gemini-2.5-pro`) para descomponer cualquier objeto en **6 a 14 sub-partes geométricas** (`Block`, `Cylinder`, `Ball`, `Wedge`, `CornerWedge`) organizadas en tres escalas visuales:
-    1. *Silueta Primaria* (chasis, base, estructura principal).
-    2. *Formas Secundarias* (cañones, soportes, alas, columnas).
-    3. *Detalles y Acentos* (núcleos de neón, sensores ópticos, antenas).
-  - Normaliza las dimensiones en **Roblox Studs** tomando como referencia la altura estándar de un avatar R15 (`5.5 Studs`) y apoya la base del modelo en `Y = 0`.
-- **Salida**: Especificación JSON de sub-partes + módulo constructor Luau `--!strict` con método `.Spawn(origin: CFrame?): Model`.
-
-### 1.2 `Asset Engine` (`backend/engines/asset_engine.py`)
+### 1.1 `3D Generation Engine` (`backend/engines/generation_3d_engine.py` | `src/server/engines/generation3DEngine.ts`)
 - **Responsabilidades**:
-  1. **Síntesis Procedural de Mapas PBR (`SurfaceAppearance`)**: Genera mapas de 256×256 / 512×512 sin dependencias externas (Zero-404) para `ColorMap` (Albedo), `NormalMap` (Espacio Tangente RGB) y `RoughnessMap` (Escala de grises).
-  2. **Optimización Poligonal y Colisiones**: Evalúa el conteo de triángulos frente al límite estricto de Roblox Studio (**10,000 triángulos por `MeshPart`**), calcula niveles de detalle (**LOD 100%, 75%, 50%, 25%**) y asigna `CollisionFidelity` (`Hull`, `Box`, `PreciseConvexDecomposition`, `Default`).
-  3. **Importación Externa (`.GLB`, `.GLTF`, `.OBJ`, `.FBX`)**: Analiza mallas externas en el cliente WebGL, centra el pivote, escala el *bounding box* a Studs y permite re-exportar a Wavefront `.OBJ` limpio para Roblox Studio.
-  4. **Biblioteca Persistente (`assets_library.json`)**: Almacena en disco todos los modelos 3D y escenarios para reutilizarlos o editarlos en cualquier sesión.
+  - Extracción de buffers geométricos reales (`vertices`, `normals`, `uvs`, `faces` 0-based) desde `.OBJ` o sub-mallas procesadas.
+  - División inteligente de mallas densas (`>9,000` vértices o `>9,500` caras) en sub-partes contiguas sin descartar ningún triángulo (`splitOversizedMeshPartInput`).
+  - Generación de módulos Luau `--!strict` que reconstruyen `MeshPart` reales mediante `AssetService:CreateEditableMesh()`, verifican `#editableMesh:GetTriangles()`, liberan memoria con `editableMesh:Destroy()` y nunca asignan la propiedad de solo lectura `MeshPart.MeshId` ni inventan hashes `rbxassetid://`.
 
-### 1.3 `Luau Engine` (`backend/engines/luau_engine.py`)
+### 1.2 `Asset Engine` (`backend/engines/asset_engine.py` | `src/server/engines/assetEngine.ts`)
 - **Responsabilidades**:
-  - Generación de scripts `Server` (`*.server.luau`), `Client` (`*.client.luau`) y `Module` (`*.luau`).
-  - Inyección de contexto auditado desde `project_context.md`.
+  - Serializador y parser bidireccional `.RBXMX` (`buildRbxmxFromPartsServer`, `parseRbxmxFromPartsServer`) que preserva matrices de rotación `CFrame` 3×3, colores, materiales, los 4 canales de `SurfaceAppearance` y los buffers `ForgeMeshGeometryJSON`.
+  - Exportador `.glTF 2.0` con buffers binarios embebidos y exportador Wavefront `.OBJ` + `.MTL`.
+  - Publicación de los 4 canales PBR (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`) hacia Roblox Open Cloud con **polling asíncrono de `Operation`** (`/assets/v1/operations/{id}`).
+  - Biblioteca persistente (`assets_library.json`) con **snapshots completos de hasta 25 versiones** (`parts`, `luau_code`, `pbr_profile`, `collision_fidelity`, `description`).
+
+### 1.3 `Luau Engine` (`backend/engines/luau_engine.py` | `src/server/engines/luauEngine.ts`)
+- **Responsabilidades**:
+  - Enrutamiento determinista de scripts `Server` (`src/server/*.server.luau`), `Client` (`src/client/*.client.luau`) y `Module` (`src/shared/*.luau`).
   - Cumplimiento estricto de `--!strict`, servicios al inicio con `game:GetService(...)`, librería `task.*` y limpieza de eventos con `Maid`.
 
-### 1.4 `UI Engine` (`backend/engines/ui_engine.py`)
+### 1.4 `UI Engine` (`backend/engines/ui_engine.py` | `src/server/engines/uiEngine.ts`)
 - **Responsabilidades**:
   - Generación de módulos `ScreenGui` en `src/client/UI` con posicionamiento exclusivamente en escala (`UDim2.fromScale`) y `AnchorPoint = Vector2.new(0.5, 0.5)`.
   - Generación simultánea del árbol jerárquico `ui_tree` para previsualización en vivo y soporte nativo de `ViewportFrame` con `WorldModel` 3D.
 
-### 1.5 `World Engine` (`backend/engines/world_engine.py`)
+### 1.5 `World Engine` (`backend/engines/world_engine.py` | `src/server/engines/worldEngine.ts`)
 - **Responsabilidades**:
   - Configuración programática del servicio `Lighting` y la instancia `Atmosphere` según biomas predefinidos (`CyberpunkOrbital`, `MedievalForge`, `ArcticResearchBase`).
   - Ensamblaje espacial de múltiples assets de la biblioteca dentro de una carpeta de zona en `Workspace`.
 
-### 1.6 `Rojo Bridge` (`backend/engines/rojo_bridge.py`)
+### 1.6 `Rojo Bridge` (`backend/engines/rojo_bridge.py` | `src/server/engines/rojoBridge.ts`)
 - **Responsabilidades**:
-  - Validación de seguridad de rutas (`resolve_safe_project_path`) garantizando que ningún archivo pueda escribirse fuera de `ROJO_PROJECT_PATH`.
-  - Detección y generación automática de `default.project.json`.
-  - Sondeo TCP del servidor `rojo serve` en el puerto `34872` y detección del binario `rojo` en el sistema.
-  - Generación del **Manifiesto de Sincronización SHA-256** (`/api/v1/rojo/sync-manifest`) para verificar que cada archivo `.luau` escrito en disco coincide byte a byte con lo esperado por Roblox Studio.
+  - Validación de seguridad de rutas (`resolveSafeRojoPath`) garantizando que ningún archivo pueda escribirse fuera de `ROJO_PROJECT_PATH`.
+  - Sanitización de código Luau (`sanitizeStrictLuauCode`) y generación del **Manifiesto de Sincronización SHA-256** (`/api/v1/rojo/sync-manifest`).
 
-### 1.7 `Specialized Agents Engine — P3` (`backend/engines/agents_engine.py`)
+### 1.7 `Specialized Agents Engine — P3` (`backend/engines/agents_engine.py` | `src/server/engines/agentsEngine.ts`)
 - **Flujo Secuencial de 7 Agentes**:
-  1. `ArchitectAgent`: Audita los módulos físicos en `src/shared/` (`Maid`, `RemoteProvider`, `GameTypes`) y define el nombre y contrato del sistema.
-  2. `3DGenerationAgent`: Construye la geometría 3D compuesta y escribe `src/shared/Assets3D/<Sistema>Model.luau`.
-  3. `AssetEngineAgent`: Calcula el perfil PBR `SurfaceAppearance`, valida `<10,000` triángulos y registra el modelo en `assets_library.json`.
-  4. `WorldBuilderAgent`: Genera el entorno lumínico y anclajes espaciales en `src/shared/<Sistema>World.luau`.
-  5. `LuauScripterAgent`: Escribe el controlador de servidor `--!strict` con `Maid` en `src/server/<Sistema>Controller.server.luau`.
-  6. `UIEngineAgent`: Crea el HUD táctico `ScreenGui` con `UDim2.fromScale` y `TweenService` en `src/client/UI/<Sistema>HUD.luau`.
-  7. `RojoBridgeAgent`: Verifica y firma con SHA-256 todos los archivos escritos en el proyecto Rojo.
+  1. `ArchitectAgent` → 2. `3DGenerationAgent` → 3. `AssetEngineAgent` → 4. `WorldBuilderAgent` → 5. `LuauScripterAgent` → 6. `UIEngineAgent` → 7. `RojoBridgeAgent`.
 
 ---
 
-## 2. Arquitectura del Visor 3D WebGL (`RobloxWorldViewport3D.tsx`)
+## 2. Plugin de Roblox Studio v2.1 (`backend/roblox_plugin/ForgeAIStudioPlugin.server.luau`)
 
-El visor 3D no es una simulación HTML 2D: es un motor **Three.js WebGL** completo diseñado siguiendo las mejores prácticas de rendimiento y fidelidad visual:
-
-- **Temporización Moderna (`THREE.Timer`)**: Usa `new THREE.Timer()` conectado al `document` (`timer.connect(document)`) para evitar saltos de delta cuando la pestaña pierde foco y se libera con `timer.dispose()` al desmontar.
-- **Sombras y Tone Mapping**: Configura `ACESFilmicToneMapping`, `SRGBColorSpace` y sombras `THREE.PCFShadowMap` con `normalBias` ajustado para evitar *shadow acne*.
-- **Iluminación de Estudio en 3 Puntos + IBL**:
-  - `RoomEnvironment` procesado con `PMREMGenerator` para reflejos metálicos realistas.
-  - `HemisphereLight` cielo/suelo + `DirectionalLight` principal cálida + `DirectionalLight` de contraluz (*Rim Light*) cian + `FogExp2` atmosférica.
-- **Bucle de Renderizado Bajo Demanda (*On-Demand Coalesced Loop*)**:
-  - Solo renderiza cuando hay cambios en `OrbitControls`, transiciones amortiguadas de cámara (`THREE.MathUtils.damp`), cambios en el slider de *Exploded View* o edición de piezas 3D, ahorrando GPU y CPU.
-  - Detecta automáticamente renderizadores WebGL por software (`SwiftShader` / `llvmpipe`) y aplica sincronización `gl.fenceSync` para evitar bloqueos del hilo principal.
+- **Reconstrucción `EditableMesh` en Modo Edición (`RunService:IsEdit()`)**:
+  - Listener automático `Workspace.ChildAdded` que reconstruye cualquier modelo `.rbxmx` importado en Modo Edición sin necesidad de pulsar Play.
+  - Botón explícito **"Reconstruir Mallas EditableMesh (.RBXMX / Workspace)"** con validación de triángulos y liberación de memoria `editableMesh:Destroy()`.
+- **Push Incremental Studio → Forge (`/api/v1/assets/studio-push`)**:
+  - Sincroniza la selección actual de Roblox Studio de vuelta hacia Forge AI Studio conservando buffers geométricos y mapas PBR.

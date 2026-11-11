@@ -117,15 +117,39 @@ class SubMeshGeometrySpec(BaseModel):
 def parse_wavefront_obj_geometry(obj_text: str, obj_file_name: Optional[str] = None) -> SubMeshGeometrySpec:
     """
     Extracts real vertex (`v`), normal (`vn`), UV (`vt`), and triangle index (`f`) data
-    directly from an uploaded Wavefront .OBJ mesh or sub-mesh chunk, computing smooth
-    vertex normals automatically if `vn` records are omitted.
+    from a Wavefront .OBJ mesh or sub-mesh chunk.
+
+    Supports independent `v/vt/vn`, `v//vn`, `v/vt`, and `v` face corner indices (including
+    negative relative indices exported by Blender) by creating distinct unified vertices
+    whenever a position index `v` is paired with a different `(vt, vn)` combination at UV
+    seams or hard-edge smoothing group boundaries.
     """
-    vertices: List[List[float]] = []
+    raw_positions: List[List[float]] = []
     raw_normals: List[List[float]] = []
     raw_uvs: List[List[float]] = []
+
+    out_vertices: List[List[float]] = []
+    out_uvs: List[List[float]] = []
+    out_normals: List[Optional[List[float]]] = []
     faces: List[List[int]] = []
-    vert_normal_map: Dict[int, List[float]] = {}
-    vert_uv_map: Dict[int, List[float]] = {}
+
+    # Maps (pos_idx, uv_idx, norm_idx) -> unified 0-based vertex index in out_vertices
+    unique_corner_map: Dict[Tuple[int, int, int], int] = {}
+
+    def _resolve_index(raw_token: str, current_len: int) -> int:
+        if not raw_token:
+            return -1
+        try:
+            idx = int(raw_token)
+        except ValueError:
+            return -1
+        if idx > 0:
+            resolved = idx - 1
+        elif idx < 0:
+            resolved = current_len + idx
+        else:
+            return -1
+        return resolved if 0 <= resolved < current_len else -1
 
     for raw_line in (obj_text or "").splitlines():
         line = raw_line.strip()
@@ -135,12 +159,17 @@ def parse_wavefront_obj_geometry(obj_text: str, obj_file_name: Optional[str] = N
         prefix = parts[0]
         if prefix == "v" and len(parts) >= 4:
             try:
-                vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                raw_positions.append([float(parts[1]), float(parts[2]), float(parts[3])])
             except ValueError:
                 pass
         elif prefix == "vn" and len(parts) >= 4:
             try:
-                raw_normals.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                nx, ny, nz = float(parts[1]), float(parts[2]), float(parts[3])
+                length = math.sqrt(nx * nx + ny * ny + nz * nz)
+                if length > 1e-6:
+                    raw_normals.append([nx / length, ny / length, nz / length])
+                else:
+                    raw_normals.append([0.0, 1.0, 0.0])
             except ValueError:
                 pass
         elif prefix == "vt" and len(parts) >= 3:
@@ -149,71 +178,89 @@ def parse_wavefront_obj_geometry(obj_text: str, obj_file_name: Optional[str] = N
             except ValueError:
                 pass
         elif prefix == "f" and len(parts) >= 4:
-            face_v_indices: List[int] = []
+            face_unified_indices: List[int] = []
             for token in parts[1:]:
                 sub_tokens = token.split("/")
-                try:
-                    v_idx = int(sub_tokens[0]) - 1
-                    if v_idx < 0:
-                        v_idx = len(vertices) + v_idx + 1
-                    if v_idx >= 0:
-                        face_v_indices.append(v_idx)
-                        if len(sub_tokens) >= 2 and sub_tokens[1]:
-                            vt_idx = int(sub_tokens[1]) - 1
-                            if 0 <= vt_idx < len(raw_uvs):
-                                vert_uv_map[v_idx] = raw_uvs[vt_idx]
-                        if len(sub_tokens) >= 3 and sub_tokens[2]:
-                            vn_idx = int(sub_tokens[2]) - 1
-                            if 0 <= vn_idx < len(raw_normals):
-                                vert_normal_map[v_idx] = raw_normals[vn_idx]
-                except ValueError:
-                    pass
-            for i in range(1, len(face_v_indices) - 1):
-                faces.append([face_v_indices[0], face_v_indices[i], face_v_indices[i + 1]])
+                v_idx = _resolve_index(sub_tokens[0], len(raw_positions))
+                if v_idx < 0:
+                    continue
+                vt_idx = _resolve_index(sub_tokens[1], len(raw_uvs)) if len(sub_tokens) >= 2 else -1
+                vn_idx = _resolve_index(sub_tokens[2], len(raw_normals)) if len(sub_tokens) >= 3 else -1
 
-    computed_normals: List[List[float]] = [[0.0, 0.0, 0.0] for _ in range(len(vertices))]
-    if not raw_normals and vertices and faces:
+                corner_key = (v_idx, vt_idx, vn_idx)
+                unified_idx = unique_corner_map.get(corner_key)
+                if unified_idx is None:
+                    unified_idx = len(out_vertices)
+                    unique_corner_map[corner_key] = unified_idx
+                    pos = raw_positions[v_idx]
+                    out_vertices.append([pos[0], pos[1], pos[2]])
+                    if 0 <= vt_idx < len(raw_uvs):
+                        uv = raw_uvs[vt_idx]
+                        out_uvs.append([uv[0], uv[1]])
+                    else:
+                        out_uvs.append([0.0, 0.0])
+                    if 0 <= vn_idx < len(raw_normals):
+                        nm = raw_normals[vn_idx]
+                        out_normals.append([nm[0], nm[1], nm[2]])
+                    else:
+                        out_normals.append(None)
+
+                face_unified_indices.append(unified_idx)
+
+            for i in range(1, len(face_unified_indices) - 1):
+                i0 = face_unified_indices[0]
+                i1 = face_unified_indices[i]
+                i2 = face_unified_indices[i + 1]
+                if i0 != i1 and i1 != i2 and i0 != i2:
+                    faces.append([i0, i1, i2])
+
+    # Fallback if an OBJ had `v` lines but no `f` lines (point cloud / unindexed vertices)
+    if not out_vertices and raw_positions:
+        out_vertices = [[p[0], p[1], p[2]] for p in raw_positions]
+        out_uvs = [
+            raw_uvs[i] if i < len(raw_uvs) else [0.0, 0.0]
+            for i in range(len(out_vertices))
+        ]
+        out_normals = [
+            raw_normals[i] if i < len(raw_normals) else None
+            for i in range(len(out_vertices))
+        ]
+
+    # Compute smooth area-weighted normals for any unified vertices that did not specify an explicit `vn`
+    accum_normals: List[List[float]] = [[0.0, 0.0, 0.0] for _ in range(len(out_vertices))]
+    if out_vertices and faces:
         for tri in faces:
             i0, i1, i2 = tri[0], tri[1], tri[2]
-            if i0 < len(vertices) and i1 < len(vertices) and i2 < len(vertices):
-                v0, v1, v2 = vertices[i0], vertices[i1], vertices[i2]
+            if i0 < len(out_vertices) and i1 < len(out_vertices) and i2 < len(out_vertices):
+                v0, v1, v2 = out_vertices[i0], out_vertices[i1], out_vertices[i2]
                 ux, uy, uz = v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]
                 vx, vy, vz = v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]
                 nx = uy * vz - uz * vy
                 ny = uz * vx - ux * vz
                 nz = ux * vy - uy * vx
                 for idx in (i0, i1, i2):
-                    computed_normals[idx][0] += nx
-                    computed_normals[idx][1] += ny
-                    computed_normals[idx][2] += nz
+                    accum_normals[idx][0] += nx
+                    accum_normals[idx][1] += ny
+                    accum_normals[idx][2] += nz
 
-    normals: List[List[float]] = []
-    uvs: List[List[float]] = []
-    for idx in range(len(vertices)):
-        if idx in vert_normal_map:
-            normals.append(vert_normal_map[idx])
-        elif idx < len(raw_normals):
-            normals.append(raw_normals[idx])
+    final_normals: List[List[float]] = []
+    for idx in range(len(out_vertices)):
+        explicit_norm = out_normals[idx]
+        if explicit_norm is not None:
+            final_normals.append(explicit_norm)
         else:
-            cn = computed_normals[idx]
+            cn = accum_normals[idx]
             length = math.sqrt(cn[0] * cn[0] + cn[1] * cn[1] + cn[2] * cn[2])
             if length > 1e-6:
-                normals.append([cn[0] / length, cn[1] / length, cn[2] / length])
+                final_normals.append([cn[0] / length, cn[1] / length, cn[2] / length])
             else:
-                normals.append([0.0, 1.0, 0.0])
-
-        if idx in vert_uv_map:
-            uvs.append(vert_uv_map[idx])
-        elif idx < len(raw_uvs):
-            uvs.append(raw_uvs[idx])
-        else:
-            uvs.append([0.0, 0.0])
+                final_normals.append([0.0, 1.0, 0.0])
 
     flat_indices = [idx for tri in faces for idx in tri]
     return SubMeshGeometrySpec(
-        vertices=vertices,
-        normals=normals,
-        uvs=uvs,
+        vertices=out_vertices,
+        normals=final_normals,
+        uvs=out_uvs,
         faces=faces,
         indices=flat_indices,
         objFileName=obj_file_name,

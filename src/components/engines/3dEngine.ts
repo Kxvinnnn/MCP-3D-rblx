@@ -620,6 +620,9 @@ export class RobloxMeshPreprocessor {
   /**
    * Extracts real local-space vertex, normal, UV, and triangle face buffers
    * from a Mesh so its exact 3D topology is preserved in Three.js and Roblox EditableMesh.
+   * Deduplicates corners by the composite key `(position, uv, normal)` so UV seams and
+   * hard-edge normal splits from Blender `.OBJ` files remain separate vertices while
+   * identical smooth corners share a single unified vertex index.
    */
   public extractSubMeshGeometryData(
     mesh: THREE.Mesh,
@@ -635,10 +638,9 @@ export class RobloxMeshPreprocessor {
     const uvAttr = geom.getAttribute('uv');
     const indexAttr = geom.getIndex();
 
-    const vertices: number[][] = [];
-    const normals: number[][] = [];
-    const uvs: number[][] = [];
-    const faces: number[][] = [];
+    const rawVertices: Array<[number, number, number]> = [];
+    const rawNormals: Array<[number, number, number]> = [];
+    const rawUvs: Array<[number, number]> = [];
 
     const v = new THREE.Vector3();
     const n = new THREE.Vector3();
@@ -648,7 +650,7 @@ export class RobloxMeshPreprocessor {
       v.fromBufferAttribute(posAttr, i)
         .applyMatrix4(mesh.matrixWorld)
         .sub(partCenterWorld);
-      vertices.push([
+      rawVertices.push([
         Number(v.x.toFixed(4)),
         Number(v.y.toFixed(4)),
         Number(v.z.toFixed(4)),
@@ -658,33 +660,66 @@ export class RobloxMeshPreprocessor {
         n.fromBufferAttribute(normAttr, i)
           .applyNormalMatrix(normalMatrix)
           .normalize();
-        normals.push([
+        rawNormals.push([
           Number(n.x.toFixed(4)),
           Number(n.y.toFixed(4)),
           Number(n.z.toFixed(4)),
         ]);
+      } else {
+        rawNormals.push([0, 1, 0]);
       }
 
       if (uvAttr && i < uvAttr.count) {
-        uvs.push([
+        rawUvs.push([
           Number(uvAttr.getX(i).toFixed(4)),
           Number(uvAttr.getY(i).toFixed(4)),
         ]);
+      } else {
+        rawUvs.push([0, 0]);
       }
     }
 
+    const vertices: number[][] = [];
+    const normals: number[][] = [];
+    const uvs: number[][] = [];
+    const faces: number[][] = [];
+    const compositeCornerMap = new Map<string, number>();
+
+    const getOrAddUnifiedCorner = (rawIdx: number): number => {
+      const safeIdx = Math.max(0, Math.min(rawVertices.length - 1, rawIdx));
+      const [px, py, pz] = rawVertices[safeIdx];
+      const [u, vCoord] = rawUvs[safeIdx];
+      const [nx, ny, nz] = rawNormals[safeIdx];
+      const key = `${px},${py},${pz}|${u},${vCoord}|${nx},${ny},${nz}`;
+      let unified = compositeCornerMap.get(key);
+      if (unified === undefined) {
+        unified = vertices.length;
+        compositeCornerMap.set(key, unified);
+        vertices.push([px, py, pz]);
+        uvs.push([u, vCoord]);
+        normals.push([nx, ny, nz]);
+      }
+      return unified;
+    };
+
     if (indexAttr) {
       for (let i = 0; i < indexAttr.count; i += 3) {
-        faces.push([
-          indexAttr.getX(i),
-          indexAttr.getX(i + 1),
-          indexAttr.getX(i + 2),
-        ]);
+        const i0 = getOrAddUnifiedCorner(indexAttr.getX(i));
+        const i1 = getOrAddUnifiedCorner(indexAttr.getX(i + 1));
+        const i2 = getOrAddUnifiedCorner(indexAttr.getX(i + 2));
+        if (i0 !== i1 && i1 !== i2 && i0 !== i2) {
+          faces.push([i0, i1, i2]);
+        }
       }
     } else {
       for (let i = 0; i < posAttr.count; i += 3) {
         if (i + 2 < posAttr.count) {
-          faces.push([i, i + 1, i + 2]);
+          const i0 = getOrAddUnifiedCorner(i);
+          const i1 = getOrAddUnifiedCorner(i + 1);
+          const i2 = getOrAddUnifiedCorner(i + 2);
+          if (i0 !== i1 && i1 !== i2 && i0 !== i2) {
+            faces.push([i0, i1, i2]);
+          }
         }
       }
     }
@@ -2159,13 +2194,25 @@ export class ThreeDEngineProcessor {
     options: FastAPIRequestOptions = {}
   ): Promise<{
     success: boolean;
+    status:
+      | 'local_saved'
+      | 'cloud_publishing'
+      | 'cloud_published'
+      | 'partially_published'
+      | 'failed'
+      | 'asset_not_found';
     material_name: string;
-    saved_textures: string[];
+    saved_textures: string[] | Record<string, string>;
     local_files?: Record<string, string | null>;
-    verified_cloud_uris?: Record<string, string>;
+    verified_cloud_uris?: Record<string, string | null>;
+    published_channels?: string[];
+    missing_channels?: string[];
+    decode_errors?: Record<string, string>;
+    channel_status?: Record<string, string>;
     is_cloud_published?: boolean;
     luau_binder_path: string;
     luau_code: string;
+    updated_asset?: Forge3DAsset | null;
   }> {
     return this.requestFastAPI(
       '/api/v1/assets/publish-pbr',

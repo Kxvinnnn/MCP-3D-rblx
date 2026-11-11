@@ -13,12 +13,16 @@ import {
   SPECIALIZED_AGENTS,
 } from './src/server/engines/architectureManifest.ts';
 import {
+  AI_MODULE_CONTRACTS,
+  buildAiSelfUnderstandingManifest,
   buildGltfFromPartsServer,
   buildObjAndMtlFromPartsServer,
+  buildPrunedDomainContext,
   buildRbxmxFromPartsServer,
   buildStrictLuauFromEditedParts,
   extractGeometryFromProcessedMesh,
   extractPartsFromUploadedMesh,
+  type ForgeContextDomain,
   generatePBRSurfaceAppearanceLuau,
   generateWorldEnvironmentLuau,
   normalizeValidMeshId,
@@ -255,7 +259,7 @@ function auditProjectModules() {
   };
 }
 
-function getLocalProjectContext(): string {
+function getPrunedProjectContextDetails(domain: ForgeContextDomain = 'luau') {
   const contextPaths = [
     path.resolve(runtimeRojoPath, 'project_context.md'),
     path.resolve(process.cwd(), 'backend', 'project_context.md'),
@@ -285,7 +289,11 @@ CRITICAL RULE: You may ONLY require() modules that are confirmed in 'Verified ex
 --- END VERIFIED MODULES ---
 `;
 
-  return `${rawContext}\n${verificationBlock}`;
+  return buildPrunedDomainContext(rawContext, verificationBlock, domain);
+}
+
+function getLocalProjectContext(domain: ForgeContextDomain = 'luau'): string {
+  return getPrunedProjectContextDetails(domain).promptContext;
 }
 
 async function checkRojoPortActive(port: number): Promise<boolean> {
@@ -414,22 +422,32 @@ function getBackendSourceFiles() {
 
   const rootDir = process.cwd();
   const fileList = [
+    { name: 'AI_ARCHITECTURE_MAP.md', path: path.join(rootDir, 'AI_ARCHITECTURE_MAP.md') },
     { name: 'README.md', path: path.join(rootDir, 'README.md') },
     { name: 'docs/ARCHITECTURE.md', path: path.join(rootDir, 'docs', 'ARCHITECTURE.md') },
     { name: 'docs/API_REFERENCE.md', path: path.join(rootDir, 'docs', 'API_REFERENCE.md') },
     { name: 'docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md', path: path.join(rootDir, 'docs', 'ROBLOX_PLUGIN_AND_ROJO_GUIDE.md') },
     { name: 'main.py', path: path.join(backendDir, 'main.py') },
-    { name: 'requirements.txt', path: path.join(backendDir, 'requirements.txt') },
-    { name: '.env.example', path: path.join(backendDir, '.env.example') },
-    { name: 'project_context.md', path: path.join(backendDir, 'project_context.md') },
-    { name: 'engines/rojo_bridge.py', path: path.join(backendDir, 'engines', 'rojo_bridge.py') },
+    { name: 'engines/context_pruner.py', path: path.join(backendDir, 'engines', 'context_pruner.py') },
     { name: 'engines/generation_3d_engine.py', path: path.join(backendDir, 'engines', 'generation_3d_engine.py') },
     { name: 'engines/asset_engine.py', path: path.join(backendDir, 'engines', 'asset_engine.py') },
     { name: 'engines/world_engine.py', path: path.join(backendDir, 'engines', 'world_engine.py') },
     { name: 'engines/luau_engine.py', path: path.join(backendDir, 'engines', 'luau_engine.py') },
     { name: 'engines/ui_engine.py', path: path.join(backendDir, 'engines', 'ui_engine.py') },
+    { name: 'engines/rojo_bridge.py', path: path.join(backendDir, 'engines', 'rojo_bridge.py') },
     { name: 'engines/agents_engine.py', path: path.join(backendDir, 'engines', 'agents_engine.py') },
+    { name: 'src/server/engines/contextPrunerEngine.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'contextPrunerEngine.ts') },
+    { name: 'src/server/engines/generation3DEngine.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'generation3DEngine.ts') },
+    { name: 'src/server/engines/assetEngine.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'assetEngine.ts') },
+    { name: 'src/server/engines/luauEngine.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'luauEngine.ts') },
+    { name: 'src/server/engines/uiEngine.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'uiEngine.ts') },
+    { name: 'src/server/engines/worldEngine.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'worldEngine.ts') },
+    { name: 'src/server/engines/rojoBridge.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'rojoBridge.ts') },
+    { name: 'src/server/engines/agentsEngine.ts', path: path.join(rootDir, 'src', 'server', 'engines', 'agentsEngine.ts') },
     { name: 'src/components/engines/3dEngine.ts', path: path.join(rootDir, 'src', 'components', 'engines', '3dEngine.ts') },
+    { name: 'requirements.txt', path: path.join(backendDir, 'requirements.txt') },
+    { name: '.env.example', path: path.join(backendDir, '.env.example') },
+    { name: 'project_context.md', path: path.join(backendDir, 'project_context.md') },
     { name: 'roblox_plugin/ForgeAIStudioPlugin.server.luau', path: path.join(backendDir, 'roblox_plugin', 'ForgeAIStudioPlugin.server.luau') },
     { name: 'rojo_workspace/default.project.json', path: path.resolve(runtimeRojoPath, 'default.project.json') },
     { name: 'rojo_workspace/src/shared/Utils/Maid.luau', path: path.resolve(runtimeRojoPath, 'src/shared/Utils/Maid.luau') },
@@ -615,11 +633,52 @@ app.post('/api/v1/context', (req, res) => {
 // -----------------------------------------------------------------------------
 
 app.get('/api/v1/architecture', (_req, res) => {
+  const domains: ForgeContextDomain[] = ['3d', 'pbr', 'luau', 'ui', 'world', 'agents'];
+  const domainPrunerStats = domains.map((d) => {
+    const pruned = getPrunedProjectContextDetails(d);
+    return {
+      domain: pruned.domain,
+      includedSections: pruned.includedSections,
+      originalChars: pruned.rawCharCount,
+      prunedChars: pruned.prunedCharCount,
+      reductionPercent: pruned.savedPercentage,
+    };
+  });
   res.json({
     engines: FORGE_MODULAR_ENGINES,
     roadmap: FORGE_ROADMAP_STATUS,
     agents: SPECIALIZED_AGENTS,
+    ai_manifest: buildAiSelfUnderstandingManifest(),
+    module_contracts: AI_MODULE_CONTRACTS,
+    domain_pruner_stats: domainPrunerStats,
   });
+});
+
+app.get('/api/v1/ai-manifest', (_req, res) => {
+  const domains: ForgeContextDomain[] = ['3d', 'pbr', 'luau', 'ui', 'world', 'agents'];
+  const domainPrunerStats = domains.map((d) => {
+    const pruned = getPrunedProjectContextDetails(d);
+    return {
+      domain: pruned.domain,
+      includedSections: pruned.includedSections,
+      originalChars: pruned.rawCharCount,
+      prunedChars: pruned.prunedCharCount,
+      reductionPercent: pruned.savedPercentage,
+    };
+  });
+  res.json({
+    ...buildAiSelfUnderstandingManifest(),
+    domainPrunerStats,
+  });
+});
+
+app.get('/api/v1/context/pruned', (req, res) => {
+  const rawDomain = String(req.query.domain || 'luau').toLowerCase();
+  const allowed: ForgeContextDomain[] = ['3d', 'pbr', 'luau', 'ui', 'world', 'agents'];
+  const domain: ForgeContextDomain = allowed.includes(rawDomain as ForgeContextDomain)
+    ? (rawDomain as ForgeContextDomain)
+    : 'luau';
+  res.json(getPrunedProjectContextDetails(domain));
 });
 
 app.get('/api/v1/assets', (_req, res) => {
@@ -1680,7 +1739,7 @@ app.post('/api/v1/agents/orchestrate-stream', async (req, res) => {
     const modelName = model_tier === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
 
     const audit = auditProjectModules();
-    const localContext = getLocalProjectContext();
+    const localContext = getLocalProjectContext('agents');
 
     // Step 1: Architect Agent
     sendSseEvent(res, {
@@ -2236,7 +2295,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       message: `Iniciando Motor 3D [${asset_type}] con '${model}' (Fidelidad Colisión: ${collision_fidelity}, Budget: ${target_poly_budget} tris)`,
     });
 
-    const localContext = getLocalProjectContext();
+    const localContext = getLocalProjectContext('3d');
 
     const systemInstruction = `
 You are the Principal 3D Geometry, PBR Material & Roblox WorldModel Architect for "Forge AI".
@@ -2464,7 +2523,7 @@ app.post('/api/v1/generate-3d', async (req, res) => {
     }
 
     const model = model_tier === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
-    const localContext = getLocalProjectContext();
+    const localContext = getLocalProjectContext('3d');
 
     const contents: any[] = [];
     if (reference_image_base64) {
@@ -2552,7 +2611,7 @@ app.post('/api/v1/generate-script', async (req, res) => {
     }
     const { prompt, script_type = 'Server', model_tier = 'fast', save_to_rojo = true } = req.body;
     const model = model_tier === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
-    const localContext = getLocalProjectContext();
+    const localContext = getLocalProjectContext('luau');
     const defaultFolder =
       script_type === 'Server' ? 'src/server' : script_type === 'Client' ? 'src/client' : 'src/shared';
 
@@ -2616,7 +2675,7 @@ app.post('/api/v1/generate-script-stream', async (req, res) => {
       message: `Auditoría Rojo: ${audit.verified_module_names.length} módulos verificados en disco [${audit.verified_module_names.join(', ')}]`,
     });
 
-    const localContext = getLocalProjectContext();
+    const localContext = getLocalProjectContext('luau');
 
     const streamResponse = await ai.models.generateContentStream({
       model,
@@ -2703,7 +2762,7 @@ app.post('/api/v1/generate-ui-stream', async (req, res) => {
       message: `Iniciando motor ForgeGUI [Tema: ${style_theme}] con modelo '${model}'...`,
     });
 
-    const localContext = getLocalProjectContext();
+    const localContext = getLocalProjectContext('ui');
     const contents: any[] = [];
     if (reference_image_base64) {
       let rawB64 = reference_image_base64;
