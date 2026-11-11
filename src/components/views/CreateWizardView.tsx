@@ -25,6 +25,7 @@ import {
   generateProceduralPBRTextures,
   convertImageTo3DHeightmapMesh,
 } from '../../utils/roblox3DEngine.ts';
+import { SseStreamParser, SseMessage } from '../../utils/sseParser.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
 import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
 
@@ -181,41 +182,24 @@ export const CreateWizardView: React.FC = () => {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let sseBuffer = '';
+      const sseParser = new SseStreamParser();
       let assetCompleted: Forge3DAsset | null = null;
 
-      const processSseBlock = (block: string) => {
-        const lines = block.split('\n');
-        let eventType = 'message';
-        const dataLines: string[] = [];
-
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line || line.startsWith(':')) continue;
-          if (line.startsWith('event:')) {
-            eventType = line.replace(/^event:\s*/, '').trim();
-          } else if (line.startsWith('data:')) {
-            dataLines.push(line.replace(/^data:\s*/, ''));
-          }
-        }
-
-        if (dataLines.length === 0) return;
-        const jsonStr = dataLines.join('\n');
-
+      const handleSseMessage = (msg: SseMessage) => {
         let payload: any = null;
         try {
-          payload = JSON.parse(jsonStr);
+          payload = JSON.parse(msg.data);
         } catch {
           // Log unparseable non-empty payload
           setActivityLogs((prev) => [
             ...prev,
-            `[AVISO]: Fragmento no parseable: ${jsonStr.slice(0, 80)}`,
+            `[AVISO]: Fragmento no parseable: ${msg.data.slice(0, 80)}`,
           ]);
           return;
         }
 
         // Explicit treatment of SSE error events
-        if (eventType === 'error' || payload.type === 'error' || payload.error) {
+        if (msg.event === 'error' || payload.type === 'error' || payload.error) {
           const errMsg = payload.error || payload.message || 'Error en la generación 3D';
           throw new Error(errMsg);
         }
@@ -248,25 +232,24 @@ export const CreateWizardView: React.FC = () => {
 
       while (true) {
         const { value, done } = await reader.read();
-        if (done) {
-          // Process residual buffer when stream concludes
-          if (sseBuffer.trim()) {
-            processSseBlock(sseBuffer.trim());
-            sseBuffer = '';
-          }
-          break;
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        for (const msg of sseParser.feed(text)) {
+          handleSseMessage(msg);
         }
+      }
 
-        // Normalize CRLF (\r\n) and legacy CR (\r) to standard \n
-        sseBuffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-        const events = sseBuffer.split('\n\n');
-        sseBuffer = events.pop() || '';
-
-        for (const evt of events) {
-          if (evt.trim()) {
-            processSseBlock(evt);
-          }
+      // Final flush of TextDecoder without stream: true
+      const finalDecoded = decoder.decode();
+      if (finalDecoded) {
+        for (const msg of sseParser.feed(finalDecoded)) {
+          handleSseMessage(msg);
         }
+      }
+
+      // Final flush of SseStreamParser for any remaining buffered event
+      for (const msg of sseParser.flush()) {
+        handleSseMessage(msg);
       }
 
       // Structural validation of received 3D asset model using a TypeScript type guard

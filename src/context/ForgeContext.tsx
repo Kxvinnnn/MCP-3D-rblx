@@ -103,8 +103,74 @@ export interface GeometryMetrics {
 }
 
 /**
+ * Computes the 3D surface area of a triangle formed by 3 vertices.
+ */
+function computeTriangleArea3D(v0: number[], v1: number[], v2: number[]): number {
+  if (!v0 || !v1 || !v2 || v0.length < 3 || v1.length < 3 || v2.length < 3) return 0;
+  const ax = v1[0] - v0[0];
+  const ay = v1[1] - v0[1];
+  const az = v1[2] - v0[2];
+
+  const bx = v2[0] - v0[0];
+  const by = v2[1] - v0[1];
+  const bz = v2[2] - v0[2];
+
+  const cx = ay * bz - az * by;
+  const cy = az * bx - ax * bz;
+  const cz = ax * by - ay * bx;
+
+  return 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+/**
+ * Validates face vertex index bounds, cleans duplicate vertices, and computes
+ * non-degenerate triangles for polygons.
+ */
+function countValidTrianglesInFace(face: number[], vertices: number[][]): number {
+  if (!Array.isArray(face) || face.length < 3) return 0;
+
+  const vLen = vertices.length;
+  const cleaned: number[] = [];
+
+  for (let i = 0; i < face.length; i++) {
+    const idx = face[i];
+    if (typeof idx !== 'number' || isNaN(idx) || idx < 0 || idx >= vLen || !Number.isInteger(idx)) {
+      return 0; // Invalid index found; reject degenerate face
+    }
+    if (cleaned.length === 0 || cleaned[cleaned.length - 1] !== idx) {
+      cleaned.push(idx);
+    }
+  }
+
+  // Remove circular duplicate if closing vertex equals opening vertex
+  if (cleaned.length > 1 && cleaned[0] === cleaned[cleaned.length - 1]) {
+    cleaned.pop();
+  }
+
+  if (cleaned.length < 3) return 0;
+
+  let validTris = 0;
+  const v0 = vertices[cleaned[0]];
+
+  for (let i = 1; i < cleaned.length - 1; i++) {
+    const idx1 = cleaned[i];
+    const idx2 = cleaned[i + 1];
+    if (cleaned[0] !== idx1 && cleaned[0] !== idx2 && idx1 !== idx2) {
+      const v1 = vertices[idx1];
+      const v2 = vertices[idx2];
+      const area = computeTriangleArea3D(v0, v1, v2);
+      if (area > 1e-7) {
+        validTris++;
+      }
+    }
+  }
+
+  return validTris;
+}
+
+/**
  * Calculates geometry metrics, distinguishing between real mesh vertex/face data
- * (including quads and N-gons) and estimated primitive shapes.
+ * (with geometric area and index validation) and estimated primitive shapes.
  */
 export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
   let realVertices = 0;
@@ -118,19 +184,34 @@ export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
   for (const part of parts) {
     if (part.meshData && Array.isArray(part.meshData.vertices) && part.meshData.vertices.length > 0) {
       realVertices += part.meshData.vertices.length;
-
+      const vertices = part.meshData.vertices;
       const faces = part.meshData.faces;
+
       if (Array.isArray(faces)) {
         if (faces.length > 0 && Array.isArray(faces[0])) {
-          // Polygon face array: each face with N vertices decomposes into (N - 2) triangles
+          // Polygon face array: validate indices and compute non-degenerate triangles
           for (const face of faces as number[][]) {
-            if (Array.isArray(face)) {
-              realTriangles += Math.max(1, face.length - 2);
-            }
+            realTriangles += countValidTrianglesInFace(face, vertices);
           }
         } else if (faces.length > 0 && typeof faces[0] === 'number') {
-          // Flat index array where 3 indices form 1 triangle
-          realTriangles += Math.floor(faces.length / 3);
+          // Flat index array where every 3 indices form 1 triangle
+          const flat = faces as unknown as number[];
+          for (let i = 0; i + 2 < flat.length; i += 3) {
+            const i0 = flat[i];
+            const i1 = flat[i + 1];
+            const i2 = flat[i + 2];
+            if (
+              i0 >= 0 && i0 < vertices.length &&
+              i1 >= 0 && i1 < vertices.length &&
+              i2 >= 0 && i2 < vertices.length &&
+              i0 !== i1 && i0 !== i2 && i1 !== i2
+            ) {
+              const area = computeTriangleArea3D(vertices[i0], vertices[i1], vertices[i2]);
+              if (area > 1e-7) {
+                realTriangles++;
+              }
+            }
+          }
         } else {
           realTriangles += faces.length;
         }
@@ -180,13 +261,15 @@ export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
 
 /**
  * Computes a deterministic canonical string representation of the asset contents
- * incorporating vertex coordinates, face indices, materials, and physical properties.
+ * incorporating all model metadata, PBR profiles, part hierarchy, transforms, visual,
+ * physical properties, and vertex/face/normal/UV buffers.
  */
 export function computeAssetContentHash(asset: Forge3DAsset | null): string {
   if (!asset) return '';
 
   const partsSummary = (asset.parts || []).map((p, idx) => {
     const id = p.partId || `part_${idx}`;
+    const hier = `${p.parentId || ''}/${p.parentName || ''}/${p.hierarchyPath || ''}`;
     const pos = (p.position || [0, 0, 0]).map((n) => Number(n).toFixed(3)).join(',');
     const rot = (p.rotation || [0, 0, 0]).map((n) => Number(n).toFixed(3)).join(',');
     const sz = (p.size || [1, 1, 1]).map((n) => Number(n).toFixed(3)).join(',');
@@ -194,9 +277,21 @@ export function computeAssetContentHash(asset: Forge3DAsset | null): string {
     const trans = Number(p.transparency ?? 0).toFixed(3);
     const anch = p.anchored ? '1' : '0';
     const coll = p.canCollide !== false ? '1' : '0';
-    const mat = `${p.material || 'Plastic'}_${Number(p.roughness ?? 0.5).toFixed(3)}_${Number(p.metalness ?? 0).toFixed(3)}`;
+    const doubleSided = p.doubleSided ? '1' : '0';
+    const castShadow = p.castShadow !== false ? '1' : '0';
+    const collFid = p.collisionFidelity || 'Default';
+    const rendFid = p.renderFidelity || 'Automatic';
+    const meshRef = `${p.meshId || ''}:${p.assetId || ''}:${p.textureId || ''}`;
+    const mat = `${p.material || 'Plastic'}_${Number(p.roughness ?? 0.5).toFixed(3)}_${Number(p.metalness ?? 0).toFixed(3)}_${Number(p.reflectance ?? 0).toFixed(3)}`;
 
-    // Canonical representation of mesh geometry data (coordinates & faces)
+    // Part-level PBR specs
+    let partPbrStr = 'none';
+    if (p.pbrMaterial) {
+      const pm = p.pbrMaterial;
+      partPbrStr = `${pm.pattern || ''}_${pm.albedoHex || ''}_${pm.emissiveHex || ''}_${pm.roughness ?? ''}_${pm.metalness ?? ''}_${pm.colorMapAssetId || ''}_${pm.normalMapAssetId || ''}_${pm.roughnessMapAssetId || ''}_${pm.metalnessMapAssetId || ''}_${pm.albedoDataUrl ? pm.albedoDataUrl.length : 0}_${pm.normalDataUrl ? pm.normalDataUrl.length : 0}`;
+    }
+
+    // Canonical representation of mesh geometry data (coordinates, faces, normals, uvs)
     let meshHash = 'none';
     if (p.meshData) {
       const vCoords = Array.isArray(p.meshData.vertices)
@@ -205,17 +300,26 @@ export function computeAssetContentHash(asset: Forge3DAsset | null): string {
       const fIndices = Array.isArray(p.meshData.faces)
         ? p.meshData.faces.map((f: any) => (Array.isArray(f) ? f.join(',') : String(f))).join(';')
         : '';
-      meshHash = `v[${p.meshData.vertices?.length || 0}:${vCoords}]_f[${p.meshData.faces?.length || 0}:${fIndices}]`;
+      const nCoords = Array.isArray(p.meshData.normals)
+        ? p.meshData.normals.map((n: number[]) => (Array.isArray(n) ? n.map((c) => Number(c).toFixed(2)).join(',') : String(n))).join(';')
+        : '';
+      const uvCoords = Array.isArray(p.meshData.uvs)
+        ? p.meshData.uvs.map((uv: number[]) => (Array.isArray(uv) ? uv.map((c) => Number(c).toFixed(3)).join(',') : String(uv))).join(';')
+        : '';
+
+      meshHash = `v[${p.meshData.vertices?.length || 0}:${vCoords}]_f[${p.meshData.faces?.length || 0}:${fIndices}]_n[${nCoords}]_uv[${uvCoords}]_${p.meshData.objFileName || ''}`;
     }
 
-    return `${id}|${p.name}|${p.shape}|${pos}|${rot}|${sz}|${col}|t:${trans}|a:${anch}|c:${coll}|${mat}|mesh:${meshHash}`;
+    return `${id}|${p.name}|${p.shape}|${hier}|${pos}|${rot}|${sz}|${col}|t:${trans}|a:${anch}|c:${coll}|ds:${doubleSided}|cs:${castShadow}|cf:${collFid}|rf:${rendFid}|${mat}|${meshRef}|pbr:${partPbrStr}|mesh:${meshHash}`;
   });
 
   const pbr = asset.pbr_profile
-    ? `${asset.pbr_profile.pattern}_${asset.pbr_profile.albedo_hex}_${asset.pbr_profile.emissive_hex || ''}_${asset.pbr_profile.roughness}_${asset.pbr_profile.metalness}_${asset.pbr_profile.roblox_material || ''}`
+    ? `${asset.pbr_profile.pattern}_${asset.pbr_profile.albedo_hex}_${asset.pbr_profile.emissive_hex || ''}_${asset.pbr_profile.roughness}_${asset.pbr_profile.metalness}_${asset.pbr_profile.roblox_material || ''}_${asset.pbr_profile.color_map_asset_id || ''}_${asset.pbr_profile.normal_map_asset_id || ''}_${asset.pbr_profile.roughness_map_asset_id || ''}_${asset.pbr_profile.metalness_map_asset_id || ''}_${asset.pbr_profile.albedo_asset_path || ''}_${asset.pbr_profile.normal_asset_path || ''}`
     : '';
 
-  return `${asset.name}#${asset.category || 'Props'}#${asset.collision_fidelity || 'Hull'}#${pbr}#[${partsSummary.join(';;')}]`;
+  const meta = `${asset.name}#${asset.category || 'Props'}#${asset.asset_type || 'Model3D'}#${asset.collision_fidelity || 'Hull'}#${asset.description || ''}#${asset.rojo_target_folder || ''}#${asset.file_name || ''}`;
+
+  return `${meta}#pbr:${pbr}#[${partsSummary.join(';;')}]`;
 }
 
 /**
@@ -381,8 +485,9 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [redoStack, setRedoStack] = useState<Forge3DAsset[]>([]);
   const [operationHistory, setOperationHistory] = useState<OperationHistoryEntry[]>([]);
 
-  // Hash-based pending changes detection
+  // Hash-based pending changes detection & snapshot of last persisted asset
   const savedAssetHashRef = useRef<string>('');
+  const savedAssetSnapshotRef = useRef<Forge3DAsset | null>(null);
   const [pendingChanges, setPendingChanges] = useState<boolean>(false);
 
   // Unsaved changes confirmation modal state
@@ -440,6 +545,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setActiveAssetState(null);
       setSelectedPart(null);
       savedAssetHashRef.current = '';
+      savedAssetSnapshotRef.current = null;
       setPendingChanges(false);
       setUndoStack([]);
       setRedoStack([]);
@@ -455,7 +561,8 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setActiveAssetState(stabilizedAsset);
     setSelectedPart(findMatchingPart(stabilizedParts, null));
 
-    // Initialize baseline hash for saved state
+    // Store baseline snapshot and hash for saved state
+    savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(stabilizedAsset));
     const hash = computeAssetContentHash(stabilizedAsset);
     savedAssetHashRef.current = hash;
     setPendingChanges(false);
@@ -487,8 +594,19 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         type: 'info',
         message: 'Cambios descartados. Se abrió el modelo seleccionado.',
       });
+    } else if (savedAssetSnapshotRef.current) {
+      // Revert in-memory active asset to the exact persisted baseline snapshot
+      const restored = JSON.parse(JSON.stringify(savedAssetSnapshotRef.current)) as Forge3DAsset;
+      setActiveAssetState(restored);
+      setSelectedPart(findMatchingPart(restored.parts, selectedPart));
+      setUndoStack([]);
+      setRedoStack([]);
+      setPendingChanges(false);
+      setNotification({
+        type: 'info',
+        message: 'Modificaciones descartadas. Se restauró el último estado guardado.',
+      });
     } else {
-      // Revert dirty state on current model
       setPendingChanges(false);
     }
 
@@ -496,7 +614,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setActiveTab(pendingSwitchTab);
       setPendingSwitchTab(null);
     }
-  }, [pendingSwitchTarget, pendingSwitchTab, applyActiveAssetDirectly]);
+  }, [pendingSwitchTarget, pendingSwitchTab, selectedPart, applyActiveAssetDirectly]);
 
   const cancelSwitch = useCallback(() => {
     setShowUnsavedModal(false);
@@ -739,7 +857,8 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             };
 
             setActiveAssetState(savedAsset);
-            // Update baseline hash - pending changes now cleanly cleared
+            // Update baseline snapshot & hash - pending changes cleanly cleared
+            savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(savedAsset));
             savedAssetHashRef.current = computeAssetContentHash(savedAsset);
             setPendingChanges(false);
 
@@ -818,6 +937,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const rebuildData = await rebuildRes.json();
           if (rebuildData.asset) {
             rojoSaved = true;
+            savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(rebuildData.asset));
             savedAssetHashRef.current = computeAssetContentHash(rebuildData.asset);
             setPendingChanges(false);
           } else {

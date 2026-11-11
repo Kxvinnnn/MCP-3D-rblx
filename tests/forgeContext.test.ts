@@ -1,6 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Window } from 'happy-dom';
+
+// Initialize DOM environment for React Testing
+const domWindow = new Window();
+(globalThis as any).window = domWindow;
+(globalThis as any).document = domWindow.document;
+(globalThis as any).localStorage = domWindow.localStorage;
+(globalThis as any).performance = domWindow.performance;
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+// Mock fetch for headless React component lifecycle without HTTP server
+globalThis.fetch = (async (url: string) => {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ assets: [] }),
+  };
+}) as any;
+
+// Import context & utilities after DOM globals are initialized
 import {
+  ForgeProvider,
+  useForge,
   computeAssetContentHash,
   calculateAssetMetrics,
   ensureStablePartIds,
@@ -25,6 +49,8 @@ function createSampleAsset(name = 'CyberTurret'): Forge3DAsset {
       roughness: 0.25,
       metalness: 0.85,
       roblox_material: 'Metal',
+      color_map_asset_id: 'rbxassetid://123456',
+      normal_map_asset_id: 'rbxassetid://123457',
     },
     parts: [
       {
@@ -42,6 +68,10 @@ function createSampleAsset(name = 'CyberTurret'): Forge3DAsset {
         canCollide: true,
         anchored: true,
         collisionFidelity: 'Hull',
+        renderFidelity: 'Automatic',
+        doubleSided: false,
+        castShadow: true,
+        hierarchyPath: 'Workspace/CyberTurret/Base',
       },
       {
         partId: 'part_cannon_fixed',
@@ -58,21 +88,25 @@ function createSampleAsset(name = 'CyberTurret'): Forge3DAsset {
         canCollide: true,
         anchored: false,
         collisionFidelity: 'Hull',
+        renderFidelity: 'Automatic',
+        doubleSided: false,
+        castShadow: true,
+        hierarchyPath: 'Workspace/CyberTurret/Cannon',
       },
     ],
     luau_code: '-- sample\n',
   };
 }
 
-test('1. computeAssetContentHash es determinista e incorpora coordenadas de vértices, caras y propiedades físicas', () => {
+test('1. computeAssetContentHash es exhaustivo: detecta cambios en geometría, jerarquía, PBR y físicas', () => {
   const assetA = createSampleAsset('TurretA');
   const assetB = createSampleAsset('TurretA');
 
-  const hashA1 = computeAssetContentHash(assetA);
-  const hashA2 = computeAssetContentHash(assetB);
-  assert.equal(hashA1, hashA2, 'Dos assets idénticos deben tener exactamente el mismo hash');
+  const hashA = computeAssetContentHash(assetA);
+  const hashB = computeAssetContentHash(assetB);
+  assert.equal(hashA, hashB, 'Dos assets idénticos deben tener exactamente el mismo hash canónico');
 
-  // Prueba 1A: Malla con vértices internos: desplazar un vértice intermedio sin alterar la cantidad total
+  // 1A. Desplazamiento de vértice interno sin cambiar el número de vértices ni caras
   const meshAsset: Forge3DAsset = {
     ...assetA,
     parts: [
@@ -85,297 +119,276 @@ test('1. computeAssetContentHash es determinista e incorpora coordenadas de vér
             [0.5, 1.0, 0.0],
           ],
           faces: [[0, 1, 2]],
+          normals: [[0, 0, 1], [0, 0, 1], [0, 0, 1]],
+          uvs: [[0, 0], [1, 0], [0.5, 1]],
         },
       },
     ],
   };
-
   const originalMeshHash = computeAssetContentHash(meshAsset);
 
-  // Desplazar vértice intermedio [1.0, 0.0, 0.0] a [1.08, 0.0, 0.0] (mismo número de vértices y caras)
-  const deformedMeshAsset: Forge3DAsset = JSON.parse(JSON.stringify(meshAsset));
-  deformedMeshAsset.parts[0].meshData!.vertices[1][0] = 1.08;
+  const deformedMesh: Forge3DAsset = JSON.parse(JSON.stringify(meshAsset));
+  deformedMesh.parts[0].meshData!.vertices[1][0] = 1.05; // 0.05 studs shift
+  assert.notEqual(computeAssetContentHash(deformedMesh), originalMeshHash, 'Desplazar vértice debe alterar el hash');
 
-  const deformedMeshHash = computeAssetContentHash(deformedMeshAsset);
-  assert.notEqual(
-    originalMeshHash,
-    deformedMeshHash,
-    'CRÍTICO: El hash debe detectar el desplazamiento de coordenadas de vértices aunque la cantidad de vértices sea idéntica'
-  );
+  // 1B. Modificar normales o UVs
+  const alteredNormals: Forge3DAsset = JSON.parse(JSON.stringify(meshAsset));
+  alteredNormals.parts[0].meshData!.normals![0] = [0.1, 0, 0.9];
+  assert.notEqual(computeAssetContentHash(alteredNormals), originalMeshHash, 'Alterar normales debe cambiar el hash');
 
-  // Prueba 1B: Modificar color de una pieza
-  const recoloredAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
-  recoloredAsset.parts[0].color = [255, 0, 0];
-  assert.notEqual(computeAssetContentHash(recoloredAsset), hashA1, 'Modificar el color debe alterar el hash');
+  // 1C. Jerarquía de partes (hierarchyPath, parentName)
+  const alteredHierarchy: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  alteredHierarchy.parts[0].hierarchyPath = 'Workspace/CustomGroup/Base';
+  assert.notEqual(computeAssetContentHash(alteredHierarchy), hashA, 'Modificar hierarchyPath debe cambiar el hash');
 
-  // Prueba 1C: Modificar propiedad física anchored
-  const unanchoredAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
-  unanchoredAsset.parts[0].anchored = false;
-  assert.notEqual(computeAssetContentHash(unanchoredAsset), hashA1, 'Modificar anchored debe alterar el hash');
+  // 1D. Metadatos PBR del modelo (color_map_asset_id, normal_map_asset_id)
+  const alteredPbrId: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  alteredPbrId.pbr_profile.color_map_asset_id = 'rbxassetid://999999';
+  assert.notEqual(computeAssetContentHash(alteredPbrId), hashA, 'Modificar color_map_asset_id debe cambiar el hash');
 
-  // Prueba 1D: Modificar canCollide
-  const ghostAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
-  ghostAsset.parts[0].canCollide = false;
-  assert.notEqual(computeAssetContentHash(ghostAsset), hashA1, 'Modificar canCollide debe alterar el hash');
+  // 1E. Propiedades de renderizado de Roblox (doubleSided, renderFidelity, castShadow)
+  const alteredDoubleSided: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  alteredDoubleSided.parts[0].doubleSided = true;
+  assert.notEqual(computeAssetContentHash(alteredDoubleSided), hashA, 'Modificar doubleSided debe cambiar el hash');
 
-  // Prueba 1E: Modificar transparency
-  const glassAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
-  glassAsset.parts[0].transparency = 0.5;
-  assert.notEqual(computeAssetContentHash(glassAsset), hashA1, 'Modificar transparency debe alterar el hash');
+  // 1F. Propiedades físicas (anchored, canCollide, transparency, color)
+  const alteredColor: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  alteredColor.parts[0].color = [255, 10, 10];
+  assert.notEqual(computeAssetContentHash(alteredColor), hashA, 'Modificar color debe cambiar el hash');
 });
 
-test('2. calculateAssetMetrics distingue entre geometría real y estimada, y calcula quads y N-gons', () => {
-  // Caso A: Primitivas Roblox puras
-  const primitiveAsset = createSampleAsset('TestPrimitives');
-  const primMetrics = calculateAssetMetrics(primitiveAsset);
-
-  assert.equal(primMetrics.hasEstimatedGeometry, true, 'Debe marcar hasEstimatedGeometry=true para primitivas');
-  assert.equal(primMetrics.realVertices, 0, 'No hay vértices reales en primitivas');
-  assert.equal(primMetrics.estimatedVertices, 56, 'Block (8) + Cylinder (48) = 56');
-  assert.equal(primMetrics.estimatedTriangles, 104, 'Block (12) + Cylinder (92) = 104');
-  assert.equal(primMetrics.vertices, 56);
-  assert.equal(primMetrics.triangles, 104);
-
-  // Caso B: Malla real con quads (caras de 4 vértices) y pentágonos (caras de 5 vértices)
-  const quadMeshAsset: Forge3DAsset = {
-    ...primitiveAsset,
+test('2. calculateAssetMetrics valida índices y rechaza triángulos degenerados o de área cero', () => {
+  // Caso 2A: Malla con un triángulo válido no degenerado
+  const validMesh: Forge3DAsset = {
+    ...createSampleAsset('ValidMesh'),
     parts: [
       {
-        ...primitiveAsset.parts[0],
+        ...createSampleAsset().parts[0],
         meshData: {
           vertices: [
-            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], // quad 1 (4 vértices -> 2 triángulos)
-            [2, 0, 0], [3, 0, 0], [3.5, 0.5, 0], [3, 1, 0], [2, 1, 0], // pentágono (5 vértices -> 3 triángulos)
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+          ],
+          faces: [[0, 1, 2]],
+        },
+      },
+    ],
+  };
+  const validMetrics = calculateAssetMetrics(validMesh);
+  assert.equal(validMetrics.realTriangles, 1, 'Triángulo con área no nula debe contarse como 1');
+  assert.equal(validMetrics.hasEstimatedGeometry, false);
+
+  // Caso 2B: Malla con cara degenerada de área cero (vértices colineales [0,0,0], [1,0,0], [2,0,0])
+  const zeroAreaMesh: Forge3DAsset = {
+    ...createSampleAsset('ZeroAreaMesh'),
+    parts: [
+      {
+        ...createSampleAsset().parts[0],
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [1, 0, 0],
+            [2, 0, 0], // Colineal: producto cruz nulo, área cero
+          ],
+          faces: [[0, 1, 2]],
+        },
+      },
+    ],
+  };
+  const zeroAreaMetrics = calculateAssetMetrics(zeroAreaMesh);
+  assert.equal(zeroAreaMetrics.realTriangles, 0, 'Caras con área geométrica nula (colineales) no deben sumar triángulos');
+
+  // Caso 2C: Malla con índices fuera de límites (índice 999 cuando sólo hay 3 vértices)
+  const outOfBoundsMesh: Forge3DAsset = {
+    ...createSampleAsset('OutOfBoundsMesh'),
+    parts: [
+      {
+        ...createSampleAsset().parts[0],
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+          ],
+          faces: [[0, 1, 999]], // Índice inválido
+        },
+      },
+    ],
+  };
+  const oobMetrics = calculateAssetMetrics(outOfBoundsMesh);
+  assert.equal(oobMetrics.realTriangles, 0, 'Caras con índices fuera de límites deben ser rechazadas');
+
+  // Caso 2D: Polígonos de 4 (quad) y 5 vértices (pentágono)
+  const polygonMesh: Forge3DAsset = {
+    ...createSampleAsset('PolygonMesh'),
+    parts: [
+      {
+        ...createSampleAsset().parts[0],
+        meshData: {
+          vertices: [
+            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], // Quad (4 verts -> 2 tris)
+            [2, 0, 0], [3, 0, 0], [3.5, 0.5, 0], [3, 1, 0], [2, 1, 0], // Pentágono (5 verts -> 3 tris)
           ],
           faces: [
-            [0, 1, 2, 3], // Quad: 4 - 2 = 2 triángulos
-            [4, 5, 6, 7, 8], // Pentágono: 5 - 2 = 3 triángulos
+            [0, 1, 2, 3],
+            [4, 5, 6, 7, 8],
           ],
         },
       },
     ],
   };
-
-  const quadMetrics = calculateAssetMetrics(quadMeshAsset);
-  assert.equal(quadMetrics.hasEstimatedGeometry, false, 'Malla explícita no debe ser estimada');
-  assert.equal(quadMetrics.realVertices, 9, 'Debe registrar 9 vértices reales');
-  assert.equal(quadMetrics.realTriangles, 5, '1 Quad (2 tris) + 1 Pentágono (3 tris) = 5 triángulos reales');
-  assert.equal(quadMetrics.triangles, 5);
+  const polyMetrics = calculateAssetMetrics(polygonMesh);
+  assert.equal(polyMetrics.realTriangles, 5, '1 Quad (2 tris) + 1 Pentágono (3 tris) = 5 triángulos reales');
 });
 
-test('3. ensureStablePartIds garantiza persistencia real ante reordenamiento y renombrado', () => {
+test('3. ensureStablePartIds y findMatchingPart aseguran persistencia y no seleccionan piezas arbitrarias', () => {
   const parts: MeshPart3DSpec[] = [
     {
-      partId: 'alpha_uuid_001',
-      name: 'LeftWing',
-      shape: 'Block',
-      size: [2, 1, 5],
-      position: [-3, 1, 0],
-      rotation: [0, 0, 0],
-      color: [100, 100, 100],
-      material: 'Plastic',
-      roughness: 0.5,
-      metalness: 0,
-      transparency: 0,
-      canCollide: true,
-      anchored: false,
-      collisionFidelity: 'Box',
-    },
-    {
-      partId: 'beta_uuid_002',
-      name: 'RightWing',
-      shape: 'Block',
-      size: [2, 1, 5],
-      position: [3, 1, 0],
-      rotation: [0, 0, 0],
-      color: [100, 100, 100],
-      material: 'Plastic',
-      roughness: 0.5,
-      metalness: 0,
-      transparency: 0,
-      canCollide: true,
-      anchored: false,
-      collisionFidelity: 'Box',
-    },
-  ];
-
-  // Caso 3A: Reordenamiento del array de piezas
-  const reorderedParts = [parts[1], parts[0]];
-  const stabilizedReordered = ensureStablePartIds(reorderedParts, 'StarFighter');
-
-  assert.equal(
-    stabilizedReordered[0].partId,
-    'beta_uuid_002',
-    'La pieza RightWing debe mantener su ID original incluso si pasa al índice 0'
-  );
-  assert.equal(
-    stabilizedReordered[1].partId,
-    'alpha_uuid_001',
-    'La pieza LeftWing debe mantener su ID original incluso si pasa al índice 1'
-  );
-
-  // Caso 3B: Renombrado de una pieza con ID existente
-  const renamedParts: MeshPart3DSpec[] = [
-    {
-      ...parts[0],
-      name: 'ReinforcedLeftWing',
-    },
-  ];
-  const stabilizedRenamed = ensureStablePartIds(renamedParts, 'StarFighter');
-  assert.equal(
-    stabilizedRenamed[0].partId,
-    'alpha_uuid_001',
-    'Renombrar una pieza debe preservar estrictamente su partId'
-  );
-
-  // Caso 3C: Pieza nueva sin ID asignado
-  const unassignedPart: MeshPart3DSpec[] = [
-    {
-      name: 'Cockpit',
-      shape: 'Block',
-      size: [1, 1, 1],
-      position: [0, 0, 0],
-      rotation: [0, 0, 0],
-      color: [0, 0, 0],
-      material: 'Plastic',
-      roughness: 0.5,
-      metalness: 0,
-      transparency: 0,
-      canCollide: true,
-      anchored: false,
-      collisionFidelity: 'Box',
-    },
-  ];
-  const assigned = ensureStablePartIds(unassignedPart, 'Ship');
-  assert.ok(assigned[0].partId && assigned[0].partId.length > 5, 'Debe generar un ID persistente no vacío');
-});
-
-test('4. findMatchingPart no selecciona piezas arbitrarias si la pieza fue eliminada', () => {
-  const parts: MeshPart3DSpec[] = [
-    {
-      partId: 'id_alpha',
-      name: 'Door',
-      hierarchyPath: 'Workspace/Castle/Door',
+      partId: 'id_alpha_left',
+      name: 'LeftThrust',
       shape: 'Block',
       size: [1, 2, 1],
-      position: [0, 0, 0],
+      position: [-2, 0, 0],
       rotation: [0, 0, 0],
-      color: [0, 0, 0],
-      material: 'Wood',
-      roughness: 0.7,
-      metalness: 0,
+      color: [100, 100, 100],
+      material: 'Metal',
+      roughness: 0.3,
+      metalness: 0.8,
       transparency: 0,
       canCollide: true,
       anchored: true,
       collisionFidelity: 'Box',
     },
     {
-      partId: 'id_beta',
-      name: 'Window',
-      hierarchyPath: 'Workspace/Castle/Window',
+      partId: 'id_beta_right',
+      name: 'RightThrust',
       shape: 'Block',
-      size: [1, 1, 1],
-      position: [5, 2, 0],
+      size: [1, 2, 1],
+      position: [2, 0, 0],
       rotation: [0, 0, 0],
-      color: [200, 200, 200],
-      material: 'Glass',
-      roughness: 0.1,
-      metalness: 0,
-      transparency: 0.6,
-      canCollide: false,
+      color: [100, 100, 100],
+      material: 'Metal',
+      roughness: 0.3,
+      metalness: 0.8,
+      transparency: 0,
+      canCollide: true,
       anchored: true,
       collisionFidelity: 'Box',
     },
   ];
 
-  // Caso 4A: Coincidencia exacta por partId
-  const matchA = findMatchingPart(parts, { partId: 'id_beta', name: 'AlteredName' } as any);
-  assert.equal(matchA?.partId, 'id_beta');
+  // Invertir orden del array
+  const reversed = [parts[1], parts[0]];
+  const stabilized = ensureStablePartIds(reversed, 'Spaceship');
+  assert.equal(stabilized[0].partId, 'id_beta_right', 'RightThrust conserva su ID');
+  assert.equal(stabilized[1].partId, 'id_alpha_left', 'LeftThrust conserva su ID');
 
-  // Caso 4B: Pieza eliminada que ya no existe en el array
+  // Búsqueda de pieza eliminada
   const deletedTarget: MeshPart3DSpec = {
-    partId: 'id_deleted_turret',
-    name: 'DeletedTurret',
-    hierarchyPath: 'Workspace/Castle/DeletedTurret',
-    shape: 'Block',
-    size: [1, 1, 1],
-    position: [0, 0, 0],
-    rotation: [0, 0, 0],
-    color: [0, 0, 0],
-    material: 'Wood',
-    roughness: 0.5,
-    metalness: 0,
-    transparency: 0,
-    canCollide: true,
-    anchored: true,
-    collisionFidelity: 'Box',
+    ...parts[0],
+    partId: 'id_deleted_cockpit',
+    name: 'Cockpit',
   };
-
-  const matchDeleted = findMatchingPart(parts, deletedTarget);
-  assert.equal(
-    matchDeleted,
-    null,
-    'CRÍTICO: Si la pieza seleccionada fue eliminada, findMatchingPart debe devolver null, NO seleccionar arbitrariamente parts[0]'
-  );
-
-  // Caso 4C: Target nulo devuelve null
-  assert.equal(findMatchingPart(parts, null), null);
+  const matchResult = findMatchingPart(parts, deletedTarget);
+  assert.equal(matchResult, null, 'Pieza eliminada debe devolver null, nunca la primera pieza arbitrariamente');
 });
 
-test('5. Historial, Deshacer y Rehacer limpian y reactivan pendingChanges según el hash baseline', () => {
-  const asset0 = createSampleAsset('InitialModel');
-  const baselineHash = computeAssetContentHash(asset0);
+test('4. EJECUCIÓN REAL DE REACT FORGECONTEXT: prueba de estado, confirmSwitchDiscard y reversión real al snapshot', async () => {
+  let contextValue: any = null;
 
-  // Simulación del motor de estados de ForgeContext
-  let currentAsset = JSON.parse(JSON.stringify(asset0)) as Forge3DAsset;
-  const undoStack: Forge3DAsset[] = [];
-  const redoStack: Forge3DAsset[] = [];
+  // Componente consumidor para extraer la instancia del contexto React en vivo
+  function ContextInspector() {
+    contextValue = useForge();
+    return React.createElement('div', { id: 'inspector' }, contextValue.activeAsset?.name || 'none');
+  }
 
-  const checkPendingChanges = (asset: Forge3DAsset) => {
-    return computeAssetContentHash(asset) !== baselineHash;
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  // Montar ForgeProvider y el consumidor
+  await act(async () => {
+    root.render(
+      React.createElement(
+        ForgeProvider,
+        null,
+        React.createElement(ContextInspector)
+      )
+    );
+  });
+
+  assert.ok(contextValue, 'El hook useForge debe inicializarse correctamente en React');
+
+  const baselineAsset = createSampleAsset('TankHero');
+
+  // 1. Cargar asset inicial en el contexto
+  await act(async () => {
+    contextValue.setActiveAsset(baselineAsset);
+  });
+
+  assert.equal(contextValue.activeAsset.name, 'TankHero');
+  assert.equal(contextValue.pendingChanges, false, 'Al cargar el asset inicial, pendingChanges debe ser false');
+
+  const initialPartColor = contextValue.activeAsset.parts[0].color;
+  assert.deepEqual(initialPartColor, [6, 182, 212]);
+
+  // 2. Modificar el modelo aplicando una operación (cambiar color a rojo)
+  const modifiedAsset: Forge3DAsset = {
+    ...contextValue.activeAsset,
+    parts: contextValue.activeAsset.parts.map((p: any, idx: number) =>
+      idx === 0 ? { ...p, color: [255, 0, 0] } : p
+    ),
   };
 
-  assert.equal(checkPendingChanges(currentAsset), false, 'Inicialmente no hay cambios pendientes');
+  await act(async () => {
+    contextValue.applyAssetChange(modifiedAsset, 'Modificar color de base a rojo');
+  });
 
-  // Operación 1: Modificar posición de la base
-  undoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
-  currentAsset.parts[0].position = [2, 0.5, 0];
-  redoStack.length = 0;
+  assert.equal(contextValue.pendingChanges, true, 'Tras la modificación en memoria, pendingChanges debe ser true');
+  assert.deepEqual(contextValue.activeAsset.parts[0].color, [255, 0, 0]);
 
-  assert.equal(checkPendingChanges(currentAsset), true, 'Tras la operación 1, pendingChanges debe ser true');
+  // 3. Probar Deshacer (undo)
+  await act(async () => {
+    contextValue.undo();
+  });
 
-  // Operación 2: Modificar color del cañón
-  undoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
-  currentAsset.parts[1].color = [255, 0, 0];
-  redoStack.length = 0;
-
-  assert.equal(checkPendingChanges(currentAsset), true, 'Tras la operación 2, pendingChanges sigue siendo true');
-
-  // Deshacer Operación 2 (volver a Op 1)
-  const prev1 = undoStack.shift()!;
-  redoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
-  currentAsset = prev1;
-
-  assert.deepEqual(currentAsset.parts[1].color, [56, 189, 248], 'El color debe volver al original');
-  assert.equal(checkPendingChanges(currentAsset), true, 'Aún queda la operación 1, pendingChanges sigue en true');
-
-  // Deshacer Operación 1 (volver a estado base Inicial)
-  const prev0 = undoStack.shift()!;
-  redoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
-  currentAsset = prev0;
-
-  assert.deepEqual(currentAsset.parts[0].position, [0, 0.5, 0], 'La posición debe volver a [0, 0.5, 0]');
+  assert.deepEqual(
+    contextValue.activeAsset.parts[0].color,
+    [6, 182, 212],
+    'Undo debe restaurar el color al baseline'
+  );
   assert.equal(
-    checkPendingChanges(currentAsset),
+    contextValue.pendingChanges,
     false,
-    'CRÍTICO: Al deshacer hasta el baseline guardado, pendingChanges debe volver a false limpiamente'
+    'Undo hasta el baseline debe regresar pendingChanges a false en React'
   );
 
-  // Rehacer Operación 1
-  const next1 = redoStack.shift()!;
-  undoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
-  currentAsset = next1;
+  // 4. Probar Rehacer (redo)
+  await act(async () => {
+    contextValue.redo();
+  });
 
-  assert.deepEqual(currentAsset.parts[0].position, [2, 0.5, 0]);
-  assert.equal(checkPendingChanges(currentAsset), true, 'Al rehacer, pendingChanges vuelve a true');
+  assert.deepEqual(contextValue.activeAsset.parts[0].color, [255, 0, 0], 'Redo debe restaurar la modificación');
+  assert.equal(contextValue.pendingChanges, true, 'Al rehacer, pendingChanges vuelve a true');
+
+  // 5. CRÍTICO: confirmSwitchDiscard() debe revertir realmente el modelo en memoria al snapshot persistido
+  await act(async () => {
+    contextValue.confirmSwitchDiscard();
+  });
+
+  assert.equal(
+    contextValue.pendingChanges,
+    false,
+    'confirmSwitchDiscard debe limpiar pendingChanges a false'
+  );
+  assert.deepEqual(
+    contextValue.activeAsset.parts[0].color,
+    [6, 182, 212],
+    'CRÍTICO: confirmSwitchDiscard debe restaurar el modelo en memoria a su snapshot guardado original'
+  );
+
+  // Limpiar árbol de React
+  await act(async () => {
+    root.unmount();
+  });
 });

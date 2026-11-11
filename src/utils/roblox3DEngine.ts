@@ -50,6 +50,8 @@ export interface MeshPart3DSpec {
   collisionFidelity: 'Default' | 'Box' | 'Hull' | 'PreciseConvexDecomposition';
   renderFidelity?: 'Automatic' | 'Precise' | 'Performance';
   doubleSided?: boolean;
+  castShadow?: boolean;
+  reflectance?: number;
   meshId?: string;
   assetId?: string;
   textureId?: string;
