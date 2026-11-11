@@ -1457,33 +1457,74 @@ def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Op
     }
 
 
+def _resolve_baseline_parts_for_asset(
+    existing_asset: Optional[Dict[str, Any]],
+    payload_body: Dict[str, Any],
+) -> Optional[List[Dict[str, Any]]]:
+    if isinstance(payload_body.get("base_parts"), list):
+        return payload_body["base_parts"]
+    baseline_sha = str(payload_body.get("baseline_snapshot_sha256") or "").strip()
+    if not baseline_sha or not existing_asset:
+        return None
+    if str(existing_asset.get("snapshot_sha256") or "") == baseline_sha:
+        return existing_asset.get("parts", [])
+    for snap in existing_asset.get("version_history", []) or []:
+        if isinstance(snap, dict) and str(snap.get("snapshot_sha256") or "") == baseline_sha:
+            if isinstance(snap.get("parts"), list):
+                return snap["parts"]
+    return None
+
+
 @app.post("/api/v1/assets/compare-datamodel")
 def compare_studio_datamodel(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     """
     Pillar C Real DataModel Bidirectional Sync Diff:
     Compares the live Roblox Studio DataModel (`studio_parts`) against the active asset in Forge (`asset_id` / `model_name`)
-    using stable `partId` (`ForgePartId`), `geometryHash`, `materialHash`, `transformHash`, and `parentName` hierarchy.
+    using stable `partId` (`ForgePartId`), `geometryHash`, `materialHash`, `transformHash`, and `hierarchyPath` (`FORGE_SYNC_HASH_SCHEMA_V1`).
     """
     verify_security_token(x_forge_token)
     model_name = str(payload_body.get("model_name") or payload_body.get("asset_id") or "").strip()
     studio_parts = payload_body.get("parts") or payload_body.get("studio_parts") or []
+    sync_scope = str(payload_body.get("sync_scope") or "full_model").strip()
+    if sync_scope not in ("selection", "full_model", "explicit_delete"):
+        sync_scope = "full_model"
+    explicit_delete_ids = payload_body.get("explicit_delete_ids")
+    if not isinstance(explicit_delete_ids, list):
+        explicit_delete_ids = []
+
     engine = get_asset_engine()
-    existing = engine.get_asset(model_name)
+    safe_name = re.sub(r"[^a-zA-Z0-9_]", "", model_name) or model_name
+    existing = engine.get_asset(model_name) or engine.get_asset(safe_name)
     if not existing:
         return {
             "found_in_forge": False,
+            "asset_id": None,
             "model_name": model_name,
-            "diff": engine.compare_datamodel([], studio_parts if isinstance(studio_parts, list) else []),
+            "version": 1,
+            "diff": engine.compare_datamodel(
+                [],
+                studio_parts if isinstance(studio_parts, list) else [],
+                base_parts=None,
+                sync_scope=sync_scope,
+                model_name=safe_name,
+                explicit_delete_ids=explicit_delete_ids,
+            ),
         }
+    base_parts = _resolve_baseline_parts_for_asset(existing, payload_body)
     diff = engine.compare_datamodel(
         existing.get("parts", []),
         studio_parts if isinstance(studio_parts, list) else [],
+        base_parts=base_parts,
+        sync_scope=sync_scope,
+        model_name=str(existing.get("name") or safe_name),
+        explicit_delete_ids=explicit_delete_ids,
     )
     return {
         "found_in_forge": True,
         "asset_id": existing.get("id"),
         "model_name": existing.get("name"),
         "version": existing.get("version", 1),
+        "snapshot_sha256": existing.get("snapshot_sha256"),
         "diff": diff,
     }
 
@@ -1493,66 +1534,231 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
     """
     Pillar C Bidirectional Sync: Receives incremental part updates directly from the Roblox Studio Plugin
     (`Selection` or `Workspace` model changes), matches parts by `partId` (`ForgePartId`) or `name`,
-    computes the exact DataModel diff (geometry, transforms, hierarchies, materials), and updates
-    the asset in `assets_library.json` and Rojo `.rbxmx`/`.luau` via the unified `AssetEngine`.
+    validates duplicate `partId`s and 3-way merge conflicts (`conflict_policy`), preserves external
+    `MeshPart`s without inventing procedural cubes, and atomically updates `assets_library.json`,
+    `.rbxmx`, and `.luau` with `.tmp` + rollback protection.
     """
     verify_security_token(x_forge_token)
     model_name = str(payload_body.get("model_name") or payload_body.get("name") or "StudioModel").strip()
     incoming_parts = payload_body.get("parts", [])
-    if not isinstance(incoming_parts, list) or len(incoming_parts) == 0:
-        raise HTTPException(status_code=400, detail="Requires non-empty parts array from Roblox Studio.")
+    explicit_delete_ids = payload_body.get("explicit_delete_ids")
+    if not isinstance(explicit_delete_ids, list):
+        explicit_delete_ids = []
+    explicit_delete_set = {str(x) for x in explicit_delete_ids if str(x).strip()}
+
+    raw_scope = str(payload_body.get("sync_scope") or "").strip()
+    if raw_scope in ("selection", "full_model", "explicit_delete"):
+        sync_scope = raw_scope
+    elif payload_body.get("remove_missing", False) or payload_body.get("merge_mode") == "replace":
+        sync_scope = "full_model"
+    elif len(explicit_delete_set) > 0 and (not isinstance(incoming_parts, list) or len(incoming_parts) == 0):
+        sync_scope = "explicit_delete"
+    else:
+        sync_scope = "selection"
+
+    conflict_policy = str(payload_body.get("conflict_policy") or "smart_merge").strip()
+    if conflict_policy not in ("reject", "smart_merge", "prefer_studio", "prefer_forge"):
+        conflict_policy = "smart_merge"
+    merge_mode = str(payload_body.get("merge_mode") or ("replace" if sync_scope == "full_model" else "incremental"))
+
+    if not isinstance(incoming_parts, list) or (len(incoming_parts) == 0 and len(explicit_delete_set) == 0):
+        raise HTTPException(status_code=400, detail="Requires non-empty parts array or explicit_delete_ids from Roblox Studio.")
 
     engine = get_asset_engine()
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "", model_name) or "StudioModel"
     existing = engine.get_asset(model_name) or engine.get_asset(safe_name)
+    base_parts = _resolve_baseline_parts_for_asset(existing, payload_body)
+
+    # Pre-merge incoming parts with existing Forge meshData when incoming Studio part omits ForgeMeshGeometryJSON
+    norm_existing = (
+        normalize_parts_with_sync_metadata(existing.get("parts", []), safe_name)
+        if existing and isinstance(existing.get("parts"), list)
+        else []
+    )
+    existing_by_id = {str(p.get("partId")): p for p in norm_existing}
+    existing_by_name = {str(p.get("name")): p for p in norm_existing}
+
+    prepared_incoming: List[Dict[str, Any]] = []
+    for idx, raw_inc in enumerate(incoming_parts):
+        if not isinstance(raw_inc, dict):
+            continue
+        inc = dict(raw_inc)
+        inc_id = str(inc.get("partId") or inc.get("id") or "").strip()
+        pname = str(inc.get("name") or f"MeshPart_{idx + 1}").strip()
+        matched_existing = (existing_by_id.get(inc_id) if inc_id else None) or existing_by_name.get(pname)
+
+        inc_md = inc.get("meshData") if isinstance(inc.get("meshData"), dict) else None
+        has_inc_buffers = bool(
+            inc_md
+            and isinstance(inc_md.get("vertices"), list)
+            and len(inc_md["vertices"]) > 0
+            and isinstance(inc_md.get("faces"), list)
+            and len(inc_md["faces"]) > 0
+        )
+        inc_mesh_id = validate_published_roblox_mesh_id(
+            inc.get("meshId")
+            or inc.get("mesh_id")
+            or (inc_md.get("meshId") if inc_md else None)
+            or (inc_md.get("assetId") if inc_md else None)
+        )
+        inc_geom_source = str(inc.get("geometrySource") or "").strip()
+
+        if not has_inc_buffers and matched_existing:
+            ex_mesh_id = validate_published_roblox_mesh_id(
+                matched_existing.get("meshId")
+                or (matched_existing.get("meshData") or {}).get("meshId")
+            )
+            # If Studio didn't switch to a different published MeshId, preserve Forge's existing meshData
+            if not inc_mesh_id or inc_mesh_id == ex_mesh_id:
+                if matched_existing.get("meshData"):
+                    inc["meshData"] = json.loads(json.dumps(matched_existing["meshData"]))
+                if not inc_geom_source and matched_existing.get("geometrySource"):
+                    inc["geometrySource"] = matched_existing["geometrySource"]
+                if not inc_mesh_id and ex_mesh_id:
+                    inc["meshId"] = ex_mesh_id
+                    inc["assetId"] = ex_mesh_id
+
+        if inc_mesh_id:
+            inc["meshId"] = inc_mesh_id
+            inc["assetId"] = inc.get("assetId") or inc_mesh_id
+            if not has_inc_buffers and not (
+                isinstance(inc.get("meshData"), dict)
+                and len(inc["meshData"].get("vertices") or []) > 0
+            ):
+                inc["geometrySource"] = "PublishedCloudMeshId"
+        elif not has_inc_buffers and not (
+            isinstance(inc.get("meshData"), dict)
+            and len(inc["meshData"].get("vertices") or []) > 0
+        ):
+            if inc_geom_source in ("StudioExternalUnreadable", "PublishedCloudMeshId"):
+                inc["geometrySource"] = inc_geom_source
+            elif not matched_existing:
+                inc["geometrySource"] = "StudioExternalUnreadable"
+
+        if not inc_id and matched_existing and matched_existing.get("partId"):
+            inc["partId"] = matched_existing["partId"]
+
+        prepared_incoming.append(inc)
 
     sync_diff = engine.compare_datamodel(
-        existing.get("parts", []) if existing else [],
-        incoming_parts,
+        forge_parts=norm_existing,
+        studio_parts=prepared_incoming,
+        base_parts=base_parts,
+        sync_scope=sync_scope,
+        model_name=safe_name,
+        explicit_delete_ids=list(explicit_delete_set),
+    )
+
+    # 1. Reject duplicate partIds immediately
+    if sync_diff.get("has_duplicate_ids"):
+        return {
+            "success": False,
+            "status": "duplicate_part_ids",
+            "error": "Push rechazado: se detectaron ForgePartId duplicados en el payload.",
+            "duplicate_studio_part_ids": sync_diff.get("duplicate_studio_part_ids", []),
+            "duplicate_forge_part_ids": sync_diff.get("duplicate_forge_part_ids", []),
+            "sync_diff": sync_diff,
+        }
+
+    # 2. Enforce conflict policy when 3-way conflicts exist
+    if sync_diff.get("has_conflicts") and conflict_policy == "reject":
+        return {
+            "success": False,
+            "status": "conflict_detected",
+            "error": "Push rechazado por política de conflictos: el modelo cambió tanto en Forge como en Studio desde el último snapshot base.",
+            "conflicts": sync_diff.get("conflicts", []),
+            "sync_diff": sync_diff,
+        }
+
+    norm_studio = normalize_parts_with_sync_metadata(prepared_incoming, safe_name)
+    conflict_by_id = {str(c.get("partId")): c for c in (sync_diff.get("conflicts") or [])}
+    base_by_id = (
+        {str(b.get("partId")): b for b in normalize_parts_with_sync_metadata(base_parts, safe_name)}
+        if base_parts
+        else {}
     )
 
     merged_parts: List[Dict[str, Any]] = []
-    if existing and isinstance(existing.get("parts"), list):
-        norm_existing = normalize_parts_with_sync_metadata(existing["parts"])
-        existing_by_id = {str(p.get("partId")): p for p in norm_existing}
-        existing_by_name = {str(p.get("name")): p for p in norm_existing}
+    if existing and len(norm_existing) > 0:
         seen_ids = set()
         seen_names = set()
-        for idx, inc in enumerate(incoming_parts):
-            inc_id = str(inc.get("partId") or inc.get("id") or "")
-            pname = str(inc.get("name", f"MeshPart_{idx + 1}"))
-            base_part = (existing_by_id.get(inc_id) if inc_id else None) or existing_by_name.get(pname, {})
-            resolved_id = inc_id or str(base_part.get("partId") or f"forge-part-{idx + 1}-{pname.lower()}")
+        for idx, inc in enumerate(norm_studio):
+            inc_id = str(inc.get("partId") or "")
+            pname = str(inc.get("name") or f"MeshPart_{idx + 1}")
+            if inc_id in explicit_delete_set or pname in explicit_delete_set:
+                continue
+            f_part = existing_by_id.get(inc_id) or existing_by_name.get(pname)
+            resolved_id = inc_id or (str(f_part.get("partId")) if f_part else f"forge-part-{idx + 1}-{pname.lower()}")
             seen_ids.add(resolved_id)
             seen_names.add(pname)
-            merged_part = {
-                **base_part,
-                "partId": resolved_id,
-                "name": pname,
-                "parentName": str(inc.get("parentName") or base_part.get("parentName") or "Root"),
-                "hierarchyPath": str(inc.get("hierarchyPath") or base_part.get("hierarchyPath") or pname),
-                "shape": "MeshPart",
-                "size": inc.get("size", base_part.get("size", [2.0, 2.0, 2.0])),
-                "position": inc.get("position", base_part.get("position", [0.0, 1.0, 0.0])),
-                "rotation": inc.get("rotation", base_part.get("rotation", [0.0, 0.0, 0.0])),
-                "color": inc.get("color", base_part.get("color", [148, 163, 184])),
-                "material": inc.get("material", base_part.get("material", "Metal")),
-                "roughness": float(inc.get("roughness", base_part.get("roughness", 0.35))),
-                "metalness": float(inc.get("metalness", base_part.get("metalness", 0.65))),
-                "transparency": float(inc.get("transparency", base_part.get("transparency", 0.0))),
-                "canCollide": bool(inc.get("canCollide", base_part.get("canCollide", True))),
-                "anchored": bool(inc.get("anchored", base_part.get("anchored", True))),
-                "collisionFidelity": str(inc.get("collisionFidelity", base_part.get("collisionFidelity", "Hull"))),
-                "meshData": inc.get("meshData") or base_part.get("meshData"),
-                "pbrMaterial": inc.get("pbrMaterial") or base_part.get("pbrMaterial"),
-            }
-            merged_parts.append(merged_part)
-        if not payload_body.get("remove_missing", False):
+
+            if not f_part:
+                merged_parts.append(inc)
+                continue
+
+            has_conflict = resolved_id in conflict_by_id
+            if has_conflict and conflict_policy == "prefer_forge":
+                merged_parts.append(f_part)
+                continue
+
+            b_part = base_by_id.get(resolved_id)
+            if has_conflict and conflict_policy == "smart_merge" and b_part:
+                # Field-level 3-way merge: apply Studio's changed aspect while preserving Forge's non-conflicting changes
+                studio_geom_changed = inc.get("geometryHash") != b_part.get("geometryHash")
+                studio_mat_changed = inc.get("materialHash") != b_part.get("materialHash")
+                studio_trans_changed = inc.get("transformHash") != b_part.get("transformHash")
+                merged_part = {
+                    **f_part,
+                    "partId": resolved_id,
+                    "name": pname,
+                    "parentId": inc.get("parentId") if studio_trans_changed else f_part.get("parentId"),
+                    "parentName": inc.get("parentName") if studio_trans_changed else f_part.get("parentName", "Root"),
+                    "hierarchyPath": inc.get("hierarchyPath") if studio_trans_changed else f_part.get("hierarchyPath", pname),
+                    "size": inc.get("size") if studio_trans_changed else f_part.get("size", [2.0, 2.0, 2.0]),
+                    "position": inc.get("position") if studio_trans_changed else f_part.get("position", [0.0, 1.0, 0.0]),
+                    "rotation": inc.get("rotation") if studio_trans_changed else f_part.get("rotation", [0.0, 0.0, 0.0]),
+                    "rotationMatrix": inc.get("rotationMatrix") if studio_trans_changed else f_part.get("rotationMatrix"),
+                    "color": inc.get("color") if studio_mat_changed else f_part.get("color", [148, 163, 184]),
+                    "material": inc.get("material") if studio_mat_changed else f_part.get("material", "Metal"),
+                    "roughness": float(inc.get("roughness", 0.35)) if studio_mat_changed else float(f_part.get("roughness", 0.35)),
+                    "metalness": float(inc.get("metalness", 0.65)) if studio_mat_changed else float(f_part.get("metalness", 0.65)),
+                    "transparency": float(inc.get("transparency", 0.0)) if studio_mat_changed else float(f_part.get("transparency", 0.0)),
+                    "pbrMaterial": (inc.get("pbrMaterial") or f_part.get("pbrMaterial")) if studio_mat_changed else f_part.get("pbrMaterial"),
+                    "meshId": inc.get("meshId") if studio_geom_changed else f_part.get("meshId"),
+                    "assetId": inc.get("assetId") if studio_geom_changed else f_part.get("assetId"),
+                    "textureId": inc.get("textureId") if studio_mat_changed else f_part.get("textureId"),
+                    "geometrySource": inc.get("geometrySource") if studio_geom_changed else f_part.get("geometrySource"),
+                    "meshData": inc.get("meshData") if studio_geom_changed else f_part.get("meshData"),
+                }
+                merged_parts.append(merged_part)
+            else:
+                merged_part = {
+                    **f_part,
+                    **inc,
+                    "partId": resolved_id,
+                    "name": pname,
+                    "parentName": str(inc.get("parentName") or f_part.get("parentName") or "Root"),
+                    "hierarchyPath": str(inc.get("hierarchyPath") or f_part.get("hierarchyPath") or pname),
+                    "shape": "MeshPart",
+                    "meshData": inc.get("meshData") if inc.get("meshData") is not None else f_part.get("meshData"),
+                    "pbrMaterial": inc.get("pbrMaterial") or f_part.get("pbrMaterial"),
+                }
+                merged_parts.append(merged_part)
+
+        if sync_scope != "full_model":
             for ep in norm_existing:
-                if str(ep.get("partId")) not in seen_ids and str(ep.get("name")) not in seen_names:
+                ep_id = str(ep.get("partId") or "")
+                ep_name = str(ep.get("name") or "")
+                if ep_id in explicit_delete_set or ep_name in explicit_delete_set:
+                    continue
+                if ep_id not in seen_ids and ep_name not in seen_names:
                     merged_parts.append(ep)
     else:
-        merged_parts = normalize_parts_with_sync_metadata(incoming_parts)
+        merged_parts = [
+            p
+            for p in norm_studio
+            if str(p.get("partId")) not in explicit_delete_set and str(p.get("name")) not in explicit_delete_set
+        ]
 
     part_specs = [MeshPart3DSpec(**p) for p in merged_parts]
     enriched_specs = generation_3d_engine.ensure_mesh_data_on_parts(safe_name, part_specs)
@@ -1567,33 +1773,73 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
     )
 
     target_folder = str((existing or {}).get("rojo_target_folder", "src/shared/Assets3D"))
-    luau_saved = save_luau_to_rojo(target_folder, f"{safe_name}.luau", luau_code)
-    rbxmx_saved = save_raw_asset_to_rojo(target_folder, f"{safe_name}.rbxmx", rbxmx_content.encode("utf-8"))
+    luau_target_path = resolve_safe_project_path(target_folder, f"{safe_name}.luau")
+    rbxmx_target_path = resolve_safe_project_path(target_folder, f"{safe_name}.rbxmx")
+    lib_path = get_assets_library_path()
 
-    enriched_dicts = normalize_parts_with_sync_metadata([p.model_dump() for p in enriched_specs])
-    total_tris = sum(len(p.meshData.faces) for p in enriched_specs if p.meshData)
-    asset_payload = {
-        **(existing or {}),
-        "id": (existing or {}).get("id") or f"asset-{int(time.time() * 1000)}",
-        "name": safe_name,
-        "category": (existing or {}).get("category") or "Studio Synced Asset",
-        "asset_type": "Model3D",
-        "poly_count": total_tris,
-        "collision_fidelity": collision_fidelity,
-        "rojo_target_folder": target_folder,
-        "file_name": f"{safe_name}.luau",
-        "parts": enriched_dicts,
-        "luau_code": luau_code,
-        "saved_path": luau_saved,
-    }
-    saved = save_asset_to_library(asset_payload)
+    # Backup existing files on disk for atomic rollback if any step fails
+    prev_luau_bytes = luau_target_path.read_bytes() if luau_target_path.exists() else None
+    prev_rbxmx_bytes = rbxmx_target_path.read_bytes() if rbxmx_target_path.exists() else None
+    prev_lib_bytes = lib_path.read_bytes() if lib_path.exists() else None
+
+    try:
+        safe_luau = validate_and_sanitize_luau(luau_code)
+        luau_tmp = luau_target_path.with_suffix(".luau.tmp")
+        rbxmx_tmp = rbxmx_target_path.with_suffix(".rbxmx.tmp")
+        luau_tmp.write_text(safe_luau, encoding="utf-8")
+        rbxmx_tmp.write_bytes(rbxmx_content.encode("utf-8"))
+        os.replace(luau_tmp, luau_target_path)
+        os.replace(rbxmx_tmp, rbxmx_target_path)
+
+        luau_saved = str(luau_target_path)
+        rbxmx_saved = str(rbxmx_target_path)
+
+        enriched_dicts = normalize_parts_with_sync_metadata([p.model_dump() for p in enriched_specs], safe_name)
+        total_tris = sum(len(p.meshData.faces) for p in enriched_specs if p.meshData and p.meshData.faces)
+        asset_payload = {
+            **(existing or {}),
+            "id": (existing or {}).get("id") or f"asset-{int(time.time() * 1000)}",
+            "name": safe_name,
+            "category": (existing or {}).get("category") or "Studio Synced Asset",
+            "asset_type": "Model3D",
+            "poly_count": total_tris,
+            "collision_fidelity": collision_fidelity,
+            "rojo_target_folder": target_folder,
+            "file_name": f"{safe_name}.luau",
+            "parts": enriched_dicts,
+            "luau_code": luau_code,
+            "saved_path": luau_saved,
+        }
+        saved = save_asset_to_library(asset_payload)
+    except Exception as exc:
+        # Rollback disk state so `.luau`, `.rbxmx`, and `assets_library.json` never diverge
+        try:
+            if prev_luau_bytes is not None:
+                luau_target_path.write_bytes(prev_luau_bytes)
+            elif luau_target_path.exists():
+                luau_target_path.unlink()
+            if prev_rbxmx_bytes is not None:
+                rbxmx_target_path.write_bytes(prev_rbxmx_bytes)
+            elif rbxmx_target_path.exists():
+                rbxmx_target_path.unlink()
+            if prev_lib_bytes is not None:
+                lib_path.write_bytes(prev_lib_bytes)
+        except Exception as rb_err:
+            logger.error(f"Rollback error during studio-push: {rb_err}")
+        raise HTTPException(status_code=500, detail=f"Atomic studio-push failed and was rolled back: {exc}")
+
     return {
         "success": True,
+        "status": "synced",
+        "merge_mode": merge_mode,
+        "sync_scope": sync_scope,
+        "conflict_policy": conflict_policy,
         "asset": saved,
         "sync_diff": sync_diff,
         "luau_saved_path": luau_saved,
         "rbxmx_saved_path": rbxmx_saved,
         "updated_part_count": len(enriched_specs),
+        "updated_parts_count": len(enriched_specs),
     }
 
 

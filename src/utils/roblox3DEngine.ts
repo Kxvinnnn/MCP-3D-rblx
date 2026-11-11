@@ -28,8 +28,11 @@ export interface PartPBRMaterialSpec {
 export interface MeshPart3DSpec {
   partId?: string;
   name: string;
+  parentId?: string;
   parentName?: string;
   hierarchyPath?: string;
+  geometrySource?: 'EditableMeshBuffers' | 'PublishedCloudMeshId' | 'StudioExternalUnreadable';
+  rotationMatrix?: number[];
   geometryHash?: string;
   materialHash?: string;
   transformHash?: string;
@@ -2476,17 +2479,40 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     expandedParts.push(...splitOversizedMeshPart(part));
   }
 
-  const lines: string[] = [
-    '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
-    '  <Meta name="ExplicitAutoJoints">true</Meta>',
-    '  <External>null</External>',
-    '  <External>nil</External>',
-    `  <Item class="Model" referent="RBX_FORGE_MODEL_${safeName}">`,
-    '    <Properties>',
-    `      <string name="Name">${escapeXml(safeName)}</string>`,
-    '      <Ref name="PrimaryPart">RBX_PART_1</Ref>',
-    '    </Properties>',
-  ];
+  interface RbxmxHierarchyNode {
+    name: string;
+    path: string;
+    children: Map<string, RbxmxHierarchyNode>;
+    partBlocks: string[][];
+  }
+
+  const rootTree: RbxmxHierarchyNode = {
+    name: 'Root',
+    path: 'Root',
+    children: new Map(),
+    partBlocks: [],
+  };
+
+  const ensureContainerNode = (segments: string[]): RbxmxHierarchyNode => {
+    let curr = rootTree;
+    let accum = 'Root';
+    for (const seg of segments) {
+      if (!seg || seg === 'Root' || seg === safeName) continue;
+      accum = `${accum}/${seg}`;
+      let next = curr.children.get(seg);
+      if (!next) {
+        next = {
+          name: seg,
+          path: accum,
+          children: new Map(),
+          partBlocks: [],
+        };
+        curr.children.set(seg, next);
+      }
+      curr = next;
+    }
+    return curr;
+  };
 
   for (let idx = 0; idx < expandedParts.length; idx++) {
     const part = expandedParts[idx];
@@ -2497,17 +2523,32 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
     const [cr = 160, cg = 170, cb = 185] = part.color || [160, 170, 185];
 
-    euler.set(
-      THREE.MathUtils.degToRad(rx),
-      THREE.MathUtils.degToRad(ry),
-      THREE.MathUtils.degToRad(rz),
-      'XYZ'
-    );
-    mat4.makeRotationFromEuler(euler);
-    const te = mat4.elements;
-    const r00 = te[0].toFixed(6), r01 = te[4].toFixed(6), r02 = te[8].toFixed(6);
-    const r10 = te[1].toFixed(6), r11 = te[5].toFixed(6), r12 = te[9].toFixed(6);
-    const r20 = te[2].toFixed(6), r21 = te[6].toFixed(6), r22 = te[10].toFixed(6);
+    let r00: string, r01: string, r02: string;
+    let r10: string, r11: string, r12: string;
+    let r20: string, r21: string, r22: string;
+    if (Array.isArray(part.rotationMatrix) && part.rotationMatrix.length === 9) {
+      r00 = Number(part.rotationMatrix[0]).toFixed(6);
+      r01 = Number(part.rotationMatrix[1]).toFixed(6);
+      r02 = Number(part.rotationMatrix[2]).toFixed(6);
+      r10 = Number(part.rotationMatrix[3]).toFixed(6);
+      r11 = Number(part.rotationMatrix[4]).toFixed(6);
+      r12 = Number(part.rotationMatrix[5]).toFixed(6);
+      r20 = Number(part.rotationMatrix[6]).toFixed(6);
+      r21 = Number(part.rotationMatrix[7]).toFixed(6);
+      r22 = Number(part.rotationMatrix[8]).toFixed(6);
+    } else {
+      euler.set(
+        THREE.MathUtils.degToRad(rx),
+        THREE.MathUtils.degToRad(ry),
+        THREE.MathUtils.degToRad(rz),
+        'XYZ'
+      );
+      mat4.makeRotationFromEuler(euler);
+      const te = mat4.elements;
+      r00 = te[0].toFixed(6); r01 = te[4].toFixed(6); r02 = te[8].toFixed(6);
+      r10 = te[1].toFixed(6); r11 = te[5].toFixed(6); r12 = te[9].toFixed(6);
+      r20 = te[2].toFixed(6); r21 = te[6].toFixed(6); r22 = te[10].toFixed(6);
+    }
 
     const colorUint8 =
       ((0xff << 24) |
@@ -2517,8 +2558,27 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
       0;
 
     const matToken = ROBLOX_MATERIAL_ENUM_TOKENS[part.material] ?? 1088;
-    const meshData = ensurePartHasMeshData(part);
     const validMeshId = validatePublishedRobloxMeshId(part.meshId);
+    const hasEditableBuffers = Boolean(
+      part.meshData &&
+        Array.isArray(part.meshData.vertices) &&
+        part.meshData.vertices.length > 0 &&
+        Array.isArray(part.meshData.faces) &&
+        part.meshData.faces.length > 0
+    );
+    const isExternalOnly =
+      !hasEditableBuffers &&
+      (Boolean(validMeshId) ||
+        part.geometrySource === 'PublishedCloudMeshId' ||
+        part.geometrySource === 'StudioExternalUnreadable');
+    const meshData = isExternalOnly ? undefined : ensurePartHasMeshData(part);
+    const geometrySource = hasEditableBuffers
+      ? 'EditableMeshBuffers'
+      : validMeshId
+      ? 'PublishedCloudMeshId'
+      : part.geometrySource === 'StudioExternalUnreadable'
+      ? 'StudioExternalUnreadable'
+      : 'EditableMeshBuffers';
 
     const validColorMap = validatePublishedRobloxMeshId(
       part.pbrMaterial?.colorMapAssetId || asset.pbr_profile?.color_map_asset_id
@@ -2534,19 +2594,49 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     );
 
     const partId = part.partId || `${safeName}::${partName}::${idx + 1}`;
-    const parentName = part.parentName || safeName;
-    const hierarchyPath = part.hierarchyPath || `${parentName}/${partName}`;
+    const rawParent = (part.parentName || 'Root').trim();
+    const rawHPath = (part.hierarchyPath || '').trim();
+    const rawSegments = (rawHPath || `${rawParent}/${partName}`)
+      .replace(/\\/g, '/')
+      .split('/')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const normalizedSegments =
+      rawSegments[0] === 'Root'
+        ? rawSegments
+        : rawSegments[0] === safeName
+        ? ['Root', ...rawSegments.slice(1)]
+        : ['Root', ...rawSegments];
+    if (normalizedSegments[normalizedSegments.length - 1] !== partName) {
+      normalizedSegments.push(partName);
+    }
+    const containerSegments = normalizedSegments.slice(1, -1);
+    const parentName =
+      containerSegments.length > 0 ? containerSegments[containerSegments.length - 1] : 'Root';
+    const hierarchyPath = normalizedSegments.join('/');
+    const parentId =
+      part.parentId ||
+      (containerSegments.length > 0
+        ? `node::Root/${containerSegments.join('/')}`
+        : 'node::Root');
 
     const geometryJsonPayload = JSON.stringify({
       partId,
       name: partName,
+      parentId,
       parentName,
       hierarchyPath,
+      geometrySource,
       shape: 'MeshPart',
       meshId: validMeshId,
       size: [sx, sy, sz],
       position: [px, py, pz],
       rotation: [rx, ry, rz],
+      rotationMatrix: [
+        Number(r00), Number(r01), Number(r02),
+        Number(r10), Number(r11), Number(r12),
+        Number(r20), Number(r21), Number(r22),
+      ],
       color: [cr, cg, cb],
       material: part.material || 'Metal',
       roughness: part.pbrMaterial?.roughness ?? part.roughness ?? 0.35,
@@ -2565,99 +2655,186 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
             metalnessMapAssetId: validMetalnessMap || undefined,
           }
         : undefined,
-      vertices: meshData.vertices,
-      normals: meshData.normals || [],
-      uvs: meshData.uvs || [],
-      faces: meshData.faces,
+      vertices: meshData ? meshData.vertices : [],
+      normals: meshData ? meshData.normals || [] : [],
+      uvs: meshData ? meshData.uvs || [] : [],
+      faces: meshData ? meshData.faces : [],
     });
 
-    lines.push(
-      `    <Item class="MeshPart" referent="${refId}">`,
-      '      <Properties>',
-      `        <string name="Name">${escapeXml(partName)}</string>`,
-      `        <bool name="Anchored">${part.anchored !== false ? 'true' : 'false'}</bool>`,
-      `        <bool name="CanCollide">${part.canCollide !== false ? 'true' : 'false'}</bool>`,
-      `        <bool name="DoubleSided">${part.doubleSided ? 'true' : 'false'}</bool>`,
-      `        <float name="Transparency">${Number(part.transparency ?? 0).toFixed(3)}</float>`,
-      `        <token name="Material">${matToken}</token>`,
-      `        <Color3uint8 name="Color3uint8">${colorUint8}</Color3uint8>`,
+    const partBlock: string[] = [
+      `<Item class="MeshPart" referent="${refId}">`,
+      '  <Properties>',
+      `    <string name="Name">${escapeXml(partName)}</string>`,
+      `    <bool name="Anchored">${part.anchored !== false ? 'true' : 'false'}</bool>`,
+      `    <bool name="CanCollide">${part.canCollide !== false ? 'true' : 'false'}</bool>`,
+      `    <bool name="DoubleSided">${part.doubleSided ? 'true' : 'false'}</bool>`,
+      `    <float name="Transparency">${Number(part.transparency ?? 0).toFixed(3)}</float>`,
+      `    <token name="Material">${matToken}</token>`,
+      `    <Color3uint8 name="Color3uint8">${colorUint8}</Color3uint8>`,
       validMeshId
-        ? `        <Content name="MeshId"><url>${escapeXml(validMeshId)}</url></Content>`
-        : '        <Content name="MeshId"><null></null></Content>',
-      '        <Vector3 name="size">',
-      `          <X>${Number(sx).toFixed(4)}</X>`,
-      `          <Y>${Number(sy).toFixed(4)}</Y>`,
-      `          <Z>${Number(sz).toFixed(4)}</Z>`,
-      '        </Vector3>',
-      '        <Vector3 name="InitialSize">',
-      `          <X>${Number(sx).toFixed(4)}</X>`,
-      `          <Y>${Number(sy).toFixed(4)}</Y>`,
-      `          <Z>${Number(sz).toFixed(4)}</Z>`,
-      '        </Vector3>',
-      '        <CoordinateFrame name="CFrame">',
-      `          <X>${Number(px).toFixed(4)}</X>`,
-      `          <Y>${Number(py).toFixed(4)}</Y>`,
-      `          <Z>${Number(pz).toFixed(4)}</Z>`,
-      `          <R00>${r00}</R00><R01>${r01}</R01><R02>${r02}</R02>`,
-      `          <R10>${r10}</R10><R11>${r11}</R11><R12>${r12}</R12>`,
-      `          <R20>${r20}</R20><R21>${r21}</R21><R22>${r22}</R22>`,
-      '        </CoordinateFrame>',
-      '      </Properties>',
-      `      <Item class="SurfaceAppearance" referent="${refId}_PBR">`,
-      '        <Properties>',
-      `          <string name="Name">${escapeXml(partName)}_SurfaceAppearance</string>`,
-      '          <token name="AlphaMode">0</token>',
+        ? `    <Content name="MeshId"><url>${escapeXml(validMeshId)}</url></Content>`
+        : '    <Content name="MeshId"><null></null></Content>',
+      '    <Vector3 name="size">',
+      `      <X>${Number(sx).toFixed(4)}</X>`,
+      `      <Y>${Number(sy).toFixed(4)}</Y>`,
+      `      <Z>${Number(sz).toFixed(4)}</Z>`,
+      '    </Vector3>',
+      '    <Vector3 name="InitialSize">',
+      `      <X>${Number(sx).toFixed(4)}</X>`,
+      `      <Y>${Number(sy).toFixed(4)}</Y>`,
+      `      <Z>${Number(sz).toFixed(4)}</Z>`,
+      '    </Vector3>',
+      '    <CoordinateFrame name="CFrame">',
+      `      <X>${Number(px).toFixed(4)}</X>`,
+      `      <Y>${Number(py).toFixed(4)}</Y>`,
+      `      <Z>${Number(pz).toFixed(4)}</Z>`,
+      `      <R00>${r00}</R00><R01>${r01}</R01><R02>${r02}</R02>`,
+      `      <R10>${r10}</R10><R11>${r11}</R11><R12>${r12}</R12>`,
+      `      <R20>${r20}</R20><R21>${r21}</R21><R22>${r22}</R22>`,
+      '    </CoordinateFrame>',
+      '  </Properties>',
+      `  <Item class="SurfaceAppearance" referent="${refId}_PBR">`,
+      '    <Properties>',
+      `      <string name="Name">${escapeXml(partName)}_SurfaceAppearance</string>`,
+      '      <token name="AlphaMode">0</token>',
       validColorMap
-        ? `          <Content name="ColorMap"><url>${escapeXml(validColorMap)}</url></Content>`
-        : '          <Content name="ColorMap"><null></null></Content>',
+        ? `      <Content name="ColorMap"><url>${escapeXml(validColorMap)}</url></Content>`
+        : '      <Content name="ColorMap"><null></null></Content>',
       validNormalMap
-        ? `          <Content name="NormalMap"><url>${escapeXml(validNormalMap)}</url></Content>`
-        : '          <Content name="NormalMap"><null></null></Content>',
+        ? `      <Content name="NormalMap"><url>${escapeXml(validNormalMap)}</url></Content>`
+        : '      <Content name="NormalMap"><null></null></Content>',
       validRoughnessMap
-        ? `          <Content name="RoughnessMap"><url>${escapeXml(validRoughnessMap)}</url></Content>`
-        : '          <Content name="RoughnessMap"><null></null></Content>',
+        ? `      <Content name="RoughnessMap"><url>${escapeXml(validRoughnessMap)}</url></Content>`
+        : '      <Content name="RoughnessMap"><null></null></Content>',
       validMetalnessMap
-        ? `          <Content name="MetalnessMap"><url>${escapeXml(validMetalnessMap)}</url></Content>`
-        : '          <Content name="MetalnessMap"><null></null></Content>',
-      '        </Properties>',
-      '      </Item>',
-      `      <Item class="StringValue" referent="${refId}_PID">`,
-      '        <Properties>',
-      '          <string name="Name">ForgePartId</string>',
-      `          <string name="Value">${escapeXml(partId)}</string>`,
-      '        </Properties>',
-      '      </Item>',
-      `      <Item class="StringValue" referent="${refId}_PARENT">`,
-      '        <Properties>',
-      '          <string name="Name">ForgeParentName</string>',
-      `          <string name="Value">${escapeXml(parentName)}</string>`,
-      '        </Properties>',
-      '      </Item>',
-      `      <Item class="StringValue" referent="${refId}_GEOM">`,
-      '        <Properties>',
-      '          <string name="Name">ForgeMeshGeometryJSON</string>',
-      `          <string name="Value">${escapeXml(geometryJsonPayload)}</string>`,
-      '        </Properties>',
-      '      </Item>',
-      '    </Item>'
-    );
+        ? `      <Content name="MetalnessMap"><url>${escapeXml(validMetalnessMap)}</url></Content>`
+        : '      <Content name="MetalnessMap"><null></null></Content>',
+      '    </Properties>',
+      '  </Item>',
+      `  <Item class="StringValue" referent="${refId}_PID">`,
+      '    <Properties>',
+      '      <string name="Name">ForgePartId</string>',
+      `      <string name="Value">${escapeXml(partId)}</string>`,
+      '    </Properties>',
+      '  </Item>',
+      `  <Item class="StringValue" referent="${refId}_PARENT_ID">`,
+      '    <Properties>',
+      '      <string name="Name">ForgeParentId</string>',
+      `      <string name="Value">${escapeXml(parentId)}</string>`,
+      '    </Properties>',
+      '  </Item>',
+      `  <Item class="StringValue" referent="${refId}_PARENT">`,
+      '    <Properties>',
+      '      <string name="Name">ForgeParentName</string>',
+      `      <string name="Value">${escapeXml(parentName)}</string>`,
+      '    </Properties>',
+      '  </Item>',
+      `  <Item class="StringValue" referent="${refId}_HPATH">`,
+      '    <Properties>',
+      '      <string name="Name">ForgeHierarchyPath</string>',
+      `      <string name="Value">${escapeXml(hierarchyPath)}</string>`,
+      '    </Properties>',
+      '  </Item>',
+      `  <Item class="StringValue" referent="${refId}_GSOURCE">`,
+      '    <Properties>',
+      '      <string name="Name">ForgeGeometrySource</string>',
+      `      <string name="Value">${escapeXml(geometrySource)}</string>`,
+      '    </Properties>',
+      '  </Item>',
+      ...(meshData
+        ? [
+            `  <Item class="StringValue" referent="${refId}_GEOM">`,
+            '    <Properties>',
+            '      <string name="Name">ForgeMeshGeometryJSON</string>',
+            `      <string name="Value">${escapeXml(geometryJsonPayload)}</string>`,
+            '    </Properties>',
+            '  </Item>',
+          ]
+        : []),
+      '</Item>',
+    ];
+
+    const targetNode = ensureContainerNode(containerSegments);
+    targetNode.partBlocks.push(partBlock);
   }
+
+  const lines: string[] = [
+    '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
+    '  <Meta name="ExplicitAutoJoints">true</Meta>',
+    '  <External>null</External>',
+    '  <External>nil</External>',
+    `  <Item class="Model" referent="RBX_FORGE_MODEL_${safeName}">`,
+    '    <Properties>',
+    `      <string name="Name">${escapeXml(safeName)}</string>`,
+    '      <Ref name="PrimaryPart">RBX_PART_1</Ref>',
+    '    </Properties>',
+  ];
+
+  let containerRefCounter = 0;
+  const emitHierarchyNode = (node: RbxmxHierarchyNode, indent: string) => {
+    for (const block of node.partBlocks) {
+      for (const l of block) {
+        lines.push(`${indent}${l}`);
+      }
+    }
+    for (const child of node.children.values()) {
+      containerRefCounter += 1;
+      const cRef = `RBX_CONTAINER_${containerRefCounter}`;
+      lines.push(
+        `${indent}<Item class="Model" referent="${cRef}">`,
+        `${indent}  <Properties>`,
+        `${indent}    <string name="Name">${escapeXml(child.name)}</string>`,
+        `${indent}  </Properties>`,
+        `${indent}  <Item class="StringValue" referent="${cRef}_NODEID">`,
+        `${indent}    <Properties>`,
+        `${indent}      <string name="Name">ForgeNodeId</string>`,
+        `${indent}      <string name="Value">${escapeXml(`node::${child.path}`)}</string>`,
+        `${indent}    </Properties>`,
+        `${indent}  </Item>`,
+        `${indent}  <Item class="StringValue" referent="${cRef}_HPATH">`,
+        `${indent}    <Properties>`,
+        `${indent}      <string name="Name">ForgeHierarchyPath</string>`,
+        `${indent}      <string name="Value">${escapeXml(child.path)}</string>`,
+        `${indent}    </Properties>`,
+        `${indent}  </Item>`
+      );
+      emitHierarchyNode(child, `${indent}  `);
+      lines.push(`${indent}</Item>`);
+    }
+  };
+
+  emitHierarchyNode(rootTree, '    ');
 
   const luauScript = generateEditableMeshLuauCode(
     safeName,
-    expandedParts.map((p) => ({
-      name: p.name,
-      size: [p.size[0] ?? 2, p.size[1] ?? 2, p.size[2] ?? 2],
-      position: [p.position[0] ?? 0, p.position[1] ?? 1, p.position[2] ?? 0],
-      rotation: [p.rotation[0] ?? 0, p.rotation[1] ?? 0, p.rotation[2] ?? 0],
-      color: [p.color[0] ?? 160, p.color[1] ?? 170, p.color[2] ?? 185],
-      material: p.material || 'Metal',
-      roughness: p.pbrMaterial?.roughness ?? p.roughness ?? 0.35,
-      metalness: p.pbrMaterial?.metalness ?? p.metalness ?? 0.65,
-      collisionFidelity: p.collisionFidelity || 'Hull',
-      meshId: validatePublishedRobloxMeshId(p.meshId),
-      meshData: ensurePartHasMeshData(p),
-    }))
+    expandedParts.map((p) => {
+      const validMeshId = validatePublishedRobloxMeshId(p.meshId);
+      const hasBufs = Boolean(
+        p.meshData &&
+          Array.isArray(p.meshData.vertices) &&
+          p.meshData.vertices.length > 0 &&
+          Array.isArray(p.meshData.faces) &&
+          p.meshData.faces.length > 0
+      );
+      const isExt =
+        !hasBufs &&
+        (Boolean(validMeshId) ||
+          p.geometrySource === 'PublishedCloudMeshId' ||
+          p.geometrySource === 'StudioExternalUnreadable');
+      return {
+        name: p.name,
+        size: [p.size[0] ?? 2, p.size[1] ?? 2, p.size[2] ?? 2],
+        position: [p.position[0] ?? 0, p.position[1] ?? 1, p.position[2] ?? 0],
+        rotation: [p.rotation[0] ?? 0, p.rotation[1] ?? 0, p.rotation[2] ?? 0],
+        color: [p.color[0] ?? 160, p.color[1] ?? 170, p.color[2] ?? 185],
+        material: p.material || 'Metal',
+        roughness: p.pbrMaterial?.roughness ?? p.roughness ?? 0.35,
+        metalness: p.pbrMaterial?.metalness ?? p.metalness ?? 0.65,
+        collisionFidelity: p.collisionFidelity || 'Hull',
+        meshId: validMeshId,
+        meshData: isExt ? undefined : ensurePartHasMeshData(p),
+      };
+    })
   );
 
   const autoRunnerLuau = [
@@ -2706,8 +2883,10 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
 
 /**
  * Parses a Roblox Studio XML Model (.rbxmx) file into a Forge3DAsset,
- * recovering all MeshParts/Parts, CFrame positions and rotations, sizes, colors,
- * Roblox Materials, SurfaceAppearance maps, and embedded `ForgeMeshGeometryJSON` vertex/normal/UV/face buffers.
+ * recovering all MeshParts/Parts, nested container hierarchies (`<Item class="Model"|"Folder">`),
+ * CFrame positions and 9-component rotation matrices, sizes, colors, Roblox Materials,
+ * SurfaceAppearance maps, and embedded `ForgeMeshGeometryJSON` buffers while preserving
+ * external `MeshPart`s without inventing procedural cubes.
  */
 export function parseRBXMXToForgeAsset(
   xmlText: string,
@@ -2761,6 +2940,7 @@ export function parseRBXMXToForgeAsset(
     const r20 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R20') || '0');
     const r21 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R21') || '0');
     const r22 = parseFloat(getText('CoordinateFrame[name="CFrame"] > R22') || '1');
+    const rotationMatrix = [r00, r01, r02, r10, r11, r12, r20, r21, r22];
 
     rotMat.set(
       r00, r01, r02, 0,
@@ -2769,9 +2949,9 @@ export function parseRBXMXToForgeAsset(
       0,   0,   0,   1
     );
     euler.setFromRotationMatrix(rotMat, 'XYZ');
-    const rx = Number(THREE.MathUtils.radToDeg(euler.x).toFixed(1));
-    const ry = Number(THREE.MathUtils.radToDeg(euler.y).toFixed(1));
-    const rz = Number(THREE.MathUtils.radToDeg(euler.z).toFixed(1));
+    const rx = Number(THREE.MathUtils.radToDeg(euler.x).toFixed(4));
+    const ry = Number(THREE.MathUtils.radToDeg(euler.y).toFixed(4));
+    const rz = Number(THREE.MathUtils.radToDeg(euler.z).toFixed(4));
 
     let color: [number, number, number] = [148, 163, 184];
     const colorUintStr = getText('Color3uint8[name="Color3uint8"]');
@@ -2799,6 +2979,25 @@ export function parseRBXMXToForgeAsset(
     const doubleSided = getText('bool[name="DoubleSided"]') === 'true';
     const meshId = validatePublishedRobloxMeshId(getText('Content[name="MeshId"] > url')) || undefined;
 
+    // Reconstruct nested container hierarchy by walking ancestor <Item class="Model"|"Folder"> elements up to modelItem
+    const ancestorSegments: string[] = [];
+    let currParent = itemNode.parentElement;
+    while (currParent && currParent !== modelItem) {
+      if (currParent.tagName === 'Item') {
+        const pClass = currParent.getAttribute('class') || '';
+        if (pClass === 'Model' || pClass === 'Folder') {
+          const pName =
+            currParent
+              .querySelector(':scope > Properties > string[name="Name"]')
+              ?.textContent?.trim() || '';
+          if (pName && pName !== modelName && pName !== 'Root') {
+            ancestorSegments.unshift(pName);
+          }
+        }
+      }
+      currParent = currParent.parentElement;
+    }
+
     // Extract per-part SurfaceAppearance XML properties if present
     const surfNode = itemNode.querySelector('Item[class="SurfaceAppearance"] > Properties');
     const surfColorMap = validatePublishedRobloxMeshId(
@@ -2820,7 +3019,7 @@ export function parseRBXMXToForgeAsset(
     let collisionFidelity: MeshPart3DSpec['collisionFidelity'] = 'Hull';
     let pbrMaterial: PartPBRMaterialSpec | undefined;
 
-    const stringValues = Array.from(itemNode.querySelectorAll('Item[class="StringValue"]'));
+    const stringValues = Array.from(itemNode.querySelectorAll(':scope > Item[class="StringValue"]'));
     const findStringValue = (targetName: string): string | undefined => {
       const node = stringValues.find(
         (sv) =>
@@ -2831,17 +3030,35 @@ export function parseRBXMXToForgeAsset(
     };
 
     let partId = findStringValue('ForgePartId');
-    let parentName = findStringValue('ForgeParentName') || modelName;
+    let parentId = findStringValue('ForgeParentId');
+    let parentName =
+      ancestorSegments.length > 0
+        ? ancestorSegments[ancestorSegments.length - 1]
+        : findStringValue('ForgeParentName') || 'Root';
+    let hierarchyPath =
+      ancestorSegments.length > 0
+        ? `Root/${ancestorSegments.join('/')}/${partName}`
+        : findStringValue('ForgeHierarchyPath') || `Root/${partName}`;
+    let geometrySource = findStringValue('ForgeGeometrySource') as MeshPart3DSpec['geometrySource'];
     const geomJsonText = findStringValue('ForgeMeshGeometryJSON');
 
     if (geomJsonText) {
       try {
         const parsedGeom = JSON.parse(geomJsonText);
         if (!partId && typeof parsedGeom.partId === 'string') partId = parsedGeom.partId;
-        if (typeof parsedGeom.parentName === 'string' && parsedGeom.parentName) {
+        if (!parentId && typeof parsedGeom.parentId === 'string') parentId = parsedGeom.parentId;
+        if (ancestorSegments.length === 0 && typeof parsedGeom.parentName === 'string' && parsedGeom.parentName) {
           parentName = parsedGeom.parentName;
         }
-        if (Array.isArray(parsedGeom.vertices) && Array.isArray(parsedGeom.faces)) {
+        if (ancestorSegments.length === 0 && typeof parsedGeom.hierarchyPath === 'string' && parsedGeom.hierarchyPath) {
+          hierarchyPath = parsedGeom.hierarchyPath;
+        }
+        if (
+          Array.isArray(parsedGeom.vertices) &&
+          parsedGeom.vertices.length > 0 &&
+          Array.isArray(parsedGeom.faces) &&
+          parsedGeom.faces.length > 0
+        ) {
           meshData = {
             vertices: parsedGeom.vertices,
             normals: parsedGeom.normals,
@@ -2849,6 +3066,7 @@ export function parseRBXMXToForgeAsset(
             faces: parsedGeom.faces,
             objFileName: `${modelName}.obj`,
           };
+          geometrySource = 'EditableMeshBuffers';
         }
         if (typeof parsedGeom.roughness === 'number') roughness = parsedGeom.roughness;
         if (typeof parsedGeom.metalness === 'number') metalness = parsedGeom.metalness;
@@ -2857,7 +3075,7 @@ export function parseRBXMXToForgeAsset(
           pbrMaterial = parsedGeom.pbrMaterial;
         }
       } catch {
-        // Fallback to synthesized geometry below
+        // Ignore invalid JSON
       }
     }
 
@@ -2873,12 +3091,39 @@ export function parseRBXMXToForgeAsset(
       };
     }
 
+    const hasRealBuffers = Boolean(
+      meshData &&
+        Array.isArray(meshData.vertices) &&
+        meshData.vertices.length > 0 &&
+        Array.isArray(meshData.faces) &&
+        meshData.faces.length > 0
+    );
+    const isExternalPart =
+      !hasRealBuffers &&
+      (Boolean(meshId) ||
+        geometrySource === 'PublishedCloudMeshId' ||
+        geometrySource === 'StudioExternalUnreadable' ||
+        itemNode.getAttribute('class') === 'MeshPart');
+
+    if (!geometrySource) {
+      geometrySource = hasRealBuffers
+        ? 'EditableMeshBuffers'
+        : meshId
+        ? 'PublishedCloudMeshId'
+        : isExternalPart
+        ? 'StudioExternalUnreadable'
+        : 'EditableMeshBuffers';
+    }
+
     const resolvedPartId = partId || `${modelName}::${partName}::${idx + 1}`;
     const basePart: MeshPart3DSpec = {
       partId: resolvedPartId,
       name: partName,
+      parentId: parentId || (ancestorSegments.length > 0 ? `node::Root/${ancestorSegments.join('/')}` : 'node::Root'),
       parentName,
-      hierarchyPath: `${parentName}/${partName}`,
+      hierarchyPath,
+      geometrySource,
+      rotationMatrix,
       shape: 'MeshPart',
       size: [Number(sx.toFixed(2)), Number(sy.toFixed(2)), Number(sz.toFixed(2))],
       position: [Number(px.toFixed(2)), Number(py.toFixed(2)), Number(pz.toFixed(2))],
@@ -2898,9 +3143,13 @@ export function parseRBXMXToForgeAsset(
       baseMeshData: meshData,
     };
 
-    const resolvedMesh = ensurePartHasMeshData(basePart);
-    basePart.meshData = resolvedMesh;
-    totalTriangles += resolvedMesh.faces.length;
+    if (!isExternalPart) {
+      const resolvedMesh = ensurePartHasMeshData(basePart);
+      basePart.meshData = resolvedMesh;
+      totalTriangles += resolvedMesh.faces.length;
+    } else if (meshData?.faces) {
+      totalTriangles += meshData.faces.length;
+    }
     parts.push(basePart);
   });
 

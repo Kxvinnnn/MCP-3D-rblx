@@ -27,17 +27,24 @@ export interface SubMeshGeometryInput {
   objFileName?: string;
   meshId?: string;
   assetId?: string;
+  geometrySource?: string;
 }
 
 export interface MeshPartInput {
+  partId?: string;
+  parentId?: string;
+  parentName?: string;
+  hierarchyPath?: string;
   name: string;
   shape: string;
   meshId?: string;
   assetId?: string;
   textureId?: string;
+  geometrySource?: string;
   size: number[];
   position: number[];
   rotation: number[];
+  rotationMatrix?: number[];
   color: number[];
   material: string;
   roughness: number;
@@ -48,6 +55,9 @@ export interface MeshPartInput {
   collisionFidelity: string;
   meshData?: SubMeshGeometryInput;
   pbrMaterial?: Record<string, any>;
+  geometryHash?: string;
+  materialHash?: string;
+  transformHash?: string;
 }
 
 /**
@@ -455,11 +465,35 @@ export function extractGeometryFromProcessedMesh(
     }
   }
 
+  const rawGeomSource = String(
+    sub?.geometrySource || sub?.geometry_source || sub?.meshData?.geometrySource || ''
+  ).trim();
+  if (
+    validMeshId ||
+    rawGeomSource === 'PublishedCloudMeshId' ||
+    rawGeomSource === 'StudioExternalUnreadable'
+  ) {
+    return {
+      vertices: [],
+      normals: [],
+      uvs: [],
+      faces: [],
+      indices: [],
+      objFileName: objFile,
+      meshId: validMeshId,
+      assetId: validAssetId,
+      geometrySource: validMeshId
+        ? 'PublishedCloudMeshId'
+        : rawGeomSource || 'StudioExternalUnreadable',
+    };
+  }
+
   const studSize = sub?.studSize || sub?.size || [2, 2, 2];
   const synth = synthesizeProceduralMeshData(sub?.shape || 'MeshPart', studSize);
   synth.objFileName = objFile;
   synth.meshId = validMeshId;
   synth.assetId = validAssetId;
+  synth.geometrySource = 'EditableMeshBuffers';
   return synth;
 }
 
@@ -975,12 +1009,38 @@ export function buildStrictLuauFromEditedParts(
     '    return meshPart, false, lastErrorReason',
     'end',
     '',
+    'local function ensureHierarchyContainer(rootModel: Model, parentPath: string?): Instance',
+    '    if not parentPath or parentPath == "" or parentPath == "ModelRoot" or parentPath == rootModel.Name then',
+    '        return rootModel',
+    '    end',
+    '    local current: Instance = rootModel',
+    '    local accumPath = ""',
+    '    for segment in string.gmatch(parentPath, "[^/\\]+") do',
+    '        if segment ~= "" and segment ~= "ModelRoot" and segment ~= rootModel.Name then',
+    '            accumPath = if accumPath == "" then segment else (accumPath .. "/" .. segment)',
+    '            local existing = current:FindFirstChild(segment)',
+    '            if not existing or (not existing:IsA("Model") and not existing:IsA("Folder")) then',
+    '                local container = Instance.new("Model")',
+    '                container.Name = segment',
+    '                container:SetAttribute("ForgeNodeId", "fnode_" .. string.gsub(accumPath, "[^%w_]", "_"))',
+    '                container:SetAttribute("ForgeHierarchyPath", accumPath)',
+    '                container.Parent = current',
+    '                current = container',
+    '            else',
+    '                current = existing',
+    '            end',
+    '        end',
+    '    end',
+    '    return current',
+    'end',
+    '',
     `local ${safeName}Builder = {}`,
     '',
     `function ${safeName}Builder.Spawn(origin: CFrame?): Model`,
     '    local baseOrigin = origin or CFrame.new(0, 0, 0)',
     '    local model = Instance.new("Model")',
     `    model.Name = "${safeName}"`,
+    '    model:SetAttribute("ForgeSyncOriginCFrame", baseOrigin)',
     `    local totalExpectedParts = ${expandedParts.length}`,
     '    local verifiedPartCount = 0',
     '    local failedPartCount = 0',
@@ -996,7 +1056,27 @@ export function buildStrictLuauFromEditedParts(
     const okFlag = `isVerified_${idx + 1}`;
     const cfMode = p.collisionFidelity || collisionFidelity || 'Hull';
     const partLabel = p.name || `MeshPart_${idx + 1}`;
-    const resolvedMesh = p.meshData || synthesizeProceduralMeshData('MeshPart', [sx, sy, sz]);
+    const partIdStr =
+      String(p.partId || '').trim() || `fpart_${partLabel.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+    const parentNameStr = String(p.parentName || 'ModelRoot').trim() || 'ModelRoot';
+    const parentIdStr =
+      String(p.parentId || '').trim() ||
+      (parentNameStr === 'ModelRoot'
+        ? 'fnode_ModelRoot'
+        : `fnode_${parentNameStr.replace(/[^a-zA-Z0-9_]/g, '_')}`);
+    const hierarchyPathStr =
+      String(p.hierarchyPath || '').trim() || `${parentNameStr}/${partLabel}`;
+    const meshIdStr = validatePublishedRobloxMeshId(p.meshId || p.meshData?.meshId);
+    const assetIdStr = validatePublishedRobloxMeshId(p.assetId || p.meshData?.assetId || meshIdStr);
+    const texIdStr = validatePublishedRobloxMeshId(p.textureId);
+
+    const hasExplicitBuffers =
+      p.meshData && Array.isArray(p.meshData.vertices) && p.meshData.vertices.length > 0;
+    const resolvedMesh = hasExplicitBuffers
+      ? p.meshData!
+      : meshIdStr || p.geometrySource === 'StudioExternalUnreadable'
+      ? { vertices: [], normals: [], uvs: [], faces: [], indices: [], objFileName: `${safeName}.obj` }
+      : synthesizeProceduralMeshData('MeshPart', [sx, sy, sz]);
 
     const vEntries: string[] = [];
     const nEntries: string[] = [];
@@ -1026,9 +1106,6 @@ export function buildStrictLuauFromEditedParts(
     }
 
     const objFile = resolvedMesh.objFileName || `${safeName}.obj`;
-    const meshIdStr = validatePublishedRobloxMeshId(p.meshId || resolvedMesh.meshId);
-    const assetIdStr = validatePublishedRobloxMeshId(p.assetId || resolvedMesh.assetId || meshIdStr);
-    const texIdStr = validatePublishedRobloxMeshId(p.textureId);
 
     lines.push(
       `    -- Sub-MeshPart #${idx + 1}: ${partLabel} (${vEntries.length} verts, ${fEntries.length} tris)`,
@@ -1047,16 +1124,20 @@ export function buildStrictLuauFromEditedParts(
       `        Faces = {${fEntries.join(',')}},`,
       '    })',
       `    if ${okFlag} then verifiedPartCount += 1 else failedPartCount += 1 end`,
-      `    ${vName}.CFrame = baseOrigin * CFrame.new(${Number(px).toFixed(2)}, ${Number(py).toFixed(2)}, ${Number(pz).toFixed(2)}) * CFrame.Angles(math.rad(${Number(rx).toFixed(1)}), math.rad(${Number(ry).toFixed(1)}), math.rad(${Number(rz).toFixed(1)}))`,
+      `    ${vName}.CFrame = baseOrigin * CFrame.new(${Number(px).toFixed(4)}, ${Number(py).toFixed(4)}, ${Number(pz).toFixed(4)}) * CFrame.Angles(math.rad(${Number(rx).toFixed(2)}), math.rad(${Number(ry).toFixed(2)}), math.rad(${Number(rz).toFixed(2)}))`,
       `    ${vName}.Color = Color3.fromRGB(${Math.round(cr)}, ${Math.round(cg)}, ${Math.round(cb)})`,
       `    ${vName}.Material = Enum.Material.${p.material || 'Metal'}`,
       `    ${vName}.Transparency = ${Number(p.transparency ?? 0).toFixed(2)}`,
       `    ${vName}.Anchored = ${p.anchored !== false ? 'true' : 'false'}`,
       `    ${vName}.CanCollide = ${p.canCollide !== false ? 'true' : 'false'}`,
+      `    ${vName}:SetAttribute("ForgePartId", "${partIdStr}")`,
+      `    ${vName}:SetAttribute("ForgeParentId", "${parentIdStr}")`,
+      `    ${vName}:SetAttribute("ForgeParentName", "${parentNameStr}")`,
+      `    ${vName}:SetAttribute("ForgeHierarchyPath", "${hierarchyPathStr}")`,
       `    ${vName}:SetAttribute("CollisionFidelity", "${cfMode}")`,
       `    ${vName}:SetAttribute("Roughness", ${Number(p.roughness ?? 0.35).toFixed(2)})`,
       `    ${vName}:SetAttribute("Metalness", ${Number(p.metalness ?? 0.6).toFixed(2)})`,
-      `    ${vName}.Parent = model`,
+      `    ${vName}.Parent = ensureHierarchyContainer(model, "${parentNameStr}")`,
       ''
     );
     if (idx === 0) {
@@ -1080,19 +1161,24 @@ export function buildStrictLuauFromEditedParts(
     '    local reconstructedCount = 0',
     `    local expectedCount = ${expandedParts.length}`,
     '    local spawned = (' + safeName + 'Builder.Spawn(targetModel:GetPivot()))',
-    '    for _, generatedChild in ipairs(spawned:GetChildren()) do',
+    '    for _, generatedChild in ipairs(spawned:GetDescendants()) do',
     '        if generatedChild:IsA("MeshPart") then',
     '            local isPartVerified = generatedChild:GetAttribute("ForgeGeometryVerified") == true',
-    '            local existing = targetModel:FindFirstChild(generatedChild.Name)',
+    '            local existing = targetModel:FindFirstChild(generatedChild.Name, true)',
     '            if isPartVerified then',
+    '                local targetParent: Instance = targetModel',
     '                if existing and existing:IsA("BasePart") then',
+    '                    targetParent = existing.Parent or targetModel',
     '                    generatedChild.CFrame = existing.CFrame',
     '                    for _, child in ipairs(existing:GetChildren()) do',
     '                        child:Clone().Parent = generatedChild',
     '                    end',
     '                    existing:Destroy()',
+    '                else',
+    '                    local pName = tostring(generatedChild:GetAttribute("ForgeParentName") or "ModelRoot")',
+    '                    targetParent = ensureHierarchyContainer(targetModel, pName)',
     '                end',
-    '                generatedChild.Parent = targetModel',
+    '                generatedChild.Parent = targetParent',
     '                reconstructedCount += 1',
     '            else',
     '                if existing then',

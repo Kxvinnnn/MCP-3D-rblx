@@ -28,6 +28,11 @@ DEFAULT_LIBRARY_PATH = (
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
+import math
+
+FORGE_SYNC_HASH_SCHEMA_V1 = "forge-sync-v1"
+
+
 def is_verified_roblox_asset_uri(uri: Optional[str]) -> bool:
     """
     Returns True ONLY if `uri` is a real, non-zero `rbxassetid://<digits>` or `rbxasset://...`
@@ -44,68 +49,378 @@ def is_verified_roblox_asset_uri(uri: Optional[str]) -> bool:
     return False
 
 
+def normalize_luau_and_sync_text(content: str) -> str:
+    """
+    Canonical string normalizer shared across Python, TypeScript, and Roblox Studio Luau:
+    converts CRLF/CR to LF and trims outer ASCII whitespace before hashing.
+    """
+    if not content:
+        return ""
+    return str(content).replace("\r\n", "\n").replace("\r", "\n").strip(" \t\n\r\f\v")
+
+
 def compute_fnv1a_32_hex(content: str) -> str:
     """
-    Computes an 8-character lowercase hex FNV-1a 32-bit hash identical to the Luau
-    and TypeScript sync engines so file and part hashes match across Python, Node, and Roblox Studio.
+    Computes an 8-character lowercase hex FNV-1a 32-bit hash over normalized text,
+    producing byte-for-byte identical hashes across Python, TypeScript, and Roblox Studio Luau.
     """
+    normalized = normalize_luau_and_sync_text(content)
     h = 0x811C9DC5
-    for b in content.encode("utf-8"):
+    for b in normalized.encode("utf-8"):
         h ^= b
         h = (h * 0x01000193) & 0xFFFFFFFF
     return f"{h:08x}"
 
 
-def compute_part_sync_hashes(part: Dict[str, Any]) -> Dict[str, str]:
+def _fmt_canonical_fixed(val: Any, decimals: int = 3) -> str:
     """
-    Computes deterministic FNV-1a 32-bit hashes for a part's geometry, material/PBR,
-    and spatial transform + hierarchy so bidirectional sync between Forge and Roblox Studio
-    can detect partial changes per MeshPart.
+    Rounds a number using deterministic half-away-from-zero and normalizes -0.0 to 0.0
+    so Python, TypeScript, and Luau always format floating-point values identically.
     """
-    mesh_data = part.get("meshData") if isinstance(part.get("meshData"), dict) else {}
-    verts = mesh_data.get("vertices") if isinstance(mesh_data.get("vertices"), list) else []
-    faces = mesh_data.get("faces") if isinstance(mesh_data.get("faces"), list) else []
-    uvs = mesh_data.get("uvs") if isinstance(mesh_data.get("uvs"), list) else []
-    normals = mesh_data.get("normals") if isinstance(mesh_data.get("normals"), list) else []
-    first_v = ",".join(f"{float(n):.3f}" for n in verts[0][:3]) if verts and isinstance(verts[0], list) else ""
-    last_v = ",".join(f"{float(n):.3f}" for n in verts[-1][:3]) if verts and isinstance(verts[-1], list) else ""
-    geom_sig = (
-        f"shape:{part.get('shape', 'MeshPart')}|v:{len(verts)}|f:{len(faces)}|"
-        f"uv:{len(uvs)}|vn:{len(normals)}|fv:{first_v}|lv:{last_v}|"
-        f"meshId:{part.get('meshId') or ''}"
-    )
+    try:
+        num = float(val)
+        if not math.isfinite(num):
+            num = 0.0
+    except Exception:
+        num = 0.0
+    factor = 10 ** decimals
+    scaled = math.floor(abs(num) * factor + 0.5000001)
+    if scaled == 0:
+        return "0." + ("0" * decimals) if decimals > 0 else "0"
+    signed = -scaled if num < 0 else scaled
+    if decimals <= 0:
+        return str(int(signed))
+    return f"{signed / factor:.{decimals}f}"
 
-    pbr = part.get("pbrMaterial") if isinstance(part.get("pbrMaterial"), dict) else {}
-    mat_sig = (
-        f"mat:{part.get('material', 'SmoothPlastic')}|color:{str(part.get('color', '#38bdf8')).lower()}|"
-        f"trans:{float(part.get('transparency', 0) or 0):.3f}|refl:{float(part.get('reflectance', 0) or 0):.3f}|"
-        f"pbr:{float(pbr.get('roughness', -1)):.2f},{float(pbr.get('metalness', -1)):.2f},"
-        f"{pbr.get('colorMapId') or ''},{pbr.get('normalMapId') or ''},"
-        f"{pbr.get('roughnessMapId') or ''},{pbr.get('metalnessMapId') or ''}"
-    )
 
-    pos = part.get("position") if isinstance(part.get("position"), list) and len(part["position"]) >= 3 else [0, 0, 0]
-    sz = part.get("size") if isinstance(part.get("size"), list) and len(part["size"]) >= 3 else [4, 4, 4]
-    rot = part.get("rotation") if isinstance(part.get("rotation"), list) and len(part["rotation"]) >= 3 else [0, 0, 0]
-    parent_name = str(part.get("parentName") or part.get("hierarchyPath") or "Root")
-    transform_sig = (
-        f"p:{float(pos[0]):.3f},{float(pos[1]):.3f},{float(pos[2]):.3f}|"
-        f"s:{float(sz[0]):.3f},{float(sz[1]):.3f},{float(sz[2]):.3f}|"
-        f"r:{float(rot[0]):.2f},{float(rot[1]):.2f},{float(rot[2]):.2f}|"
-        f"parent:{parent_name}|anc:{bool(part.get('anchored', True))}|col:{bool(part.get('canCollide', True))}"
-    )
+def _canonical_euler_to_matrix_9(rx_deg: float, ry_deg: float, rz_deg: float) -> List[float]:
+    rx = math.radians(rx_deg)
+    ry = math.radians(ry_deg)
+    rz = math.radians(rz_deg)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    return [
+        cy * cz,
+        -cy * sz,
+        sy,
+        sx * sy * cz + cx * sz,
+        -sx * sy * sz + cx * cz,
+        -sx * cy,
+        -cx * sy * cz + sx * sz,
+        cx * sy * sz + sx * cz,
+        cx * cy,
+    ]
+
+
+def _canonical_matrix_9_to_euler_deg(mat: List[float]) -> List[float]:
+    r00 = float(mat[0]) if len(mat) > 0 else 1.0
+    r01 = float(mat[1]) if len(mat) > 1 else 0.0
+    r02 = float(mat[2]) if len(mat) > 2 else 0.0
+    r10 = float(mat[3]) if len(mat) > 3 else 0.0
+    r11 = float(mat[4]) if len(mat) > 4 else 1.0
+    r12 = float(mat[5]) if len(mat) > 5 else 0.0
+    r21 = float(mat[7]) if len(mat) > 7 else 0.0
+    r22 = float(mat[8]) if len(mat) > 8 else 1.0
+    clamped = max(-1.0, min(1.0, r02))
+    ry = math.asin(clamped)
+    if abs(clamped) < 0.99999:
+        rx = math.atan2(-r12, r22)
+        rz = math.atan2(-r01, r00)
+    else:
+        rx = math.atan2(r21, r11)
+        rz = 0.0
+    return [
+        float(_fmt_canonical_fixed(math.degrees(rx), 2)),
+        float(_fmt_canonical_fixed(math.degrees(ry), 2)),
+        float(_fmt_canonical_fixed(math.degrees(rz), 2)),
+    ]
+
+
+def _extract_canonical_rotation_matrix_9(part: Dict[str, Any]) -> List[float]:
+    rot_mat = part.get("rotationMatrix")
+    if isinstance(rot_mat, list) and len(rot_mat) >= 9:
+        try:
+            return [float(rot_mat[i]) for i in range(9)]
+        except Exception:
+            pass
+    rot = part.get("rotation")
+    if isinstance(rot, list) and len(rot) >= 3:
+        try:
+            return _canonical_euler_to_matrix_9(float(rot[0]), float(rot[1]), float(rot[2]))
+        except Exception:
+            pass
+    return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+
+def _normalize_color_rgb_255(raw_color: Any) -> Tuple[int, int, int]:
+    if isinstance(raw_color, list) and len(raw_color) >= 3:
+        try:
+            r, g, b = float(raw_color[0]), float(raw_color[1]), float(raw_color[2])
+            if 0.0 <= r <= 1.0 and 0.0 <= g <= 1.0 and 0.0 <= b <= 1.0 and (r < 1.0 or g < 1.0 or b < 1.0):
+                r, g, b = r * 255.0, g * 255.0, b * 255.0
+            return (
+                max(0, min(255, int(math.floor(r + 0.5)))),
+                max(0, min(255, int(math.floor(g + 0.5)))),
+                max(0, min(255, int(math.floor(b + 0.5)))),
+            )
+        except Exception:
+            pass
+    if isinstance(raw_color, str):
+        clean = raw_color.strip().lstrip("#")
+        if len(clean) == 6:
+            try:
+                return (int(clean[0:2], 16), int(clean[2:4], 16), int(clean[4:6], 16))
+            except Exception:
+                pass
+    return (148, 163, 184)
+
+
+def normalize_hierarchy_metadata(
+    part: Dict[str, Any],
+    index_fallback: int = 0,
+    model_name: str = "",
+) -> Dict[str, Any]:
+    """
+    Produces canonical `partId`, `parentId`, `parentName`, `hierarchyPath`, and `hierarchySegments`
+    for nested folders/sub-models so Python, TypeScript, and Roblox Studio Luau share an identical
+    DataModel hierarchy representation.
+    """
+    raw_name = str(part.get("name") or f"MeshPart_{index_fallback + 1}").strip() or f"MeshPart_{index_fallback + 1}"
+    clean_alnum = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name) or f"MeshPart_{index_fallback + 1}"
+    raw_part_id = str(part.get("partId") or part.get("part_id") or part.get("id") or "").strip()
+    part_id = raw_part_id if raw_part_id else f"fpart_{clean_alnum}"
+
+    raw_parent = str(part.get("parentName") or part.get("parent_name") or "").strip()
+    raw_path = str(part.get("hierarchyPath") or part.get("hierarchy_path") or "").strip()
+    clean_model = str(model_name or "").strip().lower()
+
+    intermediate_folders: List[str] = []
+    if raw_path:
+        path_segs = [s.strip() for s in raw_path.replace("\\", "/").split("/") if s.strip()]
+        if path_segs:
+            first_low = path_segs[0].lower()
+            if first_low in ("root", "modelroot", "workspace") or (clean_model and first_low == clean_model):
+                path_segs = path_segs[1:]
+        if path_segs and path_segs[-1] == raw_name:
+            path_segs = path_segs[:-1]
+        intermediate_folders = [
+            s for s in path_segs
+            if s.lower() not in ("root", "modelroot", "workspace")
+            and (not clean_model or s.lower() != clean_model)
+        ]
+
+    if not intermediate_folders and raw_parent:
+        parent_segs = [s.strip() for s in raw_parent.replace("\\", "/").split("/") if s.strip()]
+        if parent_segs:
+            first_low = parent_segs[0].lower()
+            if first_low in ("root", "modelroot", "workspace") or (clean_model and first_low == clean_model):
+                parent_segs = parent_segs[1:]
+        if len(parent_segs) > 1 and parent_segs[-1] == raw_name:
+            parent_segs = parent_segs[:-1]
+        intermediate_folders = [
+            s for s in parent_segs
+            if s.lower() not in ("root", "modelroot", "workspace")
+            and (not clean_model or s.lower() != clean_model)
+        ]
+
+    hierarchy_segments = ["Root"] + intermediate_folders + [raw_name]
+    hierarchy_path = "/".join(hierarchy_segments)
+    parent_name = intermediate_folders[-1] if intermediate_folders else "Root"
+    parent_clean = "_".join(re.sub(r"[^a-zA-Z0-9_]", "_", s) for s in intermediate_folders)
+    raw_parent_id = str(part.get("parentId") or part.get("parent_id") or "").strip()
+    if raw_parent_id and raw_parent_id not in ("root", "fnode_Root", "fnode_ModelRoot") and intermediate_folders:
+        parent_id = raw_parent_id
+    elif intermediate_folders:
+        parent_id = f"fnode_{parent_clean}"
+    else:
+        parent_id = "fnode_Root"
 
     return {
-        "geometryHash": compute_fnv1a_32_hex(geom_sig),
-        "materialHash": compute_fnv1a_32_hex(mat_sig),
-        "transformHash": compute_fnv1a_32_hex(transform_sig),
+        "name": raw_name,
+        "partName": raw_name,
+        "partId": part_id,
+        "parentId": parent_id,
+        "parentName": parent_name,
+        "hierarchyPath": hierarchy_path,
+        "hierarchySegments": hierarchy_segments,
     }
 
 
-def normalize_parts_with_sync_metadata(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def compute_part_sync_hashes(
+    part: Dict[str, Any],
+    index_fallback: int = 0,
+    model_name: str = "",
+) -> Dict[str, Any]:
     """
-    Ensures every part in an asset has a stable `partId` (`ForgePartId`), `parentName`,
-    `hierarchyPath`, and fresh `geometryHash`, `materialHash`, and `transformHash`.
+    Computes deterministic FNV-1a 32-bit hashes (`FORGE_SYNC_HASH_SCHEMA_V1 = 'forge-sync-v1'`)
+    over the FULL vertex/normal/UV/face buffers, PBR material channels, and model-relative
+    spatial transform + hierarchy path. Identical across Python, TypeScript, and Luau.
+    """
+    hier = normalize_hierarchy_metadata(part, index_fallback, model_name)
+    mesh_data = part.get("meshData") if isinstance(part.get("meshData"), dict) else {}
+    verts = (
+        mesh_data.get("vertices")
+        if isinstance(mesh_data.get("vertices"), list)
+        else (part.get("vertices") if isinstance(part.get("vertices"), list) else [])
+    )
+    faces = (
+        mesh_data.get("faces")
+        if isinstance(mesh_data.get("faces"), list)
+        else (part.get("faces") if isinstance(part.get("faces"), list) else [])
+    )
+    normals = (
+        mesh_data.get("normals")
+        if isinstance(mesh_data.get("normals"), list)
+        else (part.get("normals") if isinstance(part.get("normals"), list) else [])
+    )
+    uvs = (
+        mesh_data.get("uvs")
+        if isinstance(mesh_data.get("uvs"), list)
+        else (part.get("uvs") if isinstance(part.get("uvs"), list) else [])
+    )
+
+    raw_mesh_id = (
+        part.get("meshId")
+        or part.get("mesh_id")
+        or mesh_data.get("meshId")
+        or part.get("assetId")
+        or mesh_data.get("assetId")
+        or ""
+    )
+    mesh_id = str(raw_mesh_id).strip() if is_verified_roblox_asset_uri(str(raw_mesh_id)) else ""
+
+    explicit_source = str(
+        part.get("geometrySource") or part.get("geometry_source") or mesh_data.get("geometrySource") or ""
+    ).strip()
+    if len(verts) >= 3 and len(faces) >= 1:
+        geometry_source = "EditableMeshBuffers"
+    elif mesh_id:
+        geometry_source = "PublishedCloudMeshId"
+    elif explicit_source:
+        geometry_source = explicit_source
+    else:
+        geometry_source = "StudioExternalUnreadable"
+
+    geom_tokens: List[str] = [
+        FORGE_SYNC_HASH_SCHEMA_V1,
+        "geom",
+        mesh_id,
+        geometry_source,
+        f"vc={len(verts)}",
+        f"fc={len(faces)}",
+    ]
+    for v in verts:
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            geom_tokens.append(
+                f"v:{_fmt_canonical_fixed(v[0], 4)},{_fmt_canonical_fixed(v[1], 4)},{_fmt_canonical_fixed(v[2], 4)}"
+            )
+    for n in normals:
+        if isinstance(n, (list, tuple)) and len(n) >= 3:
+            geom_tokens.append(
+                f"n:{_fmt_canonical_fixed(n[0], 4)},{_fmt_canonical_fixed(n[1], 4)},{_fmt_canonical_fixed(n[2], 4)}"
+            )
+    for u in uvs:
+        if isinstance(u, (list, tuple)) and len(u) >= 2:
+            geom_tokens.append(f"u:{_fmt_canonical_fixed(u[0], 4)},{_fmt_canonical_fixed(u[1], 4)}")
+    for f in faces:
+        if isinstance(f, (list, tuple)) and len(f) >= 3:
+            geom_tokens.append(f"f:{int(f[0])},{int(f[1])},{int(f[2])}")
+
+    geometry_hash = compute_fnv1a_32_hex("|".join(geom_tokens))
+
+    cr, cg, cb = _normalize_color_rgb_255(part.get("color"))
+    mat_name = str(part.get("material") or "Metal").strip() or "Metal"
+    pbr = part.get("pbrMaterial") if isinstance(part.get("pbrMaterial"), dict) else {}
+    rough_val = (
+        pbr.get("roughness")
+        if isinstance(pbr.get("roughness"), (int, float))
+        else (part.get("roughness") if part.get("roughness") is not None else 0.35)
+    )
+    metal_val = (
+        pbr.get("metalness")
+        if isinstance(pbr.get("metalness"), (int, float))
+        else (part.get("metalness") if part.get("metalness") is not None else 0.6)
+    )
+    trans_val = part.get("transparency") if part.get("transparency") is not None else 0.0
+
+    c_map_raw = str(pbr.get("colorMapAssetId") or pbr.get("color_map_asset_id") or pbr.get("colorMapId") or "").strip()
+    n_map_raw = str(pbr.get("normalMapAssetId") or pbr.get("normal_map_asset_id") or pbr.get("normalMapId") or "").strip()
+    r_map_raw = str(pbr.get("roughnessMapAssetId") or pbr.get("roughness_map_asset_id") or pbr.get("roughnessMapId") or "").strip()
+    m_map_raw = str(pbr.get("metalnessMapAssetId") or pbr.get("metalness_map_asset_id") or pbr.get("metalnessMapId") or "").strip()
+
+    c_map = c_map_raw if is_verified_roblox_asset_uri(c_map_raw) else ""
+    n_map = n_map_raw if is_verified_roblox_asset_uri(n_map_raw) else ""
+    r_map = r_map_raw if is_verified_roblox_asset_uri(r_map_raw) else ""
+    m_map = m_map_raw if is_verified_roblox_asset_uri(m_map_raw) else ""
+
+    mat_tokens = [
+        FORGE_SYNC_HASH_SCHEMA_V1,
+        "mat",
+        f"{cr},{cg},{cb}",
+        mat_name,
+        _fmt_canonical_fixed(rough_val, 3),
+        _fmt_canonical_fixed(metal_val, 3),
+        _fmt_canonical_fixed(trans_val, 3),
+        c_map,
+        n_map,
+        r_map,
+        m_map,
+    ]
+    material_hash = compute_fnv1a_32_hex("|".join(mat_tokens))
+
+    sz = part.get("size") if isinstance(part.get("size"), list) and len(part["size"]) >= 3 else [2.0, 2.0, 2.0]
+    pos = part.get("position") if isinstance(part.get("position"), list) and len(part["position"]) >= 3 else [0.0, 1.0, 0.0]
+    rot_mat = _extract_canonical_rotation_matrix_9(part)
+    size_str = f"{_fmt_canonical_fixed(sz[0], 3)},{_fmt_canonical_fixed(sz[1], 3)},{_fmt_canonical_fixed(sz[2], 3)}"
+    pos_str = f"{_fmt_canonical_fixed(pos[0], 3)},{_fmt_canonical_fixed(pos[1], 3)},{_fmt_canonical_fixed(pos[2], 3)}"
+    rot_str = ",".join(_fmt_canonical_fixed(c, 4) for c in rot_mat)
+    anc_flag = "0" if part.get("anchored") is False else "1"
+    col_flag = "0" if part.get("canCollide") is False else "1"
+    cf_mode = str(part.get("collisionFidelity") or "Hull").strip() or "Hull"
+
+    transform_tokens = [
+        FORGE_SYNC_HASH_SCHEMA_V1,
+        "xform",
+        hier["hierarchyPath"],
+        size_str,
+        pos_str,
+        rot_str,
+        anc_flag,
+        col_flag,
+        cf_mode,
+    ]
+    transform_hash = compute_fnv1a_32_hex("|".join(transform_tokens))
+
+    combined_hash = compute_fnv1a_32_hex(
+        f"{FORGE_SYNC_HASH_SCHEMA_V1}|part|{hier['partId']}|{hier['hierarchyPath']}|{geometry_hash}|{material_hash}|{transform_hash}"
+    )
+
+    return {
+        "schemaVersion": FORGE_SYNC_HASH_SCHEMA_V1,
+        "hashSchemaVersion": FORGE_SYNC_HASH_SCHEMA_V1,
+        "partId": hier["partId"],
+        "parentId": hier["parentId"],
+        "parentName": hier["parentName"],
+        "hierarchyPath": hier["hierarchyPath"],
+        "hierarchySegments": hier["hierarchySegments"],
+        "geometrySource": geometry_source,
+        "rotationMatrix": [float(_fmt_canonical_fixed(c, 6)) for c in rot_mat],
+        "geometryHash": geometry_hash,
+        "materialHash": material_hash,
+        "transformHash": transform_hash,
+        "combinedHash": combined_hash,
+    }
+
+
+def normalize_parts_with_sync_metadata(
+    parts: List[Dict[str, Any]],
+    model_name: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Ensures every part in an asset has a stable `partId` (`ForgePartId`), `parentId`, `parentName`,
+    `hierarchyPath`, `geometrySource`, `rotationMatrix`, and canonical `geometryHash`, `materialHash`,
+    and `transformHash` under `FORGE_SYNC_HASH_SCHEMA_V1`.
     """
     if not isinstance(parts, list):
         return []
@@ -114,20 +429,20 @@ def normalize_parts_with_sync_metadata(parts: List[Dict[str, Any]]) -> List[Dict
         if not isinstance(raw, dict):
             continue
         p = dict(raw)
-        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", str(p.get("name") or f"Part_{idx + 1}"))
-        part_id = str(p.get("partId") or p.get("id") or f"forge-part-{idx + 1}-{safe_name.lower()}")
-        parent_name = str(p.get("parentName") or "Root")
-        hierarchy_path = str(
-            p.get("hierarchyPath")
-            or (f"{parent_name}/{p.get('name') or f'Part_{idx + 1}'}" if parent_name != "Root" else str(p.get("name") or f"Part_{idx + 1}"))
-        )
-        p["partId"] = part_id
-        p["parentName"] = parent_name
-        p["hierarchyPath"] = hierarchy_path
-        hashes = compute_part_sync_hashes(p)
-        p["geometryHash"] = hashes["geometryHash"]
-        p["materialHash"] = hashes["materialHash"]
-        p["transformHash"] = hashes["transformHash"]
+        sync_meta = compute_part_sync_hashes(p, idx, model_name)
+        p["partId"] = sync_meta["partId"]
+        p["parentId"] = sync_meta["parentId"]
+        p["parentName"] = sync_meta["parentName"]
+        p["hierarchyPath"] = sync_meta["hierarchyPath"]
+        p["geometrySource"] = sync_meta["geometrySource"]
+        p["rotationMatrix"] = sync_meta["rotationMatrix"]
+        if not isinstance(p.get("rotation"), list) or len(p["rotation"]) < 3:
+            p["rotation"] = _canonical_matrix_9_to_euler_deg(sync_meta["rotationMatrix"])
+        cr, cg, cb = _normalize_color_rgb_255(p.get("color"))
+        p["color"] = [cr, cg, cb]
+        p["geometryHash"] = sync_meta["geometryHash"]
+        p["materialHash"] = sync_meta["materialHash"]
+        p["transformHash"] = sync_meta["transformHash"]
         normalized.append(p)
     return normalized
 
@@ -135,43 +450,127 @@ def normalize_parts_with_sync_metadata(parts: List[Dict[str, Any]]) -> List[Dict
 def compute_datamodel_sync_diff(
     forge_parts: List[Dict[str, Any]],
     studio_parts: List[Dict[str, Any]],
+    base_parts: Optional[List[Dict[str, Any]]] = None,
+    sync_scope: str = "full_model",
+    model_name: str = "",
+    explicit_delete_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Compares the web editor's `forge_parts` against Roblox Studio's live `DataModel` parts
-    by stable `partId` (or fallback `name`), detecting geometry, transform, material,
-    and hierarchy differences per part without replacing the entire model unnecessarily.
+    by stable `partId` (or fallback `name`) using `FORGE_SYNC_HASH_SCHEMA_V1`, detecting geometry,
+    transform, material, and hierarchy differences per part, duplicate `partId`s, explicit deletions,
+    and 3-way merge conflicts when `base_parts` is provided.
     """
-    norm_forge = normalize_parts_with_sync_metadata(forge_parts)
-    norm_studio = normalize_parts_with_sync_metadata(studio_parts)
+    norm_forge = normalize_parts_with_sync_metadata(forge_parts, model_name)
+    norm_studio = normalize_parts_with_sync_metadata(studio_parts, model_name)
+    norm_base = normalize_parts_with_sync_metadata(base_parts or [], model_name) if base_parts else []
+    explicit_delete_set = {str(x) for x in (explicit_delete_ids or []) if str(x).strip()}
 
+    duplicate_forge_part_ids: List[str] = []
     forge_by_id: Dict[str, Dict[str, Any]] = {}
     forge_by_name: Dict[str, Dict[str, Any]] = {}
     for p in norm_forge:
-        forge_by_id[str(p["partId"])] = p
+        pid = str(p["partId"])
+        if pid in forge_by_id and pid not in duplicate_forge_part_ids:
+            duplicate_forge_part_ids.append(pid)
+        forge_by_id[pid] = p
         forge_by_name[str(p.get("name") or "")] = p
 
+    duplicate_studio_part_ids: List[str] = []
     studio_by_id: Dict[str, Dict[str, Any]] = {}
     studio_by_name: Dict[str, Dict[str, Any]] = {}
     for p in norm_studio:
-        studio_by_id[str(p["partId"])] = p
+        pid = str(p["partId"])
+        if pid in studio_by_id and pid not in duplicate_studio_part_ids:
+            duplicate_studio_part_ids.append(pid)
+        studio_by_id[pid] = p
         studio_by_name[str(p.get("name") or "")] = p
+
+    base_by_id: Dict[str, Dict[str, Any]] = {}
+    base_by_name: Dict[str, Dict[str, Any]] = {}
+    for p in norm_base:
+        base_by_id[str(p["partId"])] = p
+        base_by_name[str(p.get("name") or "")] = p
 
     matched_studio_ids = set()
     added_in_studio: List[str] = []
     removed_in_studio: List[str] = []
     modified_parts: List[Dict[str, Any]] = []
+    modified_geometry: List[str] = []
+    modified_transform: List[str] = []
+    modified_hierarchy: List[str] = []
+    modified_material: List[str] = []
+    conflicts: List[Dict[str, Any]] = []
     unchanged_parts: List[str] = []
+    part_diffs: List[Dict[str, Any]] = []
 
     for f_part in norm_forge:
-        s_part = studio_by_id.get(str(f_part["partId"])) or studio_by_name.get(str(f_part.get("name") or ""))
-        if not s_part:
-            removed_in_studio.append(str(f_part.get("name") or f_part["partId"]))
+        f_id = str(f_part["partId"])
+        f_name = str(f_part.get("name") or f_id)
+        if f_id in explicit_delete_set or f_name in explicit_delete_set:
+            removed_in_studio.append(f_name)
+            part_diffs.append(
+                {
+                    "partId": f_id,
+                    "name": f_name,
+                    "status": "missing_in_studio",
+                    "geometryMatch": False,
+                    "transformMatch": False,
+                    "hierarchyMatch": False,
+                    "materialMatch": False,
+                    "forgeHashes": {
+                        "geometryHash": f_part["geometryHash"],
+                        "transformHash": f_part["transformHash"],
+                        "materialHash": f_part["materialHash"],
+                        "parentName": f_part.get("parentName") or "Root",
+                        "hierarchyPath": f_part.get("hierarchyPath"),
+                    },
+                }
+            )
             continue
+
+        s_part = studio_by_id.get(f_id) or studio_by_name.get(str(f_part.get("name") or ""))
+        if not s_part:
+            if sync_scope == "full_model":
+                removed_in_studio.append(f_name)
+                part_diffs.append(
+                    {
+                        "partId": f_id,
+                        "name": f_name,
+                        "status": "missing_in_studio",
+                        "geometryMatch": False,
+                        "transformMatch": False,
+                        "hierarchyMatch": False,
+                        "materialMatch": False,
+                        "forgeHashes": {
+                            "geometryHash": f_part["geometryHash"],
+                            "transformHash": f_part["transformHash"],
+                            "materialHash": f_part["materialHash"],
+                            "parentName": f_part.get("parentName") or "Root",
+                            "hierarchyPath": f_part.get("hierarchyPath"),
+                        },
+                    }
+                )
+            else:
+                unchanged_parts.append(f_name)
+            continue
+
         matched_studio_ids.add(str(s_part["partId"]))
+        pname = str(f_part.get("name") or s_part.get("name") or f_part["partId"])
         geom_changed = f_part["geometryHash"] != s_part["geometryHash"]
         mat_changed = f_part["materialHash"] != s_part["materialHash"]
         trans_changed = f_part["transformHash"] != s_part["transformHash"]
-        hierarchy_changed = str(f_part.get("parentName") or "Root") != str(s_part.get("parentName") or "Root")
+        hierarchy_changed = str(f_part.get("hierarchyPath")) != str(s_part.get("hierarchyPath"))
+
+        if geom_changed:
+            modified_geometry.append(pname)
+        if trans_changed:
+            modified_transform.append(pname)
+        if hierarchy_changed:
+            modified_hierarchy.append(pname)
+        if mat_changed:
+            modified_material.append(pname)
+
         if geom_changed or mat_changed or trans_changed or hierarchy_changed:
             changes: List[str] = []
             if geom_changed:
@@ -182,42 +581,151 @@ def compute_datamodel_sync_diff(
                 changes.append("material")
             if hierarchy_changed:
                 changes.append("hierarchy")
-            modified_parts.append(
+
+            b_part = base_by_id.get(str(f_part["partId"])) or base_by_name.get(pname)
+            has_conflict = False
+            if b_part:
+                forge_changed_since_base = (
+                    f_part["geometryHash"] != b_part["geometryHash"]
+                    or f_part["materialHash"] != b_part["materialHash"]
+                    or f_part["transformHash"] != b_part["transformHash"]
+                )
+                studio_changed_since_base = (
+                    s_part["geometryHash"] != b_part["geometryHash"]
+                    or s_part["materialHash"] != b_part["materialHash"]
+                    or s_part["transformHash"] != b_part["transformHash"]
+                )
+                has_conflict = forge_changed_since_base and studio_changed_since_base
+
+            mod_entry = {
+                "partId": str(f_part["partId"]),
+                "name": pname,
+                "changes": changes,
+                "hasConflict": has_conflict,
+                "forgeHashes": {
+                    "geometryHash": f_part["geometryHash"],
+                    "materialHash": f_part["materialHash"],
+                    "transformHash": f_part["transformHash"],
+                    "parentName": f_part.get("parentName") or "Root",
+                    "hierarchyPath": f_part.get("hierarchyPath"),
+                },
+                "studioHashes": {
+                    "geometryHash": s_part["geometryHash"],
+                    "materialHash": s_part["materialHash"],
+                    "transformHash": s_part["transformHash"],
+                    "parentName": s_part.get("parentName") or "Root",
+                    "hierarchyPath": s_part.get("hierarchyPath"),
+                },
+            }
+            modified_parts.append(mod_entry)
+            if has_conflict:
+                conflicts.append(mod_entry)
+
+            part_diffs.append(
                 {
                     "partId": str(f_part["partId"]),
-                    "name": str(f_part.get("name") or s_part.get("name") or f_part["partId"]),
-                    "changes": changes,
+                    "name": pname,
+                    "status": "conflict" if has_conflict else "modified",
+                    "geometryMatch": not geom_changed,
+                    "transformMatch": not trans_changed,
+                    "hierarchyMatch": not hierarchy_changed,
+                    "materialMatch": not mat_changed,
+                    "forgeHashes": mod_entry["forgeHashes"],
+                    "studioHashes": mod_entry["studioHashes"],
+                }
+            )
+        else:
+            unchanged_parts.append(pname)
+            part_diffs.append(
+                {
+                    "partId": str(f_part["partId"]),
+                    "name": pname,
+                    "status": "in_sync",
+                    "geometryMatch": True,
+                    "transformMatch": True,
+                    "hierarchyMatch": True,
+                    "materialMatch": True,
                     "forgeHashes": {
                         "geometryHash": f_part["geometryHash"],
                         "materialHash": f_part["materialHash"],
                         "transformHash": f_part["transformHash"],
                         "parentName": f_part.get("parentName") or "Root",
+                        "hierarchyPath": f_part.get("hierarchyPath"),
                     },
                     "studioHashes": {
                         "geometryHash": s_part["geometryHash"],
                         "materialHash": s_part["materialHash"],
                         "transformHash": s_part["transformHash"],
                         "parentName": s_part.get("parentName") or "Root",
+                        "hierarchyPath": s_part.get("hierarchyPath"),
                     },
                 }
             )
-        else:
-            unchanged_parts.append(str(f_part.get("name") or f_part["partId"]))
 
     for s_part in norm_studio:
         if str(s_part["partId"]) not in matched_studio_ids:
-            added_in_studio.append(str(s_part.get("name") or s_part["partId"]))
+            sname = str(s_part.get("name") or s_part["partId"])
+            added_in_studio.append(sname)
+            part_diffs.append(
+                {
+                    "partId": str(s_part["partId"]),
+                    "name": sname,
+                    "status": "added_in_studio",
+                    "geometryMatch": False,
+                    "transformMatch": False,
+                    "hierarchyMatch": False,
+                    "materialMatch": False,
+                    "studioHashes": {
+                        "geometryHash": s_part["geometryHash"],
+                        "materialHash": s_part["materialHash"],
+                        "transformHash": s_part["transformHash"],
+                        "parentName": s_part.get("parentName") or "Root",
+                        "hierarchyPath": s_part.get("hierarchyPath"),
+                    },
+                }
+            )
 
-    in_sync = len(added_in_studio) == 0 and len(removed_in_studio) == 0 and len(modified_parts) == 0
+    has_duplicate_ids = len(duplicate_studio_part_ids) > 0 or len(duplicate_forge_part_ids) > 0
+    in_sync = (
+        len(added_in_studio) == 0
+        and len(removed_in_studio) == 0
+        and len(modified_parts) == 0
+        and not has_duplicate_ids
+    )
     return {
+        "schema_version": FORGE_SYNC_HASH_SCHEMA_V1,
+        "schemaVersion": FORGE_SYNC_HASH_SCHEMA_V1,
+        "sync_scope": sync_scope,
+        "syncScope": sync_scope,
         "in_sync": in_sync,
+        "inSync": in_sync,
+        "has_conflicts": len(conflicts) > 0,
+        "hasConflicts": len(conflicts) > 0,
+        "has_duplicate_ids": has_duplicate_ids,
+        "hasDuplicateIds": has_duplicate_ids,
+        "duplicate_studio_part_ids": duplicate_studio_part_ids,
+        "duplicateStudioPartIds": duplicate_studio_part_ids,
+        "duplicate_forge_part_ids": duplicate_forge_part_ids,
+        "duplicateForgePartIds": duplicate_forge_part_ids,
         "forge_part_count": len(norm_forge),
         "studio_part_count": len(norm_studio),
+        "totalForgeParts": len(norm_forge),
+        "totalStudioParts": len(norm_studio),
+        "matchingPartsCount": len(unchanged_parts),
         "unchanged_count": len(unchanged_parts),
         "unchanged_parts": unchanged_parts,
         "added_in_studio": added_in_studio,
+        "addedInStudio": added_in_studio,
         "removed_in_studio": removed_in_studio,
+        "removedInStudio": removed_in_studio,
         "modified_parts": modified_parts,
+        "modifiedGeometry": modified_geometry,
+        "modifiedTransform": modified_transform,
+        "modifiedHierarchy": modified_hierarchy,
+        "modifiedMaterial": modified_material,
+        "conflicts": conflicts,
+        "part_diffs": part_diffs,
+        "partDiffs": part_diffs,
     }
 
 
@@ -564,6 +1072,32 @@ class AssetEngine:
     def validate_and_decode_png(png_bytes: bytes, target_preview_size: int = 32) -> Dict[str, Any]:
         return validate_and_decode_png_bytes(png_bytes, target_preview_size)
 
+    @staticmethod
+    def normalize_hierarchy_metadata(
+        part: Dict[str, Any], index_fallback: int = 0, model_name: str = ""
+    ) -> Dict[str, Any]:
+        return normalize_hierarchy_metadata(part, index_fallback, model_name)
+
+    @staticmethod
+    def compute_part_sync_hashes(
+        part: Dict[str, Any], index_fallback: int = 0, model_name: str = ""
+    ) -> Dict[str, Any]:
+        return compute_part_sync_hashes(part, index_fallback, model_name)
+
+    @staticmethod
+    def normalize_parts_with_sync_metadata(
+        parts: List[Dict[str, Any]], model_name: str = ""
+    ) -> List[Dict[str, Any]]:
+        return normalize_parts_with_sync_metadata(parts, model_name)
+
+    @staticmethod
+    def compute_fnv1a_32_hex(text: str, normalize: bool = True) -> str:
+        return compute_fnv1a_32_hex(text, normalize=normalize)
+
+    @staticmethod
+    def normalize_luau_and_sync_text(text: str) -> str:
+        return normalize_luau_and_sync_text(text)
+
     def load_library(self) -> List[Dict[str, Any]]:
         if not self.library_file_path.exists():
             return []
@@ -575,10 +1109,10 @@ class AssetEngine:
 
     def save_library(self, assets: List[Dict[str, Any]]) -> None:
         self.library_file_path.parent.mkdir(parents=True, exist_ok=True)
-        self.library_file_path.write_text(
-            json.dumps(assets, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        tmp_path = self.library_file_path.with_suffix(".json.tmp")
+        serialized = json.dumps(assets, indent=2, ensure_ascii=False)
+        tmp_path.write_text(serialized, encoding="utf-8")
+        os.replace(tmp_path, self.library_file_path)
 
     def get_asset(self, asset_id_or_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -601,8 +1135,19 @@ class AssetEngine:
         self,
         forge_parts: List[Dict[str, Any]],
         studio_parts: List[Dict[str, Any]],
+        base_parts: Optional[List[Dict[str, Any]]] = None,
+        sync_scope: str = "full_model",
+        model_name: str = "",
+        explicit_delete_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        return compute_datamodel_sync_diff(forge_parts, studio_parts)
+        return compute_datamodel_sync_diff(
+            forge_parts=forge_parts,
+            studio_parts=studio_parts,
+            base_parts=base_parts,
+            sync_scope=sync_scope,
+            model_name=model_name,
+            explicit_delete_ids=explicit_delete_ids,
+        )
 
     def upsert_asset(self, asset_data: Dict[str, Any]) -> Dict[str, Any]:
         assets = self.load_library()

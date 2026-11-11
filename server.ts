@@ -1500,29 +1500,72 @@ app.post('/api/v1/assets/pull-from-rojo', (req, res) => {
   }
 });
 
+function resolveBaselinePartsForAsset(existingAsset: any, body: any): any[] | undefined {
+  if (Array.isArray(body?.base_parts)) {
+    return body.base_parts;
+  }
+  const baselineSha = String(body?.baseline_snapshot_sha256 || '').trim();
+  if (!baselineSha || !existingAsset) return undefined;
+  if (String(existingAsset.snapshot_sha256 || '') === baselineSha) {
+    return existingAsset.parts || [];
+  }
+  const history = Array.isArray(existingAsset.version_history) ? existingAsset.version_history : [];
+  for (const snap of history) {
+    if (snap && String(snap.snapshot_sha256 || '') === baselineSha && Array.isArray(snap.parts)) {
+      return snap.parts;
+    }
+  }
+  return undefined;
+}
+
 // Pillar C Real DataModel Bidirectional Sync Diff (Roblox Studio DataModel <-> Forge Web Editor)
 app.post('/api/v1/assets/compare-datamodel', (req, res) => {
   try {
     const modelName = String(req.body.model_name || req.body.asset_id || '').trim();
+    const safeName = modelName.replace(/[^a-zA-Z0-9_]/g, '') || modelName;
     const studioParts = Array.isArray(req.body.parts)
       ? req.body.parts
       : Array.isArray(req.body.studio_parts)
       ? req.body.studio_parts
       : [];
-    const existing = getAssetFromLibraryServer(getAssetsLibraryPath(), modelName);
+    const rawScope = String(req.body.sync_scope || 'full_model').trim();
+    const syncScope: 'selection' | 'full_model' | 'explicit_delete' =
+      rawScope === 'selection' || rawScope === 'full_model' || rawScope === 'explicit_delete'
+        ? rawScope
+        : 'full_model';
+    const explicitDeleteIds: string[] = Array.isArray(req.body.explicit_delete_ids)
+      ? req.body.explicit_delete_ids.map((x: any) => String(x))
+      : [];
+
+    const libPath = getAssetsLibraryPath();
+    const existing =
+      getAssetFromLibraryServer(libPath, modelName) || getAssetFromLibraryServer(libPath, safeName);
     if (!existing) {
       return res.json({
         found_in_forge: false,
+        asset_id: null,
         model_name: modelName,
-        diff: computeDataModelSyncDiffServer([], studioParts),
+        version: 1,
+        diff: computeDataModelSyncDiffServer([], studioParts, {
+          syncScope,
+          modelName: safeName,
+          explicitDeleteIds,
+        }),
       });
     }
-    const diff = computeDataModelSyncDiffServer(existing.parts || [], studioParts);
+    const baseParts = resolveBaselinePartsForAsset(existing, req.body);
+    const diff = computeDataModelSyncDiffServer(existing.parts || [], studioParts, {
+      baseParts,
+      syncScope,
+      modelName: String(existing.name || safeName),
+      explicitDeleteIds,
+    });
     res.json({
       found_in_forge: true,
       asset_id: existing.id,
       model_name: existing.name,
       version: existing.version || 1,
+      snapshot_sha256: existing.snapshot_sha256 || null,
       diff,
     });
   } catch (err: any) {
@@ -1535,145 +1578,372 @@ app.post('/api/v1/assets/studio-push', (req, res) => {
   try {
     const {
       model_name = 'StudioModel',
+      name,
       parts = [],
       rbxmx_content = '',
-      merge_mode = 'incremental',
+      merge_mode,
+      remove_missing = false,
+      sync_scope: rawScopeInput,
+      explicit_delete_ids: rawDeleteIds,
+      conflict_policy: rawConflictPolicy,
     } = req.body;
 
-    const safeName = String(model_name).replace(/[^a-zA-Z0-9_]/g, '') || 'StudioModel';
+    const effectiveModelName = String(model_name || name || 'StudioModel').trim();
+    const safeName = effectiveModelName.replace(/[^a-zA-Z0-9_]/g, '') || 'StudioModel';
+    const incomingParts: any[] = Array.isArray(parts) ? parts : [];
+    const explicitDeleteIds: string[] = Array.isArray(rawDeleteIds)
+      ? rawDeleteIds.map((x: any) => String(x).trim()).filter(Boolean)
+      : [];
+    const explicitDeleteSet = new Set<string>(explicitDeleteIds);
+
+    let syncScope: 'selection' | 'full_model' | 'explicit_delete';
+    if (
+      rawScopeInput === 'selection' ||
+      rawScopeInput === 'full_model' ||
+      rawScopeInput === 'explicit_delete'
+    ) {
+      syncScope = rawScopeInput;
+    } else if (remove_missing || merge_mode === 'replace') {
+      syncScope = 'full_model';
+    } else if (explicitDeleteSet.size > 0 && incomingParts.length === 0) {
+      syncScope = 'explicit_delete';
+    } else {
+      syncScope = 'selection';
+    }
+
+    const conflictPolicy: 'reject' | 'smart_merge' | 'prefer_studio' | 'prefer_forge' =
+      rawConflictPolicy === 'reject' ||
+      rawConflictPolicy === 'smart_merge' ||
+      rawConflictPolicy === 'prefer_studio' ||
+      rawConflictPolicy === 'prefer_forge'
+        ? rawConflictPolicy
+        : 'smart_merge';
+    const effectiveMergeMode =
+      merge_mode || (syncScope === 'full_model' ? 'replace' : 'incremental');
+
+    if (incomingParts.length === 0 && explicitDeleteSet.size === 0) {
+      return res.status(400).json({
+        error: 'Se requiere un array de partes no vacío o explicit_delete_ids desde Roblox Studio.',
+      });
+    }
+
     const libPath = getAssetsLibraryPath();
-    let targetAsset =
-      getAssetFromLibraryServer(libPath, model_name) || getAssetFromLibraryServer(libPath, safeName);
+    let existing =
+      getAssetFromLibraryServer(libPath, effectiveModelName) ||
+      getAssetFromLibraryServer(libPath, safeName);
+    const baseParts = resolveBaselinePartsForAsset(existing, req.body);
 
-    const normalizedStudioParts = normalizePartsWithSyncMetadata(
-      Array.isArray(parts)
-        ? parts.map((p: any, idx: number) => {
-            const resolvedMesh = extractGeometryFromProcessedMesh(
-              p,
-              `${safeName}.obj`,
-              safeName
-            );
-            return {
-              partId: p.partId || p.id || undefined,
-              name: p.name || `MeshPart_${idx + 1}`,
-              parentName: p.parentName || 'Root',
-              hierarchyPath: p.hierarchyPath || undefined,
-              shape: 'MeshPart' as const,
-              size: Array.isArray(p.size) ? p.size : [2, 2, 2],
-              position: Array.isArray(p.position) ? p.position : [0, 1, 0],
-              rotation: Array.isArray(p.rotation) ? p.rotation : [0, 0, 0],
-              color: Array.isArray(p.color) ? p.color : [148, 163, 184],
-              material: p.material || 'Metal',
-              roughness: typeof p.roughness === 'number' ? p.roughness : 0.35,
-              metalness: typeof p.metalness === 'number' ? p.metalness : 0.65,
-              transparency: typeof p.transparency === 'number' ? p.transparency : 0,
-              canCollide: p.canCollide !== false,
-              anchored: p.anchored !== false,
-              collisionFidelity: p.collisionFidelity || 'Hull',
-              pbrMaterial: p.pbrMaterial,
-              meshData: resolvedMesh,
-            };
-          })
-        : []
-    );
+    const normExisting =
+      existing && Array.isArray(existing.parts)
+        ? normalizePartsWithSyncMetadata(existing.parts, safeName)
+        : [];
+    const existingById = new Map<string, any>();
+    const existingByName = new Map<string, any>();
+    for (const ep of normExisting) {
+      if (ep.partId) existingById.set(String(ep.partId), ep);
+      if (ep.name) existingByName.set(String(ep.name), ep);
+    }
 
-    const syncDiff = computeDataModelSyncDiffServer(
-      targetAsset?.parts || [],
-      normalizedStudioParts
-    );
+    // Prepare incoming Studio parts: preserve existing Forge meshData if Studio part omitted ForgeMeshGeometryJSON,
+    // and never invent a procedural cube for external MeshParts (`PublishedCloudMeshId` / `StudioExternalUnreadable`).
+    const preparedIncoming: any[] = incomingParts
+      .filter((p) => p && typeof p === 'object')
+      .map((rawInc: any, idx: number) => {
+        const inc = { ...rawInc };
+        const incId = String(inc.partId || inc.id || '').trim();
+        const pname = String(inc.name || `MeshPart_${idx + 1}`).trim();
+        const matchedExisting = (incId ? existingById.get(incId) : undefined) || existingByName.get(pname);
 
-    if (!targetAsset) {
-      const luauCode = buildStrictLuauFromEditedParts(safeName, normalizedStudioParts, 'Hull');
-      targetAsset = {
-        id: `studio-${Date.now()}`,
-        name: safeName,
-        category: 'Roblox Studio Live Sync',
-        asset_type: 'Model3D',
-        poly_count: normalizedStudioParts.reduce(
-          (s: number, p: any) => s + (p.meshData?.faces?.length || 12),
-          0
-        ),
-        collision_fidelity: 'Hull',
-        rojo_target_folder: 'src/shared/Assets3D',
-        file_name: `${safeName}.luau`,
-        obj_file_name: `${safeName}.obj`,
-        description: `Sincronizado incrementalmente desde Roblox Studio (${normalizedStudioParts.length} MeshParts).`,
-        pbr_profile: {
-          albedo_hex: '#38bdf8',
-          roughness: 0.35,
-          metalness: 0.65,
-          emissive_hex: '#06b6d4',
-          roblox_material: 'Metal',
-          pattern: 'BrushedTitanium',
-        },
-        parts: normalizedStudioParts,
-        luau_code: luauCode,
-      };
-    } else if (merge_mode === 'incremental' && normalizedStudioParts.length > 0) {
-      // Incremental merge: match parts by stable partId (ForgePartId) or name without wiping untouched parts
-      const studioById = new Map<string, any>();
-      const studioByName = new Map<string, any>();
-      for (const sp of normalizedStudioParts) {
-        if (sp.partId) studioById.set(String(sp.partId), sp);
-        studioByName.set(String(sp.name), sp);
-      }
+        const incMd = inc.meshData && typeof inc.meshData === 'object' ? inc.meshData : null;
+        const hasIncBuffers = Boolean(
+          incMd &&
+            Array.isArray(incMd.vertices) &&
+            incMd.vertices.length > 0 &&
+            Array.isArray(incMd.faces) &&
+            incMd.faces.length > 0
+        );
+        const incMeshId = validatePublishedRobloxMeshId(
+          inc.meshId || inc.mesh_id || incMd?.meshId || incMd?.assetId
+        );
+        const incGeomSource = String(inc.geometrySource || '').trim();
 
-      const consumedStudioNames = new Set<string>();
-      const mergedParts = normalizePartsWithSyncMetadata(targetAsset.parts || []).map((fp: any) => {
-        const sp =
-          (fp.partId && studioById.get(String(fp.partId))) || studioByName.get(String(fp.name));
-        if (!sp) return fp;
-        consumedStudioNames.add(String(sp.name));
-        if (sp.partId) studioById.delete(String(sp.partId));
-        const fTris = fp.meshData?.faces?.length || 0;
-        const sTris = sp.meshData?.faces?.length || 0;
+        if (!hasIncBuffers && matchedExisting) {
+          const exMeshId = validatePublishedRobloxMeshId(
+            matchedExisting.meshId || matchedExisting.meshData?.meshId
+          );
+          if (!incMeshId || incMeshId === exMeshId) {
+            if (matchedExisting.meshData) {
+              inc.meshData = JSON.parse(JSON.stringify(matchedExisting.meshData));
+            }
+            if (!incGeomSource && matchedExisting.geometrySource) {
+              inc.geometrySource = matchedExisting.geometrySource;
+            }
+            if (!incMeshId && exMeshId) {
+              inc.meshId = exMeshId;
+              inc.assetId = exMeshId;
+            }
+          }
+        }
+
+        if (incMeshId) {
+          inc.meshId = incMeshId;
+          inc.assetId = inc.assetId || incMeshId;
+          if (!hasIncBuffers && !(inc.meshData && Array.isArray(inc.meshData.vertices) && inc.meshData.vertices.length > 0)) {
+            inc.geometrySource = 'PublishedCloudMeshId';
+          }
+        } else if (!hasIncBuffers && !(inc.meshData && Array.isArray(inc.meshData.vertices) && inc.meshData.vertices.length > 0)) {
+          if (incGeomSource === 'StudioExternalUnreadable' || incGeomSource === 'PublishedCloudMeshId') {
+            inc.geometrySource = incGeomSource;
+          } else if (!matchedExisting) {
+            inc.geometrySource = 'StudioExternalUnreadable';
+          }
+        }
+
+        if (!incId && matchedExisting?.partId) {
+          inc.partId = matchedExisting.partId;
+        }
+
+        const resolvedMesh = extractGeometryFromProcessedMesh(inc, `${safeName}.obj`, safeName);
         return {
-          ...fp,
-          ...sp,
-          partId: fp.partId || sp.partId,
-          parentName: sp.parentName || fp.parentName || 'Root',
-          pbrMaterial: sp.pbrMaterial || fp.pbrMaterial,
-          meshData: sTris >= fTris ? sp.meshData : fp.meshData,
+          ...inc,
+          partId: inc.partId || undefined,
+          name: pname,
+          parentName: inc.parentName || matchedExisting?.parentName || 'Root',
+          hierarchyPath: inc.hierarchyPath || matchedExisting?.hierarchyPath || pname,
+          shape: 'MeshPart' as const,
+          size: Array.isArray(inc.size) ? inc.size : matchedExisting?.size || [2, 2, 2],
+          position: Array.isArray(inc.position) ? inc.position : matchedExisting?.position || [0, 1, 0],
+          rotation: Array.isArray(inc.rotation) ? inc.rotation : matchedExisting?.rotation || [0, 0, 0],
+          rotationMatrix: Array.isArray(inc.rotationMatrix) ? inc.rotationMatrix : undefined,
+          color: Array.isArray(inc.color) ? inc.color : matchedExisting?.color || [148, 163, 184],
+          material: inc.material || matchedExisting?.material || 'Metal',
+          roughness: typeof inc.roughness === 'number' ? inc.roughness : matchedExisting?.roughness ?? 0.35,
+          metalness: typeof inc.metalness === 'number' ? inc.metalness : matchedExisting?.metalness ?? 0.65,
+          transparency: typeof inc.transparency === 'number' ? inc.transparency : matchedExisting?.transparency ?? 0,
+          canCollide: inc.canCollide !== false,
+          anchored: inc.anchored !== false,
+          collisionFidelity: inc.collisionFidelity || matchedExisting?.collisionFidelity || 'Hull',
+          pbrMaterial: inc.pbrMaterial || matchedExisting?.pbrMaterial,
+          meshData:
+            resolvedMesh.vertices.length > 0
+              ? resolvedMesh
+              : inc.meshData || undefined,
         };
       });
-      for (const sp of normalizedStudioParts) {
-        if (!consumedStudioNames.has(String(sp.name))) {
-          mergedParts.push(sp);
+
+    const syncDiff = computeDataModelSyncDiffServer(normExisting, preparedIncoming, {
+      baseParts,
+      syncScope,
+      modelName: safeName,
+      explicitDeleteIds: Array.from(explicitDeleteSet),
+    });
+
+    // 1. Reject duplicate partIds immediately
+    if (syncDiff.has_duplicate_ids) {
+      return res.json({
+        success: false,
+        status: 'duplicate_part_ids',
+        error: 'Push rechazado: se detectaron ForgePartId duplicados en el payload.',
+        duplicate_studio_part_ids: syncDiff.duplicate_studio_part_ids,
+        duplicate_forge_part_ids: syncDiff.duplicate_forge_part_ids,
+        sync_diff: syncDiff,
+      });
+    }
+
+    // 2. Enforce conflict policy when 3-way conflicts exist
+    if (syncDiff.has_conflicts && conflictPolicy === 'reject') {
+      return res.json({
+        success: false,
+        status: 'conflict_detected',
+        error:
+          'Push rechazado por política de conflictos: el modelo cambió tanto en Forge como en Studio desde el último snapshot base.',
+        conflicts: syncDiff.conflicts,
+        sync_diff: syncDiff,
+      });
+    }
+
+    const normStudio = normalizePartsWithSyncMetadata(preparedIncoming, safeName);
+    const conflictById = new Map<string, any>();
+    for (const c of syncDiff.conflicts || []) {
+      if (c.partId) conflictById.set(String(c.partId), c);
+    }
+    const baseById = new Map<string, any>();
+    if (baseParts) {
+      for (const bp of normalizePartsWithSyncMetadata(baseParts, safeName)) {
+        if (bp.partId) baseById.set(String(bp.partId), bp);
+      }
+    }
+
+    let mergedParts: any[] = [];
+    if (existing && normExisting.length > 0) {
+      const seenIds = new Set<string>();
+      const seenNames = new Set<string>();
+
+      for (let idx = 0; idx < normStudio.length; idx++) {
+        const inc = normStudio[idx];
+        const incId = String(inc.partId || '');
+        const pname = String(inc.name || `MeshPart_${idx + 1}`);
+        if (explicitDeleteSet.has(incId) || explicitDeleteSet.has(pname)) continue;
+
+        const fPart = existingById.get(incId) || existingByName.get(pname);
+        const resolvedId = incId || (fPart ? String(fPart.partId) : `forge-part-${idx + 1}-${pname.toLowerCase()}`);
+        seenIds.add(resolvedId);
+        seenNames.add(pname);
+
+        if (!fPart) {
+          mergedParts.push(inc);
+          continue;
+        }
+
+        const hasConflict = conflictById.has(resolvedId);
+        if (hasConflict && conflictPolicy === 'prefer_forge') {
+          mergedParts.push(fPart);
+          continue;
+        }
+
+        const bPart = baseById.get(resolvedId);
+        if (hasConflict && conflictPolicy === 'smart_merge' && bPart) {
+          const studioGeomChanged = inc.geometryHash !== bPart.geometryHash;
+          const studioMatChanged = inc.materialHash !== bPart.materialHash;
+          const studioTransChanged = inc.transformHash !== bPart.transformHash;
+          mergedParts.push({
+            ...fPart,
+            partId: resolvedId,
+            name: pname,
+            parentId: studioTransChanged ? inc.parentId : fPart.parentId,
+            parentName: studioTransChanged ? inc.parentName : fPart.parentName || 'Root',
+            hierarchyPath: studioTransChanged ? inc.hierarchyPath : fPart.hierarchyPath || pname,
+            size: studioTransChanged ? inc.size : fPart.size || [2, 2, 2],
+            position: studioTransChanged ? inc.position : fPart.position || [0, 1, 0],
+            rotation: studioTransChanged ? inc.rotation : fPart.rotation || [0, 0, 0],
+            rotationMatrix: studioTransChanged ? inc.rotationMatrix : fPart.rotationMatrix,
+            color: studioTransChanged || studioMatChanged ? inc.color : fPart.color || [148, 163, 184],
+            material: studioMatChanged ? inc.material : fPart.material || 'Metal',
+            roughness: studioMatChanged ? inc.roughness : fPart.roughness ?? 0.35,
+            metalness: studioMatChanged ? inc.metalness : fPart.metalness ?? 0.65,
+            transparency: studioMatChanged ? inc.transparency : fPart.transparency ?? 0,
+            pbrMaterial: studioMatChanged ? inc.pbrMaterial || fPart.pbrMaterial : fPart.pbrMaterial,
+            meshId: studioGeomChanged ? inc.meshId : fPart.meshId,
+            assetId: studioGeomChanged ? inc.assetId : fPart.assetId,
+            textureId: studioMatChanged ? inc.textureId : fPart.textureId,
+            geometrySource: studioGeomChanged ? inc.geometrySource : fPart.geometrySource,
+            meshData: studioGeomChanged ? inc.meshData : fPart.meshData,
+          });
+        } else {
+          mergedParts.push({
+            ...fPart,
+            ...inc,
+            partId: resolvedId,
+            name: pname,
+            parentName: inc.parentName || fPart.parentName || 'Root',
+            hierarchyPath: inc.hierarchyPath || fPart.hierarchyPath || pname,
+            shape: 'MeshPart',
+            meshData: inc.meshData !== undefined ? inc.meshData : fPart.meshData,
+            pbrMaterial: inc.pbrMaterial || fPart.pbrMaterial,
+          });
         }
       }
-      targetAsset.parts = normalizePartsWithSyncMetadata(mergedParts);
-      targetAsset.poly_count = targetAsset.parts.reduce(
-        (s: number, p: any) => s + (p.meshData?.faces?.length || 12),
-        0
-      );
-      targetAsset.luau_code = buildStrictLuauFromEditedParts(
-        safeName,
-        targetAsset.parts,
-        targetAsset.collision_fidelity || 'Hull'
+
+      if (syncScope !== 'full_model') {
+        for (const ep of normExisting) {
+          const epId = String(ep.partId || '');
+          const epName = String(ep.name || '');
+          if (explicitDeleteSet.has(epId) || explicitDeleteSet.has(epName)) continue;
+          if (!seenIds.has(epId) && !seenNames.has(epName)) {
+            mergedParts.push(ep);
+          }
+        }
+      }
+    } else {
+      mergedParts = normStudio.filter(
+        (p) => !explicitDeleteSet.has(String(p.partId)) && !explicitDeleteSet.has(String(p.name))
       );
     }
 
+    const finalParts = normalizePartsWithSyncMetadata(mergedParts, safeName);
+    const collisionFidelity = existing?.collision_fidelity || 'Hull';
+    const luauCode = buildStrictLuauFromEditedParts(safeName, finalParts, collisionFidelity);
     const rbxmxOut =
-      rbxmx_content && rbxmx_content.trim().length > 0
-        ? rbxmx_content
+      rbxmx_content && String(rbxmx_content).trim().length > 0
+        ? String(rbxmx_content)
         : buildRbxmxFromPartsServer(
             safeName,
-            targetAsset.parts || [],
-            targetAsset.collision_fidelity || 'Hull',
-            targetAsset.category || '3D Asset',
-            targetAsset.luau_code
+            finalParts,
+            collisionFidelity,
+            existing?.category || 'Studio Synced Asset',
+            luauCode
           );
 
-    writeRawAssetToRojoWorkspace('src/shared/Assets3D', `${safeName}.rbxmx`, rbxmxOut);
-    writeToRojoWorkspace('src/shared/Assets3D', `${safeName}.luau`, targetAsset.luau_code);
+    const targetFolder = existing?.rojo_target_folder || 'src/shared/Assets3D';
+    const luauAbsTarget = resolveSafeProjectPath(targetFolder, `${safeName}.luau`);
+    const rbxmxAbsTarget = resolveSafeProjectPath(targetFolder, `${safeName}.rbxmx`);
 
-    const saved = saveAssetToLibrary(targetAsset);
+    // Backup previous files on disk for atomic rollback if any step fails
+    const prevLuauBytes = fs.existsSync(luauAbsTarget) ? fs.readFileSync(luauAbsTarget) : null;
+    const prevRbxmxBytes = fs.existsSync(rbxmxAbsTarget) ? fs.readFileSync(rbxmxAbsTarget) : null;
+    const prevLibBytes = fs.existsSync(libPath) ? fs.readFileSync(libPath) : null;
+
+    let saved: any;
+    let luauSavedPath: string;
+    let rbxmxSavedPath: string;
+
+    try {
+      const safeLuau = validateAndSanitizeLuau(luauCode);
+      const luauTmp = `${luauAbsTarget}.tmp`;
+      const rbxmxTmp = `${rbxmxAbsTarget}.tmp`;
+      fs.writeFileSync(luauTmp, safeLuau, 'utf-8');
+      fs.writeFileSync(rbxmxTmp, rbxmxOut, 'utf-8');
+      fs.renameSync(luauTmp, luauAbsTarget);
+      fs.renameSync(rbxmxTmp, rbxmxAbsTarget);
+
+      luauSavedPath = `./${path.relative(process.cwd(), luauAbsTarget).replace(/\\/g, '/')}`;
+      rbxmxSavedPath = `./${path.relative(process.cwd(), rbxmxAbsTarget).replace(/\\/g, '/')}`;
+
+      const totalTris = finalParts.reduce(
+        (s: number, p: any) => s + (p.meshData?.faces?.length || 0),
+        0
+      );
+      const assetPayload = {
+        ...(existing || {}),
+        id: existing?.id || `studio-${Date.now()}`,
+        name: safeName,
+        category: existing?.category || 'Studio Synced Asset',
+        asset_type: 'Model3D',
+        poly_count: totalTris,
+        collision_fidelity: collisionFidelity,
+        rojo_target_folder: targetFolder,
+        file_name: `${safeName}.luau`,
+        obj_file_name: `${safeName}.obj`,
+        parts: finalParts,
+        luau_code: luauCode,
+        saved_path: luauSavedPath,
+      };
+      saved = saveAssetToLibrary(assetPayload);
+    } catch (writeErr: any) {
+      try {
+        if (prevLuauBytes) fs.writeFileSync(luauAbsTarget, prevLuauBytes);
+        else if (fs.existsSync(luauAbsTarget)) fs.unlinkSync(luauAbsTarget);
+        if (prevRbxmxBytes) fs.writeFileSync(rbxmxAbsTarget, prevRbxmxBytes);
+        else if (fs.existsSync(rbxmxAbsTarget)) fs.unlinkSync(rbxmxAbsTarget);
+        if (prevLibBytes) fs.writeFileSync(libPath, prevLibBytes);
+      } catch {
+        // ignore rollback error
+      }
+      throw new Error(`Atomic studio-push failed and was rolled back: ${writeErr.message}`);
+    }
+
     res.json({
       success: true,
-      merge_mode,
-      sync_diff: syncDiff,
-      updated_parts_count: normalizedStudioParts.length,
+      status: 'synced',
+      merge_mode: effectiveMergeMode,
+      sync_scope: syncScope,
+      conflict_policy: conflictPolicy,
       asset: saved,
+      sync_diff: syncDiff,
+      luau_saved_path: luauSavedPath,
+      rbxmx_saved_path: rbxmxSavedPath,
+      updated_part_count: finalParts.length,
+      updated_parts_count: finalParts.length,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });

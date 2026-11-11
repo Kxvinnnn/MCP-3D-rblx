@@ -261,17 +261,423 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
     return container, false, lastErrorReason
 end
 
+local FORGE_SYNC_HASH_SCHEMA_V1 = "forge-sync-v1"
+
+-- Canonical text normalization shared across Python, TypeScript, and Luau:
+-- converts CRLF and CR to LF and trims outer whitespace.
+local function normalizeLuauAndSyncText(text: string?): string
+    local s = string.gsub(text or "", "\r\n", "\n")
+    s = string.gsub(s, "\r", "\n")
+    s = string.match(s, "^%s*(.-)%s*$") or ""
+    return s
+end
+
+-- FNV-1a 32-bit hash matching backend compute_fnv1a_32_hex / computeFnv1a32Hex
+local function computeLuauContentHash(content: string): string
+    local normalized = normalizeLuauAndSyncText(content)
+    local h: number = 0x811c9dc5
+    for i = 1, #normalized do
+        h = bit32.bxor(h, string.byte(normalized, i))
+        -- Multiply by 0x01000193 modulo 2^32 using 16-bit split to avoid float precision loss
+        local lo = bit32.band(h, 0xFFFF)
+        local hi = bit32.rshift(h, 16)
+        local prodLo = lo * 0x0193
+        local prodMid = lo * 0x0100 + hi * 0x0193 + bit32.rshift(prodLo, 16)
+        h = bit32.bor(bit32.lshift(bit32.band(prodMid, 0xFFFF), 16), bit32.band(prodLo, 0xFFFF))
+    end
+    return string.format("%08x", h)
+end
+
+-- Deterministic fixed-decimal formatter matching _fmt_canonical_fixed in Python and fmtCanonicalFixed in TypeScript
+local function fmtCanonicalFixed(val: any, decimals: number?): string
+    local d = decimals or 4
+    local f = tonumber(val) or 0
+    if f ~= f or f == math.huge or f == -math.huge then
+        f = 0
+    end
+    local scale = 10 ^ d
+    local sign = if f < -1e-9 then -1 else 1
+    local scaled = math.floor(math.abs(f) * scale + 0.5000001)
+    if scaled == 0 then
+        return if d > 0 then ("0." .. string.rep("0", d)) else "0"
+    end
+    local s = tostring(scaled)
+    while #s < (d + 1) do
+        s = "0" .. s
+    end
+    local prefix = if sign < 0 then "-" else ""
+    if d == 0 then
+        return prefix .. s
+    end
+    return prefix .. string.sub(s, 1, #s - d) .. "." .. string.sub(s, #s - d + 1)
+end
+
+local function canonicalEulerToMatrix9(rxDeg: number, ryDeg: number, rzDeg: number): { number }
+    local rx = math.rad(rxDeg)
+    local ry = math.rad(ryDeg)
+    local rz = math.rad(rzDeg)
+    local cx, sx = math.cos(rx), math.sin(rx)
+    local cy, sy = math.cos(ry), math.sin(ry)
+    local cz, sz = math.cos(rz), math.sin(rz)
+    return {
+        cy * cz,
+        -cy * sz,
+        sy,
+        sx * sy * cz + cx * sz,
+        -sx * sy * sz + cx * cz,
+        -sx * cy,
+        -cx * sy * cz + sx * sz,
+        cx * sy * sz + sx * cz,
+        cx * cy,
+    }
+end
+
+local function canonicalMatrix9ToEulerDeg(m: { number }): { number }
+    if type(m) ~= "table" or #m < 9 then
+        return { 0, 0, 0 }
+    end
+    local r00, r01, r02 = tonumber(m[1]) or 1, tonumber(m[2]) or 0, tonumber(m[3]) or 0
+    local r11, r12 = tonumber(m[5]) or 1, tonumber(m[6]) or 0
+    local r21, r22 = tonumber(m[8]) or 0, tonumber(m[9]) or 1
+    local clampedR02 = math.clamp(r02, -1, 1)
+    local ry = math.asin(clampedR02)
+    local rx = 0
+    local rz = 0
+    if math.abs(clampedR02) < 0.999999 then
+        rx = math.atan2(-r12, r22)
+        rz = math.atan2(-r01, r00)
+    else
+        rx = math.atan2(r21, r11)
+        rz = 0
+    end
+    return {
+        tonumber(fmtCanonicalFixed(math.deg(rx), 2)) or 0,
+        tonumber(fmtCanonicalFixed(math.deg(ry), 2)) or 0,
+        tonumber(fmtCanonicalFixed(math.deg(rz), 2)) or 0,
+    }
+end
+
+local function normalizeHierarchyMetadataLuau(partSpec: any, idxFallback: number): {
+    partName: string,
+    partId: string,
+    parentId: string,
+    parentName: string,
+    hierarchyPath: string,
+    hierarchySegments: { string },
+}
+    local rawName = tostring(partSpec.name or ("MeshPart_" .. tostring(idxFallback)))
+    local safeName = string.match(rawName, "^%s*(.-)%s*$") or ("MeshPart_" .. tostring(idxFallback))
+    if safeName == "" then
+        safeName = "MeshPart_" .. tostring(idxFallback)
+    end
+    local cleanAlnum = string.gsub(safeName, "[^%w_]", "_")
+    if cleanAlnum == "" then
+        cleanAlnum = "MeshPart_" .. tostring(idxFallback)
+    end
+    local rawPartId = string.match(tostring(partSpec.partId or partSpec.part_id or partSpec.id or ""), "^%s*(.-)%s*$") or ""
+    local partId = if rawPartId ~= "" then rawPartId else ("fpart_" .. cleanAlnum)
+
+    local rawParentName = string.match(tostring(partSpec.parentName or partSpec.parent_name or ""), "^%s*(.-)%s*$") or ""
+    local rawHierarchyPath = string.match(tostring(partSpec.hierarchyPath or partSpec.hierarchy_path or ""), "^%s*(.-)%s*$") or ""
+
+    local intermediateFolders: { string } = {}
+    if rawHierarchyPath ~= "" then
+        local pathSegs: { string } = {}
+        for seg in string.gmatch(string.gsub(rawHierarchyPath, "\\", "/"), "[^/]+") do
+            local trimmed = string.match(seg, "^%s*(.-)%s*$") or ""
+            if trimmed ~= "" then
+                table.insert(pathSegs, trimmed)
+            end
+        end
+        if #pathSegs > 0 then
+            local firstLow = string.lower(pathSegs[1])
+            if firstLow == "root" or firstLow == "modelroot" or firstLow == "workspace" then
+                table.remove(pathSegs, 1)
+            end
+        end
+        if #pathSegs > 0 and pathSegs[#pathSegs] == safeName then
+            table.remove(pathSegs, #pathSegs)
+        end
+        for _, seg in ipairs(pathSegs) do
+            local low = string.lower(seg)
+            if low ~= "root" and low ~= "modelroot" and low ~= "workspace" then
+                table.insert(intermediateFolders, seg)
+            end
+        end
+    end
+
+    if #intermediateFolders == 0 and rawParentName ~= "" then
+        local parentSegs: { string } = {}
+        for seg in string.gmatch(string.gsub(rawParentName, "\\", "/"), "[^/]+") do
+            local trimmed = string.match(seg, "^%s*(.-)%s*$") or ""
+            if trimmed ~= "" then
+                table.insert(parentSegs, trimmed)
+            end
+        end
+        if #parentSegs > 0 then
+            local firstLow = string.lower(parentSegs[1])
+            if firstLow == "root" or firstLow == "modelroot" or firstLow == "workspace" then
+                table.remove(parentSegs, 1)
+            end
+        end
+        if #parentSegs > 1 and parentSegs[#parentSegs] == safeName then
+            table.remove(parentSegs, #parentSegs)
+        end
+        for _, seg in ipairs(parentSegs) do
+            local low = string.lower(seg)
+            if low ~= "root" and low ~= "modelroot" and low ~= "workspace" then
+                table.insert(intermediateFolders, seg)
+            end
+        end
+    end
+
+    local segments: { string } = { "Root" }
+    for _, folder in ipairs(intermediateFolders) do
+        table.insert(segments, folder)
+    end
+    table.insert(segments, safeName)
+
+    local parentName = if #intermediateFolders > 0 then intermediateFolders[#intermediateFolders] else "Root"
+    local hierarchyPath = table.concat(segments, "/")
+    local rawParentId = string.match(tostring(partSpec.parentId or partSpec.parent_id or ""), "^%s*(.-)%s*$") or ""
+    local cleanedFolders: { string } = {}
+    for _, folder in ipairs(intermediateFolders) do
+        table.insert(cleanedFolders, (string.gsub(folder, "[^%w_]", "_")))
+    end
+    local parentClean = table.concat(cleanedFolders, "_")
+    local parentId = if rawParentId ~= "" and rawParentId ~= "root" and rawParentId ~= "fnode_Root" and rawParentId ~= "fnode_ModelRoot" and #intermediateFolders > 0
+        then rawParentId
+        elseif #intermediateFolders > 0 then ("fnode_" .. parentClean)
+        else "fnode_Root"
+
+    return {
+        partName = safeName,
+        partId = partId,
+        parentId = parentId,
+        parentName = parentName,
+        hierarchyPath = hierarchyPath,
+        hierarchySegments = segments,
+    }
+end
+
+local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
+    hashSchemaVersion: string,
+    partId: string,
+    parentId: string,
+    parentName: string,
+    hierarchyPath: string,
+    geometrySource: string,
+    rotationMatrix: { number },
+    geometryHash: string,
+    materialHash: string,
+    transformHash: string,
+    combinedHash: string,
+}
+    local hier = normalizeHierarchyMetadataLuau(partSpec, idxFallback)
+    local md = if type(partSpec.meshData) == "table" then partSpec.meshData else {}
+    local verts = if type(md.vertices) == "table" then md.vertices else {}
+    local faces = if type(md.faces) == "table" then md.faces else {}
+    local norms = if type(md.normals) == "table" then md.normals else {}
+    local uvs = if type(md.uvs) == "table" then md.uvs else {}
+
+    local rawMeshId = partSpec.meshId or partSpec.mesh_id or md.meshId or partSpec.assetId
+    local meshId = if isVerifiedRobloxAssetUri(rawMeshId) then tostring(rawMeshId) else ""
+    local rawGeomSource = string.match(tostring(partSpec.geometrySource or partSpec.geometry_source or md.geometrySource or ""), "^%s*(.-)%s*$") or ""
+    local geometrySource = rawGeomSource
+    if geometrySource == "" then
+        if #verts > 0 and #faces > 0 then
+            geometrySource = "EditableMeshBuffers"
+        elseif meshId ~= "" then
+            geometrySource = "PublishedCloudMeshId"
+        else
+            geometrySource = "StudioExternalUnreadable"
+        end
+    end
+
+    local geomTokens: { string } = {
+        FORGE_SYNC_HASH_SCHEMA_V1,
+        "geom",
+        meshId,
+        geometrySource,
+        "vc=" .. tostring(#verts),
+        "fc=" .. tostring(#faces),
+    }
+    for _, v in ipairs(verts) do
+        if type(v) == "table" and #v >= 3 then
+            table.insert(
+                geomTokens,
+                string.format("v:%s,%s,%s", fmtCanonicalFixed(v[1], 4), fmtCanonicalFixed(v[2], 4), fmtCanonicalFixed(v[3], 4))
+            )
+        end
+    end
+    for _, n in ipairs(norms) do
+        if type(n) == "table" and #n >= 3 then
+            table.insert(
+                geomTokens,
+                string.format("n:%s,%s,%s", fmtCanonicalFixed(n[1], 4), fmtCanonicalFixed(n[2], 4), fmtCanonicalFixed(n[3], 4))
+            )
+        end
+    end
+    for _, u in ipairs(uvs) do
+        if type(u) == "table" and #u >= 2 then
+            table.insert(
+                geomTokens,
+                string.format("u:%s,%s", fmtCanonicalFixed(u[1], 4), fmtCanonicalFixed(u[2], 4))
+            )
+        end
+    end
+    for _, f in ipairs(faces) do
+        if type(f) == "table" and #f >= 3 then
+            table.insert(
+                geomTokens,
+                string.format("f:%d,%d,%d", math.floor(tonumber(f[1]) or 0), math.floor(tonumber(f[2]) or 0), math.floor(tonumber(f[3]) or 0))
+            )
+        end
+    end
+    local geometryHash = computeLuauContentHash(table.concat(geomTokens, "|"))
+
+    local col = if type(partSpec.color) == "table" and #partSpec.color >= 3 then partSpec.color else { 148, 163, 184 }
+    local cr = math.clamp(math.floor((tonumber(col[1]) or 148) + 0.5), 0, 255)
+    local cg = math.clamp(math.floor((tonumber(col[2]) or 163) + 0.5), 0, 255)
+    local cb = math.clamp(math.floor((tonumber(col[3]) or 184) + 0.5), 0, 255)
+    local matName = string.match(tostring(partSpec.material or "Metal"), "^%s*(.-)%s*$") or "Metal"
+    if matName == "" then matName = "Metal" end
+    local roughStr = fmtCanonicalFixed(partSpec.roughness or 0.35, 3)
+    local metalStr = fmtCanonicalFixed(partSpec.metalness or 0.6, 3)
+    local transpStr = fmtCanonicalFixed(partSpec.transparency or 0, 3)
+    local pbr = if type(partSpec.pbrMaterial) == "table" then partSpec.pbrMaterial else {}
+    local cmap = if isVerifiedRobloxAssetUri(pbr.colorMapAssetId or pbr.color_map_asset_id) then tostring(pbr.colorMapAssetId or pbr.color_map_asset_id) else ""
+    local nmap = if isVerifiedRobloxAssetUri(pbr.normalMapAssetId or pbr.normal_map_asset_id) then tostring(pbr.normalMapAssetId or pbr.normal_map_asset_id) else ""
+    local rmap = if isVerifiedRobloxAssetUri(pbr.roughnessMapAssetId or pbr.roughness_map_asset_id) then tostring(pbr.roughnessMapAssetId or pbr.roughness_map_asset_id) else ""
+    local mmap = if isVerifiedRobloxAssetUri(pbr.metalnessMapAssetId or pbr.metalness_map_asset_id) then tostring(pbr.metalnessMapAssetId or pbr.metalness_map_asset_id) else ""
+
+    local matTokens = {
+        FORGE_SYNC_HASH_SCHEMA_V1,
+        "mat",
+        string.format("%d,%d,%d", cr, cg, cb),
+        matName,
+        roughStr,
+        metalStr,
+        transpStr,
+        cmap,
+        nmap,
+        rmap,
+        mmap,
+    }
+    local materialHash = computeLuauContentHash(table.concat(matTokens, "|"))
+
+    local sz = if type(partSpec.size) == "table" and #partSpec.size >= 3 then partSpec.size else { 2, 2, 2 }
+    local pos = if type(partSpec.position) == "table" and #partSpec.position >= 3 then partSpec.position else { 0, 1, 0 }
+    local rotMat9: { number }
+    if type(partSpec.rotationMatrix) == "table" and #partSpec.rotationMatrix >= 9 then
+        rotMat9 = {
+            tonumber(partSpec.rotationMatrix[1]) or 1,
+            tonumber(partSpec.rotationMatrix[2]) or 0,
+            tonumber(partSpec.rotationMatrix[3]) or 0,
+            tonumber(partSpec.rotationMatrix[4]) or 0,
+            tonumber(partSpec.rotationMatrix[5]) or 1,
+            tonumber(partSpec.rotationMatrix[6]) or 0,
+            tonumber(partSpec.rotationMatrix[7]) or 0,
+            tonumber(partSpec.rotationMatrix[8]) or 0,
+            tonumber(partSpec.rotationMatrix[9]) or 1,
+        }
+    else
+        local rot = if type(partSpec.rotation) == "table" and #partSpec.rotation >= 3 then partSpec.rotation else { 0, 0, 0 }
+        rotMat9 = canonicalEulerToMatrix9(tonumber(rot[1]) or 0, tonumber(rot[2]) or 0, tonumber(rot[3]) or 0)
+    end
+
+    local sizeStr = string.format("%s,%s,%s", fmtCanonicalFixed(sz[1], 3), fmtCanonicalFixed(sz[2], 3), fmtCanonicalFixed(sz[3], 3))
+    local posStr = string.format("%s,%s,%s", fmtCanonicalFixed(pos[1], 3), fmtCanonicalFixed(pos[2], 3), fmtCanonicalFixed(pos[3], 3))
+    local rotMatFormatted: { string } = {}
+    for i = 1, 9 do
+        table.insert(rotMatFormatted, fmtCanonicalFixed(rotMat9[i], 4))
+    end
+    local rotMatStr = table.concat(rotMatFormatted, ",")
+    local anchStr = if partSpec.anchored == false then "0" else "1"
+    local collStr = if partSpec.canCollide == false then "0" else "1"
+    local cfMode = string.match(tostring(partSpec.collisionFidelity or "Hull"), "^%s*(.-)%s*$") or "Hull"
+    if cfMode == "" then cfMode = "Hull" end
+
+    local transformTokens = {
+        FORGE_SYNC_HASH_SCHEMA_V1,
+        "xform",
+        hier.hierarchyPath,
+        sizeStr,
+        posStr,
+        rotMatStr,
+        anchStr,
+        collStr,
+        cfMode,
+    }
+    local transformHash = computeLuauContentHash(table.concat(transformTokens, "|"))
+    local combinedHash = computeLuauContentHash(
+        string.format("%s|part|%s|%s|%s|%s|%s", FORGE_SYNC_HASH_SCHEMA_V1, hier.partId, hier.hierarchyPath, geometryHash, materialHash, transformHash)
+    )
+
+    return {
+        hashSchemaVersion = FORGE_SYNC_HASH_SCHEMA_V1,
+        partId = hier.partId,
+        parentId = hier.parentId,
+        parentName = hier.parentName,
+        hierarchyPath = hier.hierarchyPath,
+        geometrySource = geometrySource,
+        rotationMatrix = rotMat9,
+        geometryHash = geometryHash,
+        materialHash = materialHash,
+        transformHash = transformHash,
+        combinedHash = combinedHash,
+    }
+end
+
+-- Ensures nested Model containers exist inside rootModel for any multi-segment parentPath (e.g. "Turret/Cannon")
+local function ensureHierarchyContainer(rootModel: Model, parentPath: string?): Instance
+    if not parentPath or parentPath == "" or parentPath == "ModelRoot" or parentPath == "Root" or parentPath == rootModel.Name then
+        return rootModel
+    end
+    local current: Instance = rootModel
+    local accumPath = ""
+    for segment in string.gmatch(string.gsub(parentPath, "\\", "/"), "[^/]+") do
+        local trimmed = string.match(segment, "^%s*(.-)%s*$") or ""
+        if trimmed ~= "" and trimmed ~= "ModelRoot" and trimmed ~= "Root" and trimmed ~= rootModel.Name then
+            accumPath = if accumPath == "" then trimmed else (accumPath .. "/" .. trimmed)
+            local existing = current:FindFirstChild(trimmed)
+            if not existing or (not existing:IsA("Model") and not existing:IsA("Folder")) then
+                local container = Instance.new("Model")
+                container.Name = trimmed
+                container:SetAttribute("ForgeNodeId", "fnode_" .. string.gsub(accumPath, "[^%w_]", "_"))
+                container:SetAttribute("ForgeHierarchyPath", accumPath)
+                container.Parent = current
+                current = container
+            else
+                current = existing
+            end
+        end
+    end
+    return current
+end
+
 -- Build 3D Model from Forge3DAsset parts array in Workspace or WorldModel
-local function construct3DModelFromSpec(assetData: any, targetParent: Instance?): Model
+local function construct3DModelFromSpec(assetData: any, targetParent: Instance?, explicitOrigin: CFrame?): Model
     local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Spawn EditableMesh 3D Asset")
 
     local model = Instance.new("Model")
     model.Name = assetData.name or "Forge3DModel"
 
     local camera = Workspace.CurrentCamera
-    local spawnOrigin = if camera
+    local spawnOrigin = explicitOrigin or (if camera
         then CFrame.new(camera.CFrame.Position + (camera.CFrame.LookVector * 18))
-        else CFrame.new(0, 5, 0)
+        else CFrame.new(0, 5, 0))
+
+    -- Store the exact spawn origin CFrame and baseline snapshot SHA-256 on the Model
+    -- so serializeStudioPartsFromInstances can convert world CFrames back to model-relative space!
+    model:SetAttribute("ForgeSyncOriginCFrame", spawnOrigin)
+    model:SetAttribute("ForgeHierarchyContainersBuilt", true)
+    if type(assetData.snapshot_sha256) == "string" and #assetData.snapshot_sha256 > 0 then
+        model:SetAttribute("ForgeBaselineSnapshotSha256", assetData.snapshot_sha256)
+    end
+    pcall(function()
+        model.WorldPivot = spawnOrigin
+    end)
 
     local partsList = assetData.parts or {}
     local verifiedPartCount = 0
@@ -285,10 +691,18 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
             failedPartCount += 1
         end
 
+        local syncMeta = computePartSyncHashesLuau(partSpec, idx)
         local pos = partSpec.position or { 0, 1, 0 }
-        local rot = partSpec.rotation or { 0, 0, 0 }
-        local rotCFrame = CFrame.Angles(math.rad(rot[1] or 0), math.rad(rot[2] or 0), math.rad(rot[3] or 0))
-        part.CFrame = spawnOrigin * CFrame.new(pos[1] or 0, pos[2] or 0, pos[3] or 0) * rotCFrame
+        local rotMat = syncMeta.rotationMatrix
+        local localCF = CFrame.new(
+            tonumber(pos[1]) or 0,
+            tonumber(pos[2]) or 0,
+            tonumber(pos[3]) or 0,
+            rotMat[1], rotMat[2], rotMat[3],
+            rotMat[4], rotMat[5], rotMat[6],
+            rotMat[7], rotMat[8], rotMat[9]
+        )
+        part.CFrame = spawnOrigin * localCF
 
         local col = partSpec.color or { 160, 165, 175 }
         part.Color = Color3.fromRGB(col[1] or 160, col[2] or 165, col[3] or 175)
@@ -303,6 +717,13 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
         part.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
         part.TopSurface = Enum.SurfaceType.Smooth
         part.BottomSurface = Enum.SurfaceType.Smooth
+
+        local roughnessVal = tonumber(partSpec.roughness) or 0.35
+        local metalnessVal = tonumber(partSpec.metalness) or 0.6
+        part:SetAttribute("PBR_Roughness", roughnessVal)
+        part:SetAttribute("PBR_Metalness", metalnessVal)
+        part:SetAttribute("Roughness", roughnessVal)
+        part:SetAttribute("Metalness", metalnessVal)
 
         if isVerifiedRobloxAssetUri(partSpec.textureId) and part:IsA("MeshPart") then
             part.TextureID = partSpec.textureId
@@ -349,21 +770,40 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
         end
 
         -- Preserve stable ForgePartId, parent hierarchy, and geometry buffer for bidirectional DataModel sync
-        local resolvedPartId = tostring(
-            partSpec.partId
-            or partSpec.id
-            or string.format("forge-part-%d-%s", idx, string.lower(string.gsub(part.Name, "[^%w_]", "_")))
-        )
-        local resolvedParentName = tostring(partSpec.parentName or "Root")
-        part:SetAttribute("ForgePartId", resolvedPartId)
-        part:SetAttribute("ForgeParentName", resolvedParentName)
-        part:SetAttribute("ForgeHierarchyPath", tostring(partSpec.hierarchyPath or part.Name))
+        part:SetAttribute("ForgePartId", syncMeta.partId)
+        part:SetAttribute("ForgeParentId", syncMeta.parentId)
+        part:SetAttribute("ForgeParentName", syncMeta.parentName)
+        part:SetAttribute("ForgeHierarchyPath", syncMeta.hierarchyPath)
+        part:SetAttribute("ForgeGeometrySource", syncMeta.geometrySource)
 
         if type(partSpec.meshData) == "table" and not part:FindFirstChild("ForgeMeshGeometryJSON") then
             local okJson, encodedGeom = pcall(function()
                 return HttpService:JSONEncode({
-                    partId = resolvedPartId,
-                    parentName = resolvedParentName,
+                    hashSchemaVersion = syncMeta.hashSchemaVersion,
+                    partId = syncMeta.partId,
+                    parentId = syncMeta.parentId,
+                    parentName = syncMeta.parentName,
+                    hierarchyPath = syncMeta.hierarchyPath,
+                    geometrySource = syncMeta.geometrySource,
+                    geometryHash = syncMeta.geometryHash,
+                    materialHash = syncMeta.materialHash,
+                    transformHash = syncMeta.transformHash,
+                    publishedMeshId = if isVerifiedRobloxAssetUri(partSpec.meshId) then partSpec.meshId else nil,
+                    meshId = if isVerifiedRobloxAssetUri(partSpec.meshId) then partSpec.meshId else nil,
+                    textureId = if isVerifiedRobloxAssetUri(partSpec.textureId) then partSpec.textureId else nil,
+                    size = partSpec.size or { part.Size.X, part.Size.Y, part.Size.Z },
+                    position = { tonumber(pos[1]) or 0, tonumber(pos[2]) or 0, tonumber(pos[3]) or 0 },
+                    rotation = canonicalMatrix9ToEulerDeg(rotMat),
+                    rotationMatrix = rotMat,
+                    color = { col[1] or 160, col[2] or 165, col[3] or 175 },
+                    material = part.Material.Name,
+                    roughness = roughnessVal,
+                    metalness = metalnessVal,
+                    transparency = part.Transparency,
+                    canCollide = part.CanCollide,
+                    anchored = part.Anchored,
+                    collisionFidelity = partSpec.collisionFidelity or "Hull",
+                    pbrMaterial = partSpec.pbrMaterial,
                     vertices = partSpec.meshData.vertices or {},
                     normals = partSpec.meshData.normals or {},
                     uvs = partSpec.meshData.uvs or {},
@@ -378,7 +818,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
             end
         end
 
-        part.Parent = model
+        part.Parent = ensureHierarchyContainer(model, syncMeta.parentName)
         if idx == 1 then
             model.PrimaryPart = part
         end
@@ -409,8 +849,6 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                 return builder.ReconstructInPlace(model)
             end, debug.traceback)
             if okRun then
-                -- Handle both `(reconstructedCount: number, allVerified: boolean, expectedCount: number)`
-                -- and `(allVerified: boolean, reconstructedCount: number)` return signatures
                 local verCount = 0
                 local allVerified = false
                 local expectedCount = 0
@@ -438,10 +876,10 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
         end
     end
 
-    -- Direct plugin fallback using embedded ForgeMeshGeometryJSON StringValues
+    -- Direct plugin fallback using embedded ForgeMeshGeometryJSON StringValues across all descendants
     local verifiedParts = 0
     local failedParts = 0
-    for idx, child in ipairs(model:GetChildren()) do
+    for idx, child in ipairs(model:GetDescendants()) do
         if child:IsA("BasePart") then
             local geomVal = child:FindFirstChild("ForgeMeshGeometryJSON")
             if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
@@ -451,11 +889,13 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                 if okDec and type(parsedGeom) == "table" then
                     local newPart, isVerified, errReason = createEditableMeshPartFromSpec({
                         name = child.Name,
+                        meshId = parsedGeom.publishedMeshId or parsedGeom.meshId,
                         size = parsedGeom.size or { child.Size.X, child.Size.Y, child.Size.Z },
                         collisionFidelity = parsedGeom.collisionFidelity or "Hull",
                         meshData = parsedGeom,
                     }, idx)
                     if isVerified then
+                        local parentTarget = child.Parent or model
                         newPart.CFrame = child.CFrame
                         newPart.Color = child.Color
                         newPart.Material = child.Material
@@ -465,7 +905,7 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                         for _, subChild in ipairs(child:GetChildren()) do
                             subChild:Clone().Parent = newPart
                         end
-                        newPart.Parent = model
+                        newPart.Parent = parentTarget
                         if model.PrimaryPart == child then
                             model.PrimaryPart = newPart
                         end
@@ -550,26 +990,112 @@ local function reconstructEditableMeshModelsInStudio(): string
     )
 end
 
--- FNV-1a 32-bit hash matching backend compute_fnv1a_32_hex / computeFnv1a32Hex
-local function computeLuauContentHash(content: string): string
-    local h: number = 0x811c9dc5
-    for i = 1, #content do
-        h = bit32.bxor(h, string.byte(content, i))
-        -- Multiply by 0x01000193 modulo 2^32 using 16-bit split to avoid float precision loss
-        local lo = bit32.band(h, 0xFFFF)
-        local hi = bit32.rshift(h, 16)
-        local prodLo = lo * 0x0193
-        local prodMid = lo * 0x0100 + hi * 0x0193 + bit32.rshift(prodLo, 16)
-        h = bit32.bor(bit32.lshift(bit32.band(prodMid, 0xFFFF), 16), bit32.band(prodLo, 0xFFFF))
+-- Resolves the model-relative origin CFrame for a Studio Model so camera spawn offsets
+-- never cause false transform diffs when syncing back to Forge.
+local function resolveModelSyncOriginCFrame(rootModel: Model?, collectedParts: { BasePart }): CFrame
+    if rootModel then
+        local attrOrigin = rootModel:GetAttribute("ForgeSyncOriginCFrame")
+        if typeof(attrOrigin) == "CFrame" then
+            return attrOrigin
+        end
     end
-    return string.format("%08x", h)
+    -- If imported from .rbxmx without ForgeSyncOriginCFrame attribute, check if the first part
+    -- has saved local position/rotationMatrix in ForgeMeshGeometryJSON and infer the origin CFrame:
+    -- worldCF = originCF * savedLocalCF  =>  originCF = worldCF * savedLocalCF:Inverse()
+    for _, part in ipairs(collectedParts) do
+        local geomVal = part:FindFirstChild("ForgeMeshGeometryJSON")
+        if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
+            local okDec, decoded = pcall(function()
+                return HttpService:JSONDecode(geomVal.Value)
+            end)
+            if okDec and type(decoded) == "table" and type(decoded.position) == "table" and #decoded.position >= 3 then
+                local px = tonumber(decoded.position[1]) or 0
+                local py = tonumber(decoded.position[2]) or 0
+                local pz = tonumber(decoded.position[3]) or 0
+                local rotMat: { number }
+                if type(decoded.rotationMatrix) == "table" and #decoded.rotationMatrix >= 9 then
+                    rotMat = decoded.rotationMatrix
+                else
+                    local rot = if type(decoded.rotation) == "table" then decoded.rotation else { 0, 0, 0 }
+                    rotMat = canonicalEulerToMatrix9(tonumber(rot[1]) or 0, tonumber(rot[2]) or 0, tonumber(rot[3]) or 0)
+                end
+                local savedLocalCF = CFrame.new(
+                    px, py, pz,
+                    tonumber(rotMat[1]) or 1, tonumber(rotMat[2]) or 0, tonumber(rotMat[3]) or 0,
+                    tonumber(rotMat[4]) or 0, tonumber(rotMat[5]) or 1, tonumber(rotMat[6]) or 0,
+                    tonumber(rotMat[7]) or 0, tonumber(rotMat[8]) or 0, tonumber(rotMat[9]) or 1
+                )
+                local inferredOrigin = part.CFrame * savedLocalCF:Inverse()
+                -- If inferredOrigin is close to identity (within 1e-3), use exact identity
+                local ox, oy, oz = inferredOrigin.Position.X, inferredOrigin.Position.Y, inferredOrigin.Position.Z
+                if math.abs(ox) < 1e-3 and math.abs(oy) < 1e-3 and math.abs(oz) < 1e-3 then
+                    return CFrame.new(0, 0, 0)
+                end
+                if rootModel then
+                    rootModel:SetAttribute("ForgeSyncOriginCFrame", inferredOrigin)
+                end
+                return inferredOrigin
+            end
+        end
+    end
+    return CFrame.new(0, 0, 0)
 end
 
--- Helper to serialize BaseParts from a Studio Model or Selection with ForgePartId, hierarchy, geometry, and PBR
+-- Walks ancestor chain from `part.Parent` up to `rootModel` to build the real nested hierarchy path
+local function resolveStudioPartHierarchy(part: BasePart, rootModel: Model?, meshData: any): (string, string, string)
+    local segments: { string } = {}
+    local curr: Instance? = part.Parent
+    while curr and curr ~= Workspace and curr ~= game and curr ~= rootModel do
+        if curr:IsA("Model") or curr:IsA("Folder") then
+            if curr.Name ~= "ModelRoot" and curr.Name ~= "Root" and (not rootModel or curr.Name ~= rootModel.Name) then
+                table.insert(segments, 1, curr.Name)
+            end
+        end
+        curr = curr.Parent
+    end
+
+    local parentName = "ModelRoot"
+    if #segments > 0 then
+        parentName = table.concat(segments, "/")
+    elseif rootModel and part.Parent == rootModel then
+        local containersBuilt = rootModel:GetAttribute("ForgeHierarchyContainersBuilt") == true
+        if not containersBuilt then
+            local attrParent = part:GetAttribute("ForgeParentName")
+                or (if type(meshData) == "table" then meshData.parentName else nil)
+            if type(attrParent) == "string" and #attrParent > 0 and attrParent ~= "Root" then
+                parentName = attrParent
+            end
+        end
+    end
+
+    local hierarchyPath = parentName .. "/" .. part.Name
+    local parentClean = string.gsub(parentName, "[^%w_]", "_")
+    local parentId = if parentName == "ModelRoot" then "fnode_ModelRoot" else ("fnode_" .. parentClean)
+    return parentId, parentName, hierarchyPath
+end
+
+-- Helper to serialize BaseParts from a Studio Model or Selection with ForgePartId,
+-- model-relative CFrame & 9-component rotationMatrix, nested hierarchy, external MeshPart preservation, and PBR
 local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, rootModel: Model?): { [number]: { [string]: any } }
     local serializedParts = {}
+    local originCFrame = resolveModelSyncOriginCFrame(rootModel, collectedParts)
+
     for idx, part in ipairs(collectedParts) do
-        local rx, ry, rz = part.CFrame:ToEulerAnglesXYZ()
+        local relCF = originCFrame:ToObjectSpace(part.CFrame)
+        local px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22 = relCF:GetComponents()
+        local rotMat = {
+            tonumber(fmtCanonicalFixed(r00, 6)) or 1,
+            tonumber(fmtCanonicalFixed(r01, 6)) or 0,
+            tonumber(fmtCanonicalFixed(r02, 6)) or 0,
+            tonumber(fmtCanonicalFixed(r10, 6)) or 0,
+            tonumber(fmtCanonicalFixed(r11, 6)) or 1,
+            tonumber(fmtCanonicalFixed(r12, 6)) or 0,
+            tonumber(fmtCanonicalFixed(r20, 6)) or 0,
+            tonumber(fmtCanonicalFixed(r21, 6)) or 0,
+            tonumber(fmtCanonicalFixed(r22, 6)) or 1,
+        }
+        local eulerDeg = canonicalMatrix9ToEulerDeg(rotMat)
+
         local geomVal = part:FindFirstChild("ForgeMeshGeometryJSON")
         local meshData = nil
         if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
@@ -582,31 +1108,81 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
         end
 
         local partIdAttr = part:GetAttribute("ForgePartId")
+        local partIdVal = part:FindFirstChild("ForgePartId")
+        local cleanName = string.gsub(part.Name, "[^%w_]", "_")
         local partId = if type(partIdAttr) == "string" and #partIdAttr > 0
             then partIdAttr
+            elseif partIdVal and partIdVal:IsA("StringValue") and #partIdVal.Value > 0
+            then partIdVal.Value
             elseif type(meshData) == "table" and type(meshData.partId) == "string" and #meshData.partId > 0
             then meshData.partId
-            else string.format("forge-part-%d-%s", idx, string.lower(string.gsub(part.Name, "[^%w_]", "_")))
+            else ("fpart_" .. cleanName)
 
-        local parentName = "Root"
-        if part.Parent and part.Parent ~= Workspace then
-            if rootModel and part.Parent == rootModel then
-                local attrParent = part:GetAttribute("ForgeParentName")
-                parentName = if type(attrParent) == "string" and #attrParent > 0 then attrParent else "Root"
+        local parentId, parentName, hierarchyPath = resolveStudioPartHierarchy(part, rootModel, meshData)
+
+        -- Preserve real MeshId / TextureID and never replace external MeshParts with procedural cubes!
+        local rawMeshId = ""
+        local rawTexId = ""
+        if part:IsA("MeshPart") then
+            pcall(function()
+                rawMeshId = tostring(part.MeshId or "")
+                rawTexId = tostring(part.TextureID or "")
+            end)
+        end
+        if not isVerifiedRobloxAssetUri(rawMeshId) then
+            local attrMeshId = part:GetAttribute("PublishedMeshId")
+                or (if type(meshData) == "table" then (meshData.publishedMeshId or meshData.meshId) else nil)
+            if isVerifiedRobloxAssetUri(attrMeshId) then
+                rawMeshId = tostring(attrMeshId)
             else
-                parentName = part.Parent.Name
+                rawMeshId = ""
             end
         end
-        local hierarchyPath = if parentName ~= "Root" then (parentName .. "/" .. part.Name) else part.Name
+        if not isVerifiedRobloxAssetUri(rawTexId) then
+            local attrTexId = if type(meshData) == "table" then meshData.textureId else nil
+            if isVerifiedRobloxAssetUri(attrTexId) then
+                rawTexId = tostring(attrTexId)
+            else
+                rawTexId = ""
+            end
+        end
+
+        local hasEditableBuffers = type(meshData) == "table"
+            and type(meshData.vertices) == "table"
+            and #meshData.vertices > 0
+            and type(meshData.faces) == "table"
+            and #meshData.faces > 0
+
+        local geometrySource = "EditableMeshBuffers"
+        if hasEditableBuffers then
+            geometrySource = "EditableMeshBuffers"
+        elseif rawMeshId ~= "" then
+            geometrySource = "PublishedCloudMeshId"
+        else
+            geometrySource = "StudioExternalUnreadable"
+        end
+
+        local roughnessVal = tonumber(
+            part:GetAttribute("PBR_Roughness")
+            or part:GetAttribute("Roughness")
+            or part:GetAttribute("ForgePBRRoughness")
+            or (if type(meshData) == "table" then meshData.roughness else nil)
+        ) or 0.35
+        local metalnessVal = tonumber(
+            part:GetAttribute("PBR_Metalness")
+            or part:GetAttribute("Metalness")
+            or part:GetAttribute("ForgePBRMetalness")
+            or (if type(meshData) == "table" then meshData.metalness else nil)
+        ) or 0.6
 
         local sa = part:FindFirstChildOfClass("SurfaceAppearance")
-        local pbrSpec = nil
+        local pbrSpec = if type(meshData) == "table" and type(meshData.pbrMaterial) == "table" then meshData.pbrMaterial else nil
         if sa then
             pbrSpec = {
                 materialName = tostring(part:GetAttribute("PBR_MaterialName") or (part.Name .. "_PBR")),
                 albedoHex = string.format("#%02x%02x%02x", math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255)),
-                roughness = tonumber(part:GetAttribute("PBR_Roughness") or part:GetAttribute("ForgePBRRoughness")) or 0.35,
-                metalness = tonumber(part:GetAttribute("PBR_Metalness") or part:GetAttribute("ForgePBRMetalness")) or 0.65,
+                roughness = roughnessVal,
+                metalness = metalnessVal,
                 colorMapId = if isVerifiedRobloxAssetUri(sa.ColorMap) then sa.ColorMap else nil,
                 normalMapId = if isVerifiedRobloxAssetUri(sa.NormalMap) then sa.NormalMap else nil,
                 roughnessMapId = if isVerifiedRobloxAssetUri(sa.RoughnessMap) then sa.RoughnessMap else nil,
@@ -618,28 +1194,68 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
             }
         end
 
-        table.insert(serializedParts, {
+        local entry: { [string]: any } = {
             partId = partId,
+            parentId = parentId,
             name = part.Name,
             parentName = parentName,
             hierarchyPath = hierarchyPath,
             shape = "MeshPart",
-            size = { part.Size.X, part.Size.Y, part.Size.Z },
-            position = { part.Position.X, part.Position.Y, part.Position.Z },
-            rotation = { math.deg(rx), math.deg(ry), math.deg(rz) },
-            color = { math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255) },
+            meshId = if rawMeshId ~= "" then rawMeshId else nil,
+            assetId = if rawMeshId ~= "" then rawMeshId else nil,
+            textureId = if rawTexId ~= "" then rawTexId else nil,
+            geometrySource = geometrySource,
+            size = {
+                tonumber(fmtCanonicalFixed(part.Size.X, 3)) or 2,
+                tonumber(fmtCanonicalFixed(part.Size.Y, 3)) or 2,
+                tonumber(fmtCanonicalFixed(part.Size.Z, 3)) or 2,
+            },
+            position = {
+                tonumber(fmtCanonicalFixed(px, 3)) or 0,
+                tonumber(fmtCanonicalFixed(py, 3)) or 1,
+                tonumber(fmtCanonicalFixed(pz, 3)) or 0,
+            },
+            rotation = eulerDeg,
+            rotationMatrix = rotMat,
+            color = {
+                math.clamp(math.floor(part.Color.R * 255 + 0.5), 0, 255),
+                math.clamp(math.floor(part.Color.G * 255 + 0.5), 0, 255),
+                math.clamp(math.floor(part.Color.B * 255 + 0.5), 0, 255),
+            },
             material = part.Material.Name,
-            roughness = tonumber(part:GetAttribute("PBR_Roughness") or part:GetAttribute("ForgePBRRoughness")) or 0.35,
-            metalness = tonumber(part:GetAttribute("PBR_Metalness") or part:GetAttribute("ForgePBRMetalness")) or 0.65,
-            transparency = part.Transparency,
+            roughness = roughnessVal,
+            metalness = metalnessVal,
+            transparency = tonumber(fmtCanonicalFixed(part.Transparency, 3)) or 0,
             canCollide = part.CanCollide,
             anchored = part.Anchored,
             collisionFidelity = if part:IsA("MeshPart") then part.CollisionFidelity.Name else "Hull",
-            meshData = meshData,
+            meshData = if hasEditableBuffers then meshData else nil,
             pbrMaterial = pbrSpec,
-        })
+        }
+
+        local syncHashes = computePartSyncHashesLuau(entry, idx)
+        entry.hashSchemaVersion = syncHashes.hashSchemaVersion
+        entry.geometryHash = syncHashes.geometryHash
+        entry.materialHash = syncHashes.materialHash
+        entry.transformHash = syncHashes.transformHash
+        entry.combinedHash = syncHashes.combinedHash
+
+        table.insert(serializedParts, entry)
     end
     return serializedParts
+end
+
+-- Finds the top-level root Model in Workspace for any nested BasePart or sub-Model
+local function findRootForgeModel(inst: Instance): Model?
+    local topModel: Model? = if inst:IsA("Model") then inst else nil
+    local curr = inst.Parent
+    while curr and curr ~= Workspace and curr ~= game do
+        if curr:IsA("Model") then
+            topModel = curr
+        end
+        curr = curr.Parent
+    end
+    return topModel
 end
 
 -- Verify Rojo Sync Manifest AND live 3D DataModel (geometry, transforms, hierarchies, materials) against Forge
@@ -696,11 +1312,8 @@ local function verifyRojoSyncInStudio(): (number, number, string)
     local dmSummary = ""
     local targetModel: Model? = nil
     for _, sel in ipairs(Selection:Get()) do
-        if sel:IsA("Model") then
-            targetModel = sel
-            break
-        elseif sel:IsA("BasePart") and sel.Parent and sel.Parent:IsA("Model") and sel.Parent ~= Workspace then
-            targetModel = sel.Parent
+        targetModel = findRootForgeModel(sel)
+        if targetModel then
             break
         end
     end
@@ -721,20 +1334,24 @@ local function verifyRojoSyncInStudio(): (number, number, string)
             end
         end
         local serialized = serializeStudioPartsFromInstances(modelParts, targetModel)
+        local baselineSha = targetModel:GetAttribute("ForgeBaselineSnapshotSha256")
         local okDiff, diffResp = requestBackend("/api/v1/assets/compare-datamodel", "POST", {
             model_name = targetModel.Name,
             parts = serialized,
+            sync_scope = "full_model",
+            baseline_snapshot_sha256 = if type(baselineSha) == "string" then baselineSha else nil,
         })
         if okDiff and type(diffResp) == "table" and type(diffResp.diff) == "table" then
             local d = diffResp.diff
             local modCount = if type(d.modified_parts) == "table" then #d.modified_parts else 0
             local addCount = if type(d.added_in_studio) == "table" then #d.added_in_studio else 0
             local remCount = if type(d.removed_in_studio) == "table" then #d.removed_in_studio else 0
-            if d.in_sync then
+            if d.in_sync or d.inSync then
                 dmSummary = string.format(
-                    "\nDataModel 3D '%s': ✅ 100%% en sincronía (%d MeshParts verificados en geometría, transformaciones, jerarquía y PBR).",
+                    "\nDataModel 3D '%s': ✅ 100%% en sincronía (%d MeshParts verificados en geometría, transformaciones relativas, jerarquía y PBR, esquema %s).",
                     targetModel.Name,
-                    tonumber(d.unchanged_count) or #serialized
+                    tonumber(d.unchanged_count or d.matchingPartsCount) or #serialized,
+                    tostring(d.hashSchemaVersion or FORGE_SYNC_HASH_SCHEMA_V1)
                 )
             else
                 dmSummary = string.format(
@@ -810,21 +1427,28 @@ local function pushSelectedModelToForgeStudio(): string
     end
 
     local targetModel: Model? = nil
+    local selectedRootModelDirectly = false
     local collectedParts: { BasePart } = {}
+    local seenParts: { [BasePart]: boolean } = {}
 
     for _, inst in ipairs(selected) do
-        if inst:IsA("Model") and not targetModel then
-            targetModel = inst
+        local rootCandidate = findRootForgeModel(inst)
+        if rootCandidate and not targetModel then
+            targetModel = rootCandidate
+        end
+        if inst:IsA("Model") then
+            if inst == targetModel then
+                selectedRootModelDirectly = true
+            end
             for _, child in ipairs(inst:GetDescendants()) do
-                if child:IsA("BasePart") then
+                if child:IsA("BasePart") and not seenParts[child] then
+                    seenParts[child] = true
                     table.insert(collectedParts, child)
                 end
             end
-        elseif inst:IsA("BasePart") then
+        elseif inst:IsA("BasePart") and not seenParts[inst] then
+            seenParts[inst] = true
             table.insert(collectedParts, inst)
-            if not targetModel and inst.Parent and inst.Parent:IsA("Model") and inst.Parent ~= Workspace then
-                targetModel = inst.Parent
-            end
         end
     end
 
@@ -833,22 +1457,36 @@ local function pushSelectedModelToForgeStudio(): string
     end
 
     local modelName = if targetModel then targetModel.Name else "StudioSyncedModel"
+    local syncScope = if selectedRootModelDirectly then "full_model" else "selection"
     local serializedParts = serializeStudioPartsFromInstances(collectedParts, targetModel)
+    local baselineSha = if targetModel then targetModel:GetAttribute("ForgeBaselineSnapshotSha256") else nil
 
     local ok, resp = requestBackend("/api/v1/assets/studio-push", "POST", {
         model_name = modelName,
         parts = serializedParts,
-        remove_missing = false,
+        sync_scope = syncScope,
+        remove_missing = (syncScope == "full_model"),
+        conflict_policy = "smart_merge",
+        baseline_snapshot_sha256 = if type(baselineSha) == "string" then baselineSha else nil,
     })
 
     if not ok then
         return "Error en Push Incremental hacia Forge: " .. tostring(resp)
     end
 
+    if targetModel and type(resp.asset) == "table" and type(resp.asset.snapshot_sha256) == "string" then
+        targetModel:SetAttribute("ForgeBaselineSnapshotSha256", resp.asset.snapshot_sha256)
+    end
+
     local diffInfo = ""
     if type(resp.sync_diff) == "table" then
         local modCount = if type(resp.sync_diff.modified_parts) == "table" then #resp.sync_diff.modified_parts else 0
-        diffInfo = string.format(" | Diff: %d modificadas, %d sin cambios", modCount, tonumber(resp.sync_diff.unchanged_count) or 0)
+        diffInfo = string.format(
+            " | Scope: %s | Diff: %d modificadas, %d sin cambios",
+            syncScope,
+            modCount,
+            tonumber(resp.sync_diff.unchanged_count or resp.sync_diff.matchingPartsCount) or 0
+        )
     end
 
     return string.format(

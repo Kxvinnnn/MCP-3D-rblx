@@ -19,9 +19,64 @@ import time
 import xml.etree.ElementTree as ET
 import xml.sax.saxutils as saxutils
 from typing import Any, Callable, Dict, Generator, List, Literal, Optional, Tuple
-from pydantic import BaseModel, Field, field_validator
-from google import genai
-from google.genai import types
+
+try:
+    from pydantic import BaseModel, Field, field_validator
+except ImportError:
+    class _FieldDefault:
+        def __init__(self, default: Any = None, default_factory: Optional[Callable[[], Any]] = None, **kwargs: Any):
+            self.default = default
+            self.default_factory = default_factory
+
+    def Field(default: Any = None, default_factory: Optional[Callable[[], Any]] = None, **kwargs: Any) -> Any:
+        return _FieldDefault(default=default, default_factory=default_factory, **kwargs)
+
+    def field_validator(*fields: str, **kwargs: Any) -> Callable[[Any], Any]:
+        def _decorator(fn: Any) -> Any:
+            return fn
+        return _decorator
+
+    class BaseModel:
+        def __init__(self, **kwargs: Any):
+            cls = self.__class__
+            annotations = getattr(cls, "__annotations__", {})
+            for name in annotations:
+                val = getattr(cls, name, None)
+                if isinstance(val, _FieldDefault):
+                    if val.default_factory is not None:
+                        setattr(self, name, val.default_factory())
+                    else:
+                        setattr(self, name, val.default)
+                elif not callable(val):
+                    setattr(self, name, val)
+            for k, v in kwargs.items():
+                if k == "meshData" and isinstance(v, dict):
+                    v = SubMeshGeometrySpec(**v)
+                elif k == "pbr_profile" and isinstance(v, dict):
+                    v = PBRProfileSpec(**v)
+                elif k == "parts" and isinstance(v, list):
+                    v = [MeshPart3DSpec(**x) if isinstance(x, dict) else x for x in v]
+                setattr(self, k, v)
+            if hasattr(self, "_coerce_non_block_shape"):
+                self.shape = self._coerce_non_block_shape(getattr(self, "shape", "MeshPart"))
+
+        def model_dump(self) -> Dict[str, Any]:
+            out: Dict[str, Any] = {}
+            for k, v in self.__dict__.items():
+                if isinstance(v, BaseModel):
+                    out[k] = v.model_dump()
+                elif isinstance(v, list):
+                    out[k] = [x.model_dump() if isinstance(x, BaseModel) else x for x in v]
+                else:
+                    out[k] = v
+            return out
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None  # type: ignore
+    types = None  # type: ignore
 
 
 ROBLOX_MAX_VERTICES_PER_SUBMESH = 9000
@@ -111,6 +166,10 @@ class SubMeshGeometrySpec(BaseModel):
     assetId: Optional[str] = Field(
         default=None,
         description="Optional published Roblox AssetId reference if uploaded to Roblox Cloud",
+    )
+    geometrySource: Optional[str] = Field(
+        default=None,
+        description="Origin of geometry ('EditableMeshBuffers', 'PublishedCloudMeshId', or 'StudioExternalUnreadable')",
     )
 
 
@@ -344,12 +403,32 @@ def extract_mesh_geometry_from_processed_submesh(
             parsed_obj.assetId = valid_id or None
             return parsed_obj
 
+    valid_id = validate_published_roblox_mesh_id(raw_mesh_id or raw_asset_id)
+    raw_geom_source = str(
+        sub_mesh.get("geometrySource")
+        or sub_mesh.get("geometry_source")
+        or (mesh_data.get("geometrySource") if isinstance(mesh_data, dict) else "")
+        or ""
+    ).strip()
+    if valid_id or raw_geom_source in ("PublishedCloudMeshId", "StudioExternalUnreadable"):
+        return SubMeshGeometrySpec(
+            vertices=[],
+            normals=[],
+            uvs=[],
+            faces=[],
+            indices=[],
+            objFileName=obj_file,
+            meshId=valid_id or None,
+            assetId=valid_id or None,
+            geometrySource="PublishedCloudMeshId" if valid_id else (raw_geom_source or "StudioExternalUnreadable"),
+        )
+
     stud_size = sub_mesh.get("studSize") or sub_mesh.get("size") or [2.0, 2.0, 2.0]
     synth = synthesize_procedural_mesh_data(sub_mesh.get("shape", "MeshPart"), stud_size)
-    valid_id = validate_published_roblox_mesh_id(raw_mesh_id or raw_asset_id)
     synth.objFileName = obj_file
     synth.meshId = valid_id or None
     synth.assetId = valid_id or None
+    synth.geometrySource = "EditableMeshBuffers"
     return synth
 
 
@@ -548,6 +627,10 @@ def synthesize_procedural_mesh_data(shape: str = "MeshPart", size: Optional[List
 
 
 class MeshPart3DSpec(BaseModel):
+    partId: Optional[str] = Field(default=None, description="Stable ForgePartId identifier")
+    parentId: Optional[str] = Field(default=None, description="Stable ForgeParentId identifier")
+    parentName: Optional[str] = Field(default="ModelRoot", description="Parent container name or path")
+    hierarchyPath: Optional[str] = Field(default=None, description="Full canonical hierarchy path")
     name: str = Field(description="Sub-part name in PascalCase")
     shape: Literal["MeshPart", "Cylinder", "Ball", "Wedge", "CornerWedge"] = Field(
         default="MeshPart",
@@ -565,6 +648,10 @@ class MeshPart3DSpec(BaseModel):
         default=None,
         description="Optional published Roblox TextureID URI reference (rbxassetid://<published_id>)",
     )
+    geometrySource: Optional[str] = Field(
+        default=None,
+        description="Origin of geometry ('EditableMeshBuffers', 'PublishedCloudMeshId', or 'StudioExternalUnreadable')",
+    )
     size: List[float] = Field(
         default_factory=lambda: [2.0, 2.0, 2.0],
         description="[X, Y, Z] bounding box reference in Studs",
@@ -573,6 +660,10 @@ class MeshPart3DSpec(BaseModel):
     rotation: List[float] = Field(
         default_factory=lambda: [0.0, 0.0, 0.0],
         description="[RX, RY, RZ] Euler rotation in degrees",
+    )
+    rotationMatrix: Optional[List[float]] = Field(
+        default=None,
+        description="Optional 9-component 3x3 rotation matrix [r00..r22]",
     )
     color: List[int] = Field(description="[R, G, B] 0-255 color")
     material: str = Field(default="Metal", description="Roblox Enum.Material name")
@@ -590,6 +681,9 @@ class MeshPart3DSpec(BaseModel):
         default=None,
         description="Real extracted vertex/normal/UV/triangle index buffers for MeshPart",
     )
+    geometryHash: Optional[str] = Field(default=None)
+    materialHash: Optional[str] = Field(default=None)
+    transformHash: Optional[str] = Field(default=None)
 
     @field_validator("shape", mode="before")
     @classmethod
@@ -949,22 +1043,55 @@ class Generation3DEngine:
         Ensures every sub-part carries extracted vertex/normal/UV/face index buffers,
         uses `shape = 'MeshPart'`, and automatically splits oversized meshes into sub-meshes
         without truncating vertices or triangles or inventing fake `MeshId`s.
+        CRITICAL: Never overwrites external MeshParts (`published_mesh_id` or `geometrySource` in
+        `("PublishedCloudMeshId", "StudioExternalUnreadable")`) with procedural cube geometry!
         """
         safe_model = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
         enriched: List[MeshPart3DSpec] = []
         for idx, part in enumerate(parts):
             part_name = part.name or f"MeshPart_{idx + 1}"
+            published_mesh_id = validate_published_roblox_mesh_id(
+                part.meshId
+                or part.assetId
+                or (part.meshData.meshId if part.meshData else None)
+                or (part.meshData.assetId if part.meshData else None)
+            )
+            raw_geom_source = str(
+                part.geometrySource
+                or (part.meshData.geometrySource if part.meshData else "")
+                or ""
+            ).strip()
+            is_external_mesh = bool(
+                published_mesh_id
+                or raw_geom_source in ("PublishedCloudMeshId", "StudioExternalUnreadable")
+            )
+
             if not part.meshData or len(part.meshData.vertices) == 0 or len(part.meshData.faces) == 0:
-                part.meshData = synthesize_procedural_mesh_data(part.shape, part.size)
-            elif not part.meshData.indices:
-                part.meshData.indices = [i for tri in part.meshData.faces for i in tri]
+                if is_external_mesh:
+                    part.meshData = SubMeshGeometrySpec(
+                        vertices=[],
+                        normals=[],
+                        uvs=[],
+                        faces=[],
+                        indices=[],
+                        objFileName=f"{safe_model}.obj",
+                        meshId=published_mesh_id or None,
+                        assetId=published_mesh_id or None,
+                        geometrySource="PublishedCloudMeshId" if published_mesh_id else (raw_geom_source or "StudioExternalUnreadable"),
+                    )
+                    part.geometrySource = part.meshData.geometrySource
+                else:
+                    part.meshData = synthesize_procedural_mesh_data(part.shape, part.size)
+                    part.meshData.geometrySource = "EditableMeshBuffers"
+                    part.geometrySource = "EditableMeshBuffers"
+            else:
+                if not part.meshData.indices:
+                    part.meshData.indices = [i for tri in part.meshData.faces for i in tri]
+                part.meshData.geometrySource = "EditableMeshBuffers"
+                part.geometrySource = "EditableMeshBuffers"
 
             obj_file = part.meshData.objFileName or f"{safe_model}.obj"
             part.meshData.objFileName = obj_file
-
-            published_mesh_id = validate_published_roblox_mesh_id(
-                part.meshId or part.assetId or part.meshData.meshId or part.meshData.assetId
-            )
 
             part.name = part_name
             part.shape = "MeshPart"
@@ -985,7 +1112,7 @@ class Generation3DEngine:
         - Detects when `AssetService:CreateEditableMesh()` returns `nil`.
         - Verifies that all expected triangles were created (`#editableMesh:GetTriangles() == expectedTriCount`).
         - Frees `editableMesh:Destroy()` immediately after `CreateMeshPartAsync` to prevent memory leaks.
-        - Logs exact failure causes via `warn(...)` and records `ForgeReconstructionError`.
+        - Records `ForgeSyncOriginCFrame` on `model` and constructs real nested `Model` hierarchy containers.
         - Never marks `ForgeReconstructionVerified = true` if an empty fallback `MeshPart` was produced.
         """
         safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "GeneratedMeshModel"
@@ -1023,6 +1150,31 @@ class Generation3DEngine:
             "        return false",
             "    end",
             '    return string.match(uri, "^rbxassetid://[1-9]%d*$") ~= nil or string.match(uri, "^rbxasset://.+") ~= nil',
+            "end",
+            "",
+            "local function ensureHierarchyContainer(rootModel: Model, parentPath: string?): Instance",
+            '    if not parentPath or parentPath == "" or parentPath == "ModelRoot" or parentPath == rootModel.Name then',
+            "        return rootModel",
+            "    end",
+            "    local current: Instance = rootModel",
+            '    local accumPath = ""',
+            '    for segment in string.gmatch(parentPath, "[^/\\\\]+") do',
+            '        if segment ~= "" and segment ~= "ModelRoot" and segment ~= rootModel.Name then',
+            '            accumPath = if accumPath == "" then segment else (accumPath .. "/" .. segment)',
+            "            local existing = current:FindFirstChild(segment)",
+            '            if not existing or (not existing:IsA("Model") and not existing:IsA("Folder")) then',
+            '                local container = Instance.new("Model")',
+            "                container.Name = segment",
+            '                container:SetAttribute("ForgeNodeId", "fnode_" .. string.gsub(accumPath, "[^%w_]", "_"))',
+            '                container:SetAttribute("ForgeHierarchyPath", accumPath)',
+            "                container.Parent = current",
+            "                current = container",
+            "            else",
+            "                current = existing",
+            "            end",
+            "        end",
+            "    end",
+            "    return current",
             "end",
             "",
             "local function createEditableMeshPartFromBuffers(desc: MeshPartDescriptor): (MeshPart, boolean, string?)",
@@ -1175,6 +1327,7 @@ class Generation3DEngine:
             "    local baseOrigin = origin or CFrame.new(0, 0, 0)",
             '    local model = Instance.new("Model")',
             f'    model.Name = "{safe_name}"',
+            '    model:SetAttribute("ForgeSyncOriginCFrame", baseOrigin)',
             "    local rootMeshPart: MeshPart? = nil",
             "    local verifiedPartCount = 0",
             f"    local totalExpectedParts = {len(parts)}",
@@ -1189,8 +1342,22 @@ class Generation3DEngine:
             var_name = f"meshPart_{idx + 1}"
             ok_var = f"isVerified_{idx + 1}"
             cf_mode = p.collisionFidelity or collision_fidelity or "Hull"
+            clean_name = "".join(c if (c.isalnum() or c == "_") else "_" for c in (p.name or f"MeshPart_{idx + 1}"))
+            part_id_str = (p.partId or "").strip() or f"fpart_{clean_name}"
+            parent_name_str = (p.parentName or "ModelRoot").strip() or "ModelRoot"
+            parent_clean = "".join(c if (c.isalnum() or c == "_") else "_" for c in parent_name_str)
+            parent_id_str = (p.parentId or "").strip() or ("fnode_ModelRoot" if parent_name_str == "ModelRoot" else f"fnode_{parent_clean}")
+            hierarchy_path_str = (p.hierarchyPath or "").strip() or f"{parent_name_str}/{p.name}"
 
-            mesh_data = p.meshData or synthesize_procedural_mesh_data(p.shape, [sx, sy, sz])
+            published_mesh_id = validate_published_roblox_mesh_id(p.meshId or (p.meshData.meshId if p.meshData else None))
+            published_tex_id = validate_published_roblox_mesh_id(p.textureId)
+            has_buffers = bool(p.meshData and len(p.meshData.vertices) > 0 and len(p.meshData.faces) > 0)
+            if has_buffers:
+                mesh_data = p.meshData  # type: ignore
+            elif published_mesh_id or p.geometrySource in ("PublishedCloudMeshId", "StudioExternalUnreadable"):
+                mesh_data = SubMeshGeometrySpec(vertices=[], normals=[], uvs=[], faces=[], indices=[], objFileName=f"{safe_name}.obj")
+            else:
+                mesh_data = synthesize_procedural_mesh_data(p.shape, [sx, sy, sz])
             vert_count = len(mesh_data.vertices)
 
             v_items = [
@@ -1214,8 +1381,6 @@ class Generation3DEngine:
             flat_index_items = [str(idx_val) for tri in valid_faces for idx_val in tri]
 
             obj_file = mesh_data.objFileName or f"{safe_name}.obj"
-            published_mesh_id = validate_published_roblox_mesh_id(p.meshId or mesh_data.meshId)
-            published_tex_id = validate_published_roblox_mesh_id(p.textureId)
 
             lines.extend([
                 f"    -- Sub-MeshPart #{idx + 1}: {p.name} ({len(v_items)} verts, {len(f_items)} tris)",
@@ -1233,16 +1398,20 @@ class Generation3DEngine:
                 f"        Faces = {{{', '.join(f_items)}}},",
                 "    })",
                 f"    if {ok_var} then verifiedPartCount += 1 end",
-                f"    {var_name}.CFrame = baseOrigin * CFrame.new({px:.2f}, {py:.2f}, {pz:.2f}) * CFrame.Angles(math.rad({rx:.1f}), math.rad({ry:.1f}), math.rad({rz:.1f}))",
+                f"    {var_name}.CFrame = baseOrigin * CFrame.new({px:.4f}, {py:.4f}, {pz:.4f}) * CFrame.Angles(math.rad({rx:.2f}), math.rad({ry:.2f}), math.rad({rz:.2f}))",
                 f"    {var_name}.Color = Color3.fromRGB({int(cr)}, {int(cg)}, {int(cb)})",
                 f"    {var_name}.Material = Enum.Material.{p.material if p.material else 'Metal'}",
                 f"    {var_name}.Transparency = {p.transparency:.2f}",
                 f"    {var_name}.Anchored = {'true' if p.anchored else 'false'}",
                 f"    {var_name}.CanCollide = {'true' if p.canCollide else 'false'}",
+                f'    {var_name}:SetAttribute("ForgePartId", "{part_id_str}")',
+                f'    {var_name}:SetAttribute("ForgeParentId", "{parent_id_str}")',
+                f'    {var_name}:SetAttribute("ForgeParentName", "{parent_name_str}")',
+                f'    {var_name}:SetAttribute("ForgeHierarchyPath", "{hierarchy_path_str}")',
                 f'    {var_name}:SetAttribute("CollisionFidelity", "{cf_mode}")',
                 f'    {var_name}:SetAttribute("Roughness", {p.roughness:.2f})',
                 f'    {var_name}:SetAttribute("Metalness", {p.metalness:.2f})',
-                f"    {var_name}.Parent = model",
+                f'    {var_name}.Parent = ensureHierarchyContainer(model, "{parent_name_str}")',
             ])
             if idx == 0:
                 lines.extend([
@@ -1277,7 +1446,7 @@ class Generation3DEngine:
             "    local reconstructedCount = 0",
             "    local expectedCount = 0",
             "    local rootPart: MeshPart? = nil",
-            "    for _, child in ipairs(targetModel:GetChildren()) do",
+            "    for _, child in ipairs(targetModel:GetDescendants()) do",
             '        if child:IsA("BasePart") then',
             '            local geomVal = child:FindFirstChild("ForgeMeshGeometryJSON")',
             '            if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then',
@@ -1309,6 +1478,7 @@ class Generation3DEngine:
             "                        Faces = facesOneBased,",
             "                    })",
             "                    if isVerified then",
+            "                        local parentTarget = child.Parent or targetModel",
             "                        newPart.CFrame = child.CFrame",
             "                        newPart.Color = child.Color",
             "                        newPart.Material = child.Material",
@@ -1318,7 +1488,7 @@ class Generation3DEngine:
             "                        for _, subChild in ipairs(child:GetChildren()) do",
             "                            subChild:Clone().Parent = newPart",
             "                        end",
-            "                        newPart.Parent = targetModel",
+            "                        newPart.Parent = parentTarget",
             "                        if targetModel.PrimaryPart == child or not rootPart then",
             "                            rootPart = newPart",
             "                            targetModel.PrimaryPart = newPart",
@@ -1356,12 +1526,14 @@ class Generation3DEngine:
     ) -> str:
         """
         Autonomously builds a native Roblox Studio `.rbxmx` XML Model file containing:
-        - `<Item class="Model">` with `<Item class="MeshPart">` children (never inventing fake MeshIds)
+        - `<Item class="Model">` with real nested `<Item class="Model">` hierarchy containers
+        - `<Item class="MeshPart">` children (never inventing fake MeshIds or overwriting external MeshParts)
         - `<Item class="SurfaceAppearance">` with 4-channel PBR maps (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`)
-        - `<Item class="StringValue" name="ForgeMeshGeometryJSON">` containing full buffers, transform, and PBR metadata
+        - `<Item class="StringValue" name="ForgePartId" | "ForgeParentId" | "ForgeParentName" | "ForgeHierarchyPath" | "ForgeMeshGeometryJSON">`
         - `<Item class="ModuleScript" name="ForgeStudioReconstructor">`
         - `<Item class="Script" name="ForgeAutoReconstructRunner">` for Play/Run mode + Plugin Edit-Mode hook support.
         """
+        from engines.asset_engine import AssetEngine
         safe_name = "".join(c for c in model_name if c.isalnum() or c == "_") or "ForgeModel3D"
         parts = self.ensure_mesh_data_on_parts(safe_name, parts)
         luau_reconstructor = luau_code or self.build_luau_from_parts(safe_name, parts, collision_fidelity)
@@ -1397,7 +1569,7 @@ class Generation3DEngine:
             "    </Properties>",
         ]
 
-        for idx, part in enumerate(parts):
+        def render_mesh_part_xml(part: MeshPart3DSpec, idx: int, indent: str = "    ") -> List[str]:
             ref_id = f"RBX_PART_{idx + 1}"
             part_name = part.name or f"MeshPart_{idx + 1}"
             sx, sy, sz = (part.size + [2.0, 2.0, 2.0])[:3]
@@ -1405,7 +1577,11 @@ class Generation3DEngine:
             rx, ry, rz = (part.rotation + [0.0, 0.0, 0.0])[:3]
             cr, cg, cb = (part.color + [160, 170, 185])[:3]
 
-            r00, r01, r02, r10, r11, r12, r20, r21, r22 = _euler_deg_to_rotation_matrix(rx, ry, rz)
+            part_dict = part.model_dump() if hasattr(part, "model_dump") else part.__dict__
+            sync_meta = AssetEngine.compute_part_sync_hashes(part_dict, idx)
+            rot_mat = sync_meta["rotationMatrix"]
+            r00, r01, r02, r10, r11, r12, r20, r21, r22 = rot_mat[:9]
+
             color_uint8 = (
                 (0xFF << 24)
                 | ((max(0, min(255, int(cr))) & 0xFF) << 16)
@@ -1413,8 +1589,17 @@ class Generation3DEngine:
                 | (max(0, min(255, int(cb))) & 0xFF)
             )
             mat_token = ROBLOX_MATERIAL_ENUM_TOKENS.get(part.material or "Metal", 1088)
-            mesh_data = part.meshData or synthesize_procedural_mesh_data(part.shape, [sx, sy, sz])
-            published_mesh_id = validate_published_roblox_mesh_id(part.meshId or mesh_data.meshId)
+            published_mesh_id = validate_published_roblox_mesh_id(
+                part.meshId or (part.meshData.meshId if part.meshData else None)
+            )
+            published_tex_id = validate_published_roblox_mesh_id(part.textureId)
+            has_buffers = bool(part.meshData and len(part.meshData.vertices) > 0 and len(part.meshData.faces) > 0)
+            if has_buffers:
+                mesh_data = part.meshData  # type: ignore
+            elif published_mesh_id or sync_meta["geometrySource"] in ("PublishedCloudMeshId", "StudioExternalUnreadable"):
+                mesh_data = SubMeshGeometrySpec(vertices=[], normals=[], uvs=[], faces=[], indices=[])
+            else:
+                mesh_data = synthesize_procedural_mesh_data(part.shape, [sx, sy, sz])
 
             pbr_dict = part.pbrMaterial if isinstance(part.pbrMaterial, dict) else {}
             valid_color_map = validate_published_roblox_mesh_id(
@@ -1431,11 +1616,23 @@ class Generation3DEngine:
             )
 
             geom_payload = json.dumps({
+                "hashSchemaVersion": sync_meta["hashSchemaVersion"],
+                "partId": sync_meta["partId"],
+                "parentId": sync_meta["parentId"],
+                "parentName": sync_meta["parentName"],
+                "hierarchyPath": sync_meta["hierarchyPath"],
+                "geometrySource": sync_meta["geometrySource"],
+                "geometryHash": sync_meta["geometryHash"],
+                "materialHash": sync_meta["materialHash"],
+                "transformHash": sync_meta["transformHash"],
                 "shape": "MeshPart",
                 "publishedMeshId": published_mesh_id,
+                "meshId": published_mesh_id,
+                "textureId": published_tex_id,
                 "size": [round(sx, 4), round(sy, 4), round(sz, 4)],
                 "position": [round(px, 4), round(py, 4), round(pz, 4)],
                 "rotation": [round(rx, 2), round(ry, 2), round(rz, 2)],
+                "rotationMatrix": rot_mat,
                 "color": [int(cr), int(cg), int(cb)],
                 "material": part.material or "Metal",
                 "roughness": part.roughness,
@@ -1455,6 +1652,11 @@ class Generation3DEngine:
                 f'<Content name="MeshId"><url>{saxutils.escape(published_mesh_id)}</url></Content>'
                 if published_mesh_id
                 else '<Content name="MeshId"><null></null></Content>'
+            )
+            tex_id_xml = (
+                f'<Content name="TextureID"><url>{saxutils.escape(published_tex_id)}</url></Content>'
+                if published_tex_id
+                else '<Content name="TextureID"><null></null></Content>'
             )
             color_map_xml = (
                 f'<Content name="ColorMap"><url>{saxutils.escape(valid_color_map)}</url></Content>'
@@ -1477,48 +1679,138 @@ class Generation3DEngine:
                 else '<Content name="MetalnessMap"><null></null></Content>'
             )
 
-            lines.extend([
-                f'    <Item class="MeshPart" referent="{ref_id}">',
-                "      <Properties>",
-                f'        <string name="Name">{saxutils.escape(part_name)}</string>',
-                f'        <bool name="Anchored">{"true" if part.anchored else "false"}</bool>',
-                f'        <bool name="CanCollide">{"true" if part.canCollide else "false"}</bool>',
-                f'        <float name="Transparency">{part.transparency:.3f}</float>',
-                f'        <token name="Material">{mat_token}</token>',
-                f'        <Color3uint8 name="Color3uint8">{color_uint8}</Color3uint8>',
-                f"        {mesh_id_xml}",
-                '        <Vector3 name="size">',
-                f"          <X>{sx:.4f}</X>",
-                f"          <Y>{sy:.4f}</Y>",
-                f"          <Z>{sz:.4f}</Z>",
-                "        </Vector3>",
-                '        <CoordinateFrame name="CFrame">',
-                f"          <X>{px:.4f}</X>",
-                f"          <Y>{py:.4f}</Y>",
-                f"          <Z>{pz:.4f}</Z>",
-                f"          <R00>{r00:.6f}</R00><R01>{r01:.6f}</R01><R02>{r02:.6f}</R02>",
-                f"          <R10>{r10:.6f}</R10><R11>{r11:.6f}</R11><R12>{r12:.6f}</R12>",
-                f"          <R20>{r20:.6f}</R20><R21>{r21:.6f}</R21><R22>{r22:.6f}</R22>",
-                "        </CoordinateFrame>",
-                "      </Properties>",
-                f'      <Item class="SurfaceAppearance" referent="{ref_id}_PBR">',
-                "        <Properties>",
-                f'          <string name="Name">{saxutils.escape(part_name)}_SurfaceAppearance</string>',
-                '          <token name="AlphaMode">0</token>',
-                f"          {color_map_xml}",
-                f"          {normal_map_xml}",
-                f"          {rough_map_xml}",
-                f"          {metal_map_xml}",
-                "        </Properties>",
-                "      </Item>",
-                f'      <Item class="StringValue" referent="{ref_id}_GEOM">',
-                "        <Properties>",
-                '          <string name="Name">ForgeMeshGeometryJSON</string>',
-                f'          <string name="Value">{saxutils.escape(geom_payload)}</string>',
-                "        </Properties>",
-                "      </Item>",
-                "    </Item>",
-            ])
+            return [
+                f'{indent}<Item class="MeshPart" referent="{ref_id}">',
+                f"{indent}  <Properties>",
+                f'{indent}    <string name="Name">{saxutils.escape(part_name)}</string>',
+                f'{indent}    <bool name="Anchored">{"true" if part.anchored else "false"}</bool>',
+                f'{indent}    <bool name="CanCollide">{"true" if part.canCollide else "false"}</bool>',
+                f'{indent}    <float name="Transparency">{part.transparency:.3f}</float>',
+                f'{indent}    <token name="Material">{mat_token}</token>',
+                f'{indent}    <Color3uint8 name="Color3uint8">{color_uint8}</Color3uint8>',
+                f"{indent}    {mesh_id_xml}",
+                f"{indent}    {tex_id_xml}",
+                f'{indent}    <Vector3 name="size">',
+                f"{indent}      <X>{sx:.4f}</X>",
+                f"{indent}      <Y>{sy:.4f}</Y>",
+                f"{indent}      <Z>{sz:.4f}</Z>",
+                f"{indent}    </Vector3>",
+                f'{indent}    <CoordinateFrame name="CFrame">',
+                f"{indent}      <X>{px:.4f}</X>",
+                f"{indent}      <Y>{py:.4f}</Y>",
+                f"{indent}      <Z>{pz:.4f}</Z>",
+                f"{indent}      <R00>{r00:.6f}</R00><R01>{r01:.6f}</R01><R02>{r02:.6f}</R02>",
+                f"{indent}      <R10>{r10:.6f}</R10><R11>{r11:.6f}</R11><R12>{r12:.6f}</R12>",
+                f"{indent}      <R20>{r20:.6f}</R20><R21>{r21:.6f}</R21><R22>{r22:.6f}</R22>",
+                f"{indent}    </CoordinateFrame>",
+                f"{indent}  </Properties>",
+                f'{indent}  <Item class="SurfaceAppearance" referent="{ref_id}_PBR">',
+                f"{indent}    <Properties>",
+                f'{indent}      <string name="Name">{saxutils.escape(part_name)}_SurfaceAppearance</string>',
+                f'{indent}      <token name="AlphaMode">0</token>',
+                f"{indent}      {color_map_xml}",
+                f"{indent}      {normal_map_xml}",
+                f"{indent}      {rough_map_xml}",
+                f"{indent}      {metal_map_xml}",
+                f"{indent}    </Properties>",
+                f"{indent}  </Item>",
+                f'{indent}  <Item class="StringValue" referent="{ref_id}_PART_ID">',
+                f"{indent}    <Properties>",
+                f'{indent}      <string name="Name">ForgePartId</string>',
+                f'{indent}      <string name="Value">{saxutils.escape(sync_meta["partId"])}</string>',
+                f"{indent}    </Properties>",
+                f"{indent}  </Item>",
+                f'{indent}  <Item class="StringValue" referent="{ref_id}_PARENT_ID">',
+                f"{indent}    <Properties>",
+                f'{indent}      <string name="Name">ForgeParentId</string>',
+                f'{indent}      <string name="Value">{saxutils.escape(sync_meta["parentId"])}</string>',
+                f"{indent}    </Properties>",
+                f"{indent}  </Item>",
+                f'{indent}  <Item class="StringValue" referent="{ref_id}_PARENT_NAME">',
+                f"{indent}    <Properties>",
+                f'{indent}      <string name="Name">ForgeParentName</string>',
+                f'{indent}      <string name="Value">{saxutils.escape(sync_meta["parentName"])}</string>',
+                f"{indent}    </Properties>",
+                f"{indent}  </Item>",
+                f'{indent}  <Item class="StringValue" referent="{ref_id}_HIER_PATH">',
+                f"{indent}    <Properties>",
+                f'{indent}      <string name="Name">ForgeHierarchyPath</string>',
+                f'{indent}      <string name="Value">{saxutils.escape(sync_meta["hierarchyPath"])}</string>',
+                f"{indent}    </Properties>",
+                f"{indent}  </Item>",
+                f'{indent}  <Item class="StringValue" referent="{ref_id}_GEOM">',
+                f"{indent}    <Properties>",
+                f'{indent}      <string name="Name">ForgeMeshGeometryJSON</string>',
+                f'{indent}      <string name="Value">{saxutils.escape(geom_payload)}</string>',
+                f"{indent}    </Properties>",
+                f"{indent}  </Item>",
+                f"{indent}</Item>",
+            ]
+
+        root_tree: Dict[str, Any] = {
+            "name": "ModelRoot",
+            "path": "ModelRoot",
+            "nodeId": "fnode_ModelRoot",
+            "children": {},
+            "parts": [],
+        }
+
+        for idx, part in enumerate(parts):
+            part_dict = part.model_dump() if hasattr(part, "model_dump") else part.__dict__
+            hier = AssetEngine.normalize_hierarchy_metadata(part_dict, idx)
+            parent_segs = [
+                s
+                for s in hier["hierarchySegments"][:-1]
+                if s and s not in ("ModelRoot", "Root", safe_name)
+            ]
+            if not parent_segs:
+                root_tree["parts"].append((part, idx))
+            else:
+                curr = root_tree
+                accum = ""
+                for seg in parent_segs:
+                    accum = f"{accum}/{seg}" if accum else seg
+                    if seg not in curr["children"]:
+                        clean_node = "".join(c if (c.isalnum() or c == "_") else "_" for c in accum)
+                        curr["children"][seg] = {
+                            "name": seg,
+                            "path": accum,
+                            "nodeId": f"fnode_{clean_node}",
+                            "children": {},
+                            "parts": [],
+                        }
+                    curr = curr["children"][seg]
+                curr["parts"].append((part, idx))
+
+        def emit_tree_node(node: Dict[str, Any], indent: str) -> None:
+            for p_obj, p_idx in node["parts"]:
+                lines.extend(render_mesh_part_xml(p_obj, p_idx, indent))
+            container_counter = 0
+            for _, child_node in node["children"].items():
+                container_counter += 1
+                ref_container = f"RBX_CONTAINER_{child_node['nodeId']}_{container_counter}"
+                lines.extend([
+                    f'{indent}<Item class="Model" referent="{ref_container}">',
+                    f"{indent}  <Properties>",
+                    f'{indent}    <string name="Name">{saxutils.escape(child_node["name"])}</string>',
+                    f"{indent}  </Properties>",
+                    f'{indent}  <Item class="StringValue" referent="{ref_container}_NODE_ID">',
+                    f"{indent}    <Properties>",
+                    f'{indent}      <string name="Name">ForgeNodeId</string>',
+                    f'{indent}      <string name="Value">{saxutils.escape(child_node["nodeId"])}</string>',
+                    f"{indent}    </Properties>",
+                    f"{indent}  </Item>",
+                    f'{indent}  <Item class="StringValue" referent="{ref_container}_HIER_PATH">',
+                    f"{indent}    <Properties>",
+                    f'{indent}      <string name="Name">ForgeHierarchyPath</string>',
+                    f'{indent}      <string name="Value">{saxutils.escape(child_node["path"])}</string>',
+                    f"{indent}    </Properties>",
+                    f"{indent}  </Item>",
+                ])
+                emit_tree_node(child_node, indent + "  ")
+                lines.append(f"{indent}</Item>")
+
+        emit_tree_node(root_tree, "    ")
 
         lines.extend([
             '    <Item class="StringValue" referent="RBX_FORGE_CATEGORY">',
@@ -1555,14 +1847,19 @@ class Generation3DEngine:
         Parses a Roblox Studio `.rbxmx` XML file into `MeshPart3DSpec` instances and metadata,
         recovering:
         - Model name & category
-        - Full `CFrame` transformations (`position` `[X, Y, Z]` and Euler `rotation` `[RX, RY, RZ]` in degrees)
+        - Real nested container hierarchy (`parentName`, `hierarchyPath`) by walking the XML parent chain
+          from each `MeshPart` up to the root `Model` as well as `ForgeParentName` / `ForgeHierarchyPath`
+        - Full `CFrame` transformations (`position`, 9-component `rotationMatrix`, and `rotation` in degrees)
         - `size` `[X, Y, Z]`
         - `Color3uint8` / `Color3` -> RGB `[0..255]`
         - Roblox `Enum.Material` token -> material name
         - `SurfaceAppearance` 4-channel PBR maps (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`)
-        - Embedded `ForgeMeshGeometryJSON` vertex/normal/UV/face buffers
+        - Embedded `ForgeMeshGeometryJSON` vertex/normal/UV/face buffers (preserving external `MeshPart`s without overwriting them with procedural cubes)
         """
+        from engines.asset_engine import AssetEngine
         root = ET.fromstring(rbxmx_text)
+        parent_map: Dict[ET.Element, ET.Element] = {child: parent for parent in root.iter() for child in parent}
+
         model_item = root.find('.//Item[@class="Model"]')
         model_name = fallback_name
         category = "Roblox Studio (.rbxmx)"
@@ -1583,8 +1880,9 @@ class Generation3DEngine:
                     category = sv_val.text.strip()
 
         part_items: List[ET.Element] = []
-        for cls_name in ("MeshPart", "Part", "WedgePart", "CornerWedgePart"):
-            part_items.extend(root.findall(f'.//Item[@class="{cls_name}"]'))
+        for elem in root.iter("Item"):
+            if elem.attrib.get("class") in ("MeshPart", "Part", "WedgePart", "CornerWedgePart"):
+                part_items.append(elem)
 
         recovered_parts: List[MeshPart3DSpec] = []
         for idx, item in enumerate(part_items):
@@ -1601,6 +1899,48 @@ class Generation3DEngine:
             can_collide = _prop_text('./bool[@name="CanCollide"]', "true").lower() != "false"
             transparency = float(_prop_text('./float[@name="Transparency"]', "0.0") or 0.0)
 
+            # Walk XML ancestor chain to reconstruct nested container path up to root model
+            ancestor_names: List[str] = []
+            curr_parent = parent_map.get(item)
+            while curr_parent is not None and curr_parent != model_item:
+                if curr_parent.tag == "Item" and curr_parent.attrib.get("class") in ("Model", "Folder"):
+                    cp_props = curr_parent.find("./Properties")
+                    cp_name = ""
+                    if cp_props is not None:
+                        cp_el = cp_props.find('./string[@name="Name"]')
+                        if cp_el is not None and cp_el.text:
+                            cp_name = cp_el.text.strip()
+                    if cp_name and cp_name not in ("ModelRoot", "Root", model_name):
+                        ancestor_names.insert(0, cp_name)
+                curr_parent = parent_map.get(curr_parent)
+            inferred_parent_name = ancestor_names[-1] if ancestor_names else "Root"
+            inferred_hierarchy_path = (
+                f"Root/{'/'.join(ancestor_names)}/{part_name}"
+                if ancestor_names
+                else f"Root/{part_name}"
+            )
+
+            part_id = ""
+            parent_id = ""
+            parent_name = inferred_parent_name
+            hierarchy_path = inferred_hierarchy_path
+            geometry_source: Optional[str] = None
+
+            for child_sv in item.findall('./Item[@class="StringValue"]'):
+                sv_p = child_sv.find("./Properties")
+                if sv_p is None:
+                    continue
+                sv_key = (sv_p.findtext('./string[@name="Name"]', "") or "").strip()
+                sv_val = (sv_p.findtext('./string[@name="Value"]', "") or "").strip()
+                if sv_key == "ForgePartId" and sv_val:
+                    part_id = sv_val
+                elif sv_key == "ForgeParentId" and sv_val:
+                    parent_id = sv_val
+                elif sv_key == "ForgeParentName" and sv_val:
+                    parent_name = sv_val
+                elif sv_key == "ForgeHierarchyPath" and sv_val:
+                    hierarchy_path = sv_val
+
             mat_token_str = _prop_text('./token[@name="Material"]', "1088")
             mat_token = int(mat_token_str) if mat_token_str.isdigit() else 1088
             material_name = ROBLOX_TOKEN_TO_MATERIAL.get(mat_token, "Metal")
@@ -1615,6 +1955,7 @@ class Generation3DEngine:
             cf_el = props.find('./CoordinateFrame[@name="CFrame"]')
             px, py, pz = 0.0, 1.0, 0.0
             rx, ry, rz = 0.0, 0.0, 0.0
+            rotation_matrix: List[float] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
             if cf_el is not None:
                 px = float(cf_el.findtext("X", "0.0") or 0.0)
                 py = float(cf_el.findtext("Y", "1.0") or 1.0)
@@ -1628,6 +1969,7 @@ class Generation3DEngine:
                 r20 = float(cf_el.findtext("R20", "0.0") or 0.0)
                 r21 = float(cf_el.findtext("R21", "0.0") or 0.0)
                 r22 = float(cf_el.findtext("R22", "1.0") or 1.0)
+                rotation_matrix = [r00, r01, r02, r10, r11, r12, r20, r21, r22]
                 rx, ry, rz = _rotation_matrix_to_euler_deg(r00, r01, r02, r10, r11, r12, r20, r21, r22)
 
             cr, cg, cb = 160, 170, 185
@@ -1648,6 +1990,8 @@ class Generation3DEngine:
 
             mesh_id_url = _prop_text('./Content[@name="MeshId"]/url', "")
             published_mesh_id = validate_published_roblox_mesh_id(mesh_id_url)
+            tex_id_url = _prop_text('./Content[@name="TextureID"]/url', "")
+            published_tex_id = validate_published_roblox_mesh_id(tex_id_url)
 
             # Parse SurfaceAppearance 4-channel PBR maps if present
             sa_item = item.find('./Item[@class="SurfaceAppearance"]')
@@ -1680,9 +2024,33 @@ class Generation3DEngine:
                         try:
                             decoded = json.loads(raw_json)
                             if isinstance(decoded, dict):
+                                if decoded.get("partId"):
+                                    part_id = str(decoded["partId"])
+                                if decoded.get("parentId"):
+                                    parent_id = str(decoded["parentId"])
+                                if decoded.get("parentName"):
+                                    parent_name = str(decoded["parentName"])
+                                if decoded.get("hierarchyPath"):
+                                    hierarchy_path = str(decoded["hierarchyPath"])
+                                if decoded.get("geometrySource"):
+                                    geometry_source = str(decoded["geometrySource"])
+                                json_mesh_id = validate_published_roblox_mesh_id(
+                                    decoded.get("publishedMeshId") or decoded.get("meshId")
+                                )
+                                if json_mesh_id and not published_mesh_id:
+                                    published_mesh_id = json_mesh_id
+                                json_tex_id = validate_published_roblox_mesh_id(decoded.get("textureId"))
+                                if json_tex_id and not published_tex_id:
+                                    published_tex_id = json_tex_id
                                 roughness_val = float(decoded.get("roughness", roughness_val))
                                 metalness_val = float(decoded.get("metalness", metalness_val))
                                 cf_mode = str(decoded.get("collisionFidelity") or cf_mode)
+                                if isinstance(decoded.get("rotationMatrix"), list) and len(decoded["rotationMatrix"]) == 9:
+                                    rotation_matrix = [float(x) for x in decoded["rotationMatrix"]]
+                                    rx, ry, rz = _rotation_matrix_to_euler_deg(*rotation_matrix)
+                                elif isinstance(decoded.get("rotation"), list) and len(decoded["rotation"]) == 3:
+                                    rx, ry, rz = [float(x) for x in decoded["rotation"]]
+                                    rotation_matrix = list(_euler_deg_to_rotation_matrix(rx, ry, rz))
                                 if isinstance(decoded.get("pbrMaterial"), dict):
                                     sa_pbr = {**decoded["pbrMaterial"], **sa_pbr}
                                 verts = decoded.get("vertices") or []
@@ -1697,35 +2065,69 @@ class Generation3DEngine:
                                         objFileName=f"{model_name}.obj",
                                         meshId=published_mesh_id or None,
                                         assetId=published_mesh_id or None,
+                                        geometrySource="EditableMeshBuffers",
                                     )
+                                    geometry_source = "EditableMeshBuffers"
                         except Exception:
                             pass
 
             if geom_spec is None:
-                geom_spec = synthesize_procedural_mesh_data("MeshPart", [sx, sy, sz])
-                geom_spec.objFileName = f"{model_name}.obj"
+                if published_mesh_id or geometry_source in ("PublishedCloudMeshId", "StudioExternalUnreadable"):
+                    geometry_source = "PublishedCloudMeshId" if published_mesh_id else (geometry_source or "StudioExternalUnreadable")
+                    geom_spec = SubMeshGeometrySpec(
+                        vertices=[],
+                        normals=[],
+                        uvs=[],
+                        faces=[],
+                        indices=[],
+                        objFileName=f"{model_name}.obj",
+                        meshId=published_mesh_id or None,
+                        assetId=published_mesh_id or None,
+                        geometrySource=geometry_source,
+                    )
+                else:
+                    geometry_source = "EditableMeshBuffers"
+                    geom_spec = synthesize_procedural_mesh_data("MeshPart", [sx, sy, sz])
+                    geom_spec.objFileName = f"{model_name}.obj"
+                    geom_spec.geometrySource = "EditableMeshBuffers"
 
-            recovered_parts.append(
-                MeshPart3DSpec(
-                    name=part_name,
-                    shape="MeshPart",
-                    meshId=published_mesh_id or None,
-                    assetId=published_mesh_id or None,
-                    size=[round(sx, 3), round(sy, 3), round(sz, 3)],
-                    position=[round(px, 3), round(py, 3), round(pz, 3)],
-                    rotation=[rx, ry, rz],
-                    color=[max(0, min(255, cr)), max(0, min(255, cg)), max(0, min(255, cb))],
-                    material=material_name,
-                    roughness=roughness_val,
-                    metalness=metalness_val,
-                    transparency=transparency,
-                    canCollide=can_collide,
-                    anchored=anchored,
-                    collisionFidelity=cf_mode if cf_mode in ("Default", "Box", "Hull", "PreciseConvexDecomposition") else "Hull",  # type: ignore
-                    pbrMaterial=sa_pbr if sa_pbr else None,
-                    meshData=geom_spec,
-                )
+            raw_spec = MeshPart3DSpec(
+                partId=part_id or None,
+                parentId=parent_id or None,
+                parentName=parent_name or "ModelRoot",
+                hierarchyPath=hierarchy_path or None,
+                name=part_name,
+                shape="MeshPart",
+                meshId=published_mesh_id or None,
+                assetId=published_mesh_id or None,
+                textureId=published_tex_id or None,
+                geometrySource=geometry_source,
+                size=[round(sx, 3), round(sy, 3), round(sz, 3)],
+                position=[round(px, 3), round(py, 3), round(pz, 3)],
+                rotation=[rx, ry, rz],
+                rotationMatrix=rotation_matrix,
+                color=[max(0, min(255, cr)), max(0, min(255, cg)), max(0, min(255, cb))],
+                material=material_name,
+                roughness=roughness_val,
+                metalness=metalness_val,
+                transparency=transparency,
+                canCollide=can_collide,
+                anchored=anchored,
+                collisionFidelity=cf_mode if cf_mode in ("Default", "Box", "Hull", "PreciseConvexDecomposition") else "Hull",  # type: ignore
+                pbrMaterial=sa_pbr if sa_pbr else None,
+                meshData=geom_spec,
             )
+            sync_hashes = AssetEngine.compute_part_sync_hashes(raw_spec.model_dump(), idx)
+            raw_spec.partId = sync_hashes["partId"]
+            raw_spec.parentId = sync_hashes["parentId"]
+            raw_spec.parentName = sync_hashes["parentName"]
+            raw_spec.hierarchyPath = sync_hashes["hierarchyPath"]
+            raw_spec.geometrySource = sync_hashes["geometrySource"]
+            raw_spec.rotationMatrix = sync_hashes["rotationMatrix"]
+            raw_spec.geometryHash = sync_hashes["geometryHash"]
+            raw_spec.materialHash = sync_hashes["materialHash"]
+            raw_spec.transformHash = sync_hashes["transformHash"]
+            recovered_parts.append(raw_spec)
 
         total_tris = sum(len(p.meshData.faces) for p in recovered_parts if p.meshData)
         return {
