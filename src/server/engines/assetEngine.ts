@@ -14,6 +14,10 @@
  *    (`generatePBRSurfaceAppearanceLuau`).
  */
 
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import zlib from 'zlib';
 import {
   buildStrictLuauFromEditedParts,
   extractGeometryFromProcessedMesh,
@@ -23,6 +27,794 @@ import {
   synthesizeProceduralMeshData,
   validatePublishedRobloxMeshId,
 } from './generation3DEngine.ts';
+
+export interface DecodedPngValidationResult {
+  valid: boolean;
+  width: number;
+  height: number;
+  bitDepth: number;
+  colorType: number;
+  interlaceMethod?: number;
+  hasPalette?: boolean;
+  byteLength: number;
+  sha256: string;
+  rgbaPreviewB64: string;
+  previewSize: number;
+  meanRgba?: [number, number, number, number];
+  error?: string;
+}
+
+/**
+ * Computes a deterministic 32-bit FNV-1a hex hash over normalized LF string content.
+ * Matches `computeLuauContentHash` inside `ForgeAIStudioPlugin.server.luau`
+ * so Roblox Studio can verify exact script content synchronization against Rojo on disk.
+ */
+export function computeFnv1a32Hex(text: string): string {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  const bytes = Buffer.from(normalized, 'utf-8');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    hash ^= bytes[i];
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Computes deterministic per-part SHA-256 hashes (geometry, material/PBR, transform, hierarchy)
+ * and ensures a stable `partId` (`forgePartId`) and `parentName` hierarchy field.
+ */
+export function computePartSyncHashes(part: any, indexFallback: number = 0): {
+  partId: string;
+  parentName: string;
+  hierarchyPath: string;
+  geometryHash: string;
+  materialHash: string;
+  transformHash: string;
+  combinedHash: string;
+} {
+  const safePartName =
+    String(part?.name || `MeshPart_${indexFallback + 1}`).trim() || `MeshPart_${indexFallback + 1}`;
+  const parentName =
+    String(part?.parentName || part?.parent_name || 'ModelRoot').trim() || 'ModelRoot';
+  const partId =
+    String(part?.partId || part?.part_id || '').trim() ||
+    `fpart_${safePartName.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+  const hierarchyPath = `${parentName}/${safePartName}`;
+
+  const md = part?.meshData || {};
+  const geomPayload = JSON.stringify({
+    v: md.vertices || [],
+    n: md.normals || [],
+    uv: md.uvs || [],
+    f: md.faces || [],
+    meshId: part?.meshId || md.meshId || '',
+  });
+  const geometryHash = crypto.createHash('sha256').update(geomPayload).digest('hex').slice(0, 16);
+
+  const matPayload = JSON.stringify({
+    color: part?.color || [148, 163, 184],
+    material: part?.material || 'Metal',
+    roughness: Number(part?.roughness ?? 0.35).toFixed(3),
+    metalness: Number(part?.metalness ?? 0.65).toFixed(3),
+    transparency: Number(part?.transparency ?? 0).toFixed(3),
+    pbr: part?.pbrMaterial || null,
+  });
+  const materialHash = crypto.createHash('sha256').update(matPayload).digest('hex').slice(0, 16);
+
+  const transformPayload = JSON.stringify({
+    size: (part?.size || [2, 2, 2]).map((n: number) => Number(Number(n).toFixed(3))),
+    position: (part?.position || [0, 1, 0]).map((n: number) => Number(Number(n).toFixed(3))),
+    rotation: (part?.rotation || [0, 0, 0]).map((n: number) => Number(Number(n).toFixed(2))),
+    parentName,
+  });
+  const transformHash = crypto
+    .createHash('sha256')
+    .update(transformPayload)
+    .digest('hex')
+    .slice(0, 16);
+
+  const combinedHash = crypto
+    .createHash('sha256')
+    .update(`${partId}:${geometryHash}:${materialHash}:${transformHash}`)
+    .digest('hex')
+    .slice(0, 16);
+
+  return {
+    partId,
+    parentName,
+    hierarchyPath,
+    geometryHash,
+    materialHash,
+    transformHash,
+    combinedHash,
+  };
+}
+
+/**
+ * Normalizes a part list so every part carries a stable `partId`, `parentName`, `hierarchyPath`,
+ * and deterministic `geometryHash`, `materialHash`, and `transformHash`.
+ */
+export function normalizePartsWithSyncMetadata(parts: any[]): any[] {
+  if (!Array.isArray(parts)) return [];
+  return parts.map((p, idx) => {
+    const syncMeta = computePartSyncHashes(p, idx);
+    return {
+      ...p,
+      partId: syncMeta.partId,
+      parentName: syncMeta.parentName,
+      hierarchyPath: syncMeta.hierarchyPath,
+      geometryHash: syncMeta.geometryHash,
+      materialHash: syncMeta.materialHash,
+      transformHash: syncMeta.transformHash,
+    };
+  });
+}
+
+/**
+ * Computes a canonical SHA-256 snapshot digest across an asset's geometry (`parts` + `meshData`),
+ * hierarchy (`parentName`), and PBR state (`pbr_profile` + per-part `pbrMaterial`) so the unified
+ * persistence service never creates duplicate versions for identical states.
+ */
+export function computeAssetSnapshotSha256(asset: any): string {
+  const parts = Array.isArray(asset?.parts) ? asset.parts : [];
+  const partSummaries = parts.map((p: any, idx: number) => {
+    const hashes = computePartSyncHashes(p, idx);
+    return {
+      partId: hashes.partId,
+      name: p?.name || `MeshPart_${idx + 1}`,
+      parentName: hashes.parentName,
+      g: hashes.geometryHash,
+      m: hashes.materialHash,
+      t: hashes.transformHash,
+    };
+  });
+  const canonical = JSON.stringify({
+    parts: partSummaries,
+    pbr_profile: asset?.pbr_profile || null,
+    collision_fidelity: asset?.collision_fidelity || 'Hull',
+  });
+  return crypto.createHash('sha256').update(canonical, 'utf-8').digest('hex').slice(0, 16);
+}
+
+/**
+ * Compares the web editor asset (`forgeAsset`) against a live Roblox Studio DataModel part list
+ * (`studioParts`) using stable `partId` (`ForgePartId`) identifiers, reporting exact differences
+ * across geometry, transformations, hierarchies, and materials.
+ */
+export function computeDataModelSyncDiffServer(
+  forgeAsset: any,
+  studioParts: any[]
+): {
+  inSync: boolean;
+  modelName: string;
+  totalForgeParts: number;
+  totalStudioParts: number;
+  matchingPartsCount: number;
+  addedInStudio: string[];
+  removedInStudio: string[];
+  modifiedGeometry: string[];
+  modifiedTransform: string[];
+  modifiedHierarchy: string[];
+  modifiedMaterial: string[];
+  partDiffs: Array<{
+    partId: string;
+    name: string;
+    status: 'in_sync' | 'modified' | 'added_in_studio' | 'missing_in_studio';
+    geometryMatch: boolean;
+    transformMatch: boolean;
+    hierarchyMatch: boolean;
+    materialMatch: boolean;
+    forgeHashes?: { geometryHash: string; transformHash: string; materialHash: string; parentName: string };
+    studioHashes?: { geometryHash: string; transformHash: string; materialHash: string; parentName: string };
+  }>;
+} {
+  const forgeParts = normalizePartsWithSyncMetadata(forgeAsset?.parts || []);
+  const normStudio = normalizePartsWithSyncMetadata(studioParts || []);
+
+  const forgeById = new Map<string, any>();
+  const forgeByName = new Map<string, any>();
+  for (const fp of forgeParts) {
+    forgeById.set(fp.partId, fp);
+    forgeByName.set(fp.name, fp);
+  }
+
+  const seenForgeIds = new Set<string>();
+  const addedInStudio: string[] = [];
+  const removedInStudio: string[] = [];
+  const modifiedGeometry: string[] = [];
+  const modifiedTransform: string[] = [];
+  const modifiedHierarchy: string[] = [];
+  const modifiedMaterial: string[] = [];
+  const partDiffs: Array<any> = [];
+  let matchingPartsCount = 0;
+
+  for (const sp of normStudio) {
+    const fp = forgeById.get(sp.partId) || forgeByName.get(sp.name);
+    if (!fp) {
+      addedInStudio.push(sp.name);
+      partDiffs.push({
+        partId: sp.partId,
+        name: sp.name,
+        status: 'added_in_studio',
+        geometryMatch: false,
+        transformMatch: false,
+        hierarchyMatch: false,
+        materialMatch: false,
+        studioHashes: {
+          geometryHash: sp.geometryHash,
+          transformHash: sp.transformHash,
+          materialHash: sp.materialHash,
+          parentName: sp.parentName,
+        },
+      });
+      continue;
+    }
+
+    seenForgeIds.add(fp.partId);
+    const geometryMatch = fp.geometryHash === sp.geometryHash;
+    const transformMatch = fp.transformHash === sp.transformHash;
+    const hierarchyMatch = fp.parentName === sp.parentName;
+    const materialMatch = fp.materialHash === sp.materialHash;
+
+    if (!geometryMatch) modifiedGeometry.push(fp.name);
+    if (!transformMatch) modifiedTransform.push(fp.name);
+    if (!hierarchyMatch) modifiedHierarchy.push(fp.name);
+    if (!materialMatch) modifiedMaterial.push(fp.name);
+
+    const allMatch = geometryMatch && transformMatch && hierarchyMatch && materialMatch;
+    if (allMatch) matchingPartsCount++;
+
+    partDiffs.push({
+      partId: fp.partId,
+      name: fp.name,
+      status: allMatch ? 'in_sync' : 'modified',
+      geometryMatch,
+      transformMatch,
+      hierarchyMatch,
+      materialMatch,
+      forgeHashes: {
+        geometryHash: fp.geometryHash,
+        transformHash: fp.transformHash,
+        materialHash: fp.materialHash,
+        parentName: fp.parentName,
+      },
+      studioHashes: {
+        geometryHash: sp.geometryHash,
+        transformHash: sp.transformHash,
+        materialHash: sp.materialHash,
+        parentName: sp.parentName,
+      },
+    });
+  }
+
+  for (const fp of forgeParts) {
+    if (!seenForgeIds.has(fp.partId)) {
+      removedInStudio.push(fp.name);
+      partDiffs.push({
+        partId: fp.partId,
+        name: fp.name,
+        status: 'missing_in_studio',
+        geometryMatch: false,
+        transformMatch: false,
+        hierarchyMatch: false,
+        materialMatch: false,
+        forgeHashes: {
+          geometryHash: fp.geometryHash,
+          transformHash: fp.transformHash,
+          materialHash: fp.materialHash,
+          parentName: fp.parentName,
+        },
+      });
+    }
+  }
+
+  const inSync =
+    addedInStudio.length === 0 &&
+    removedInStudio.length === 0 &&
+    modifiedGeometry.length === 0 &&
+    modifiedTransform.length === 0 &&
+    modifiedHierarchy.length === 0 &&
+    modifiedMaterial.length === 0 &&
+    forgeParts.length === normStudio.length;
+
+  return {
+    inSync,
+    modelName: String(forgeAsset?.name || 'Model3D'),
+    totalForgeParts: forgeParts.length,
+    totalStudioParts: normStudio.length,
+    matchingPartsCount,
+    addedInStudio,
+    removedInStudio,
+    modifiedGeometry,
+    modifiedTransform,
+    modifiedHierarchy,
+    modifiedMaterial,
+    partDiffs,
+  };
+}
+
+/**
+ * UNIFIED PERSISTENCE SERVICE (TypeScript Server Parity with Python `AssetEngine`):
+ * Single authoritative service for loading, upserting (with 20 SHA-256 deduplicated snapshots),
+ * restoring versions, and deleting assets in `assets_library.json`.
+ */
+export function loadAssetsLibraryServer(libraryFilePath: string): any[] {
+  if (!fs.existsSync(libraryFilePath)) {
+    return [];
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(libraryFilePath, 'utf-8'));
+    return Array.isArray(raw) ? raw : Array.isArray(raw?.assets) ? raw.assets : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveAssetsLibraryServer(libraryFilePath: string, assets: any[]): void {
+  fs.mkdirSync(path.dirname(libraryFilePath), { recursive: true });
+  fs.writeFileSync(libraryFilePath, JSON.stringify(assets, null, 2), 'utf-8');
+}
+
+export function getAssetFromLibraryServer(libraryFilePath: string, assetIdOrName: string): any | null {
+  if (!assetIdOrName) return null;
+  const assets = loadAssetsLibraryServer(libraryFilePath);
+  return (
+    assets.find(
+      (a: any) => String(a?.id) === String(assetIdOrName) || String(a?.name) === String(assetIdOrName)
+    ) || null
+  );
+}
+
+export function upsertAssetInLibraryServer(libraryFilePath: string, assetData: any): any {
+  const assets = loadAssetsLibraryServer(libraryFilePath);
+  const nowIso = new Date().toISOString();
+  if (!assetData.id) {
+    assetData.id = `asset-${Date.now()}`;
+  }
+  if (!assetData.created_at) {
+    assetData.created_at = nowIso;
+  }
+
+  assetData.parts = normalizePartsWithSyncMetadata(assetData.parts || []);
+  const incomingSha = computeAssetSnapshotSha256(assetData);
+  assetData.snapshot_sha256 = incomingSha;
+
+  const existingIdx = assets.findIndex(
+    (a: any) => a.id === assetData.id || (assetData.name && a.name === assetData.name)
+  );
+
+  if (existingIdx >= 0) {
+    const existing = assets[existingIdx];
+    let history = Array.isArray(existing.version_history) ? [...existing.version_history] : [];
+    const prevVersion = Number(existing.version || history.length || 1);
+    const existingSha = existing.snapshot_sha256 || computeAssetSnapshotSha256(existing);
+
+    if (existingSha !== incomingSha) {
+      const snapshotParts = JSON.parse(JSON.stringify(existing.parts || []));
+      const snapshotPbr = JSON.parse(JSON.stringify(existing.pbr_profile || {}));
+      const snapshot = {
+        version: prevVersion,
+        timestamp: existing.updated_at || existing.created_at || nowIso,
+        poly_count: Number(existing.poly_count || 0),
+        part_count: snapshotParts.length,
+        collision_fidelity: String(existing.collision_fidelity || 'Hull'),
+        description: String(existing.description || ''),
+        pbr_profile: snapshotPbr,
+        luau_code: String(existing.luau_code || ''),
+        parts: snapshotParts,
+        snapshot_sha256: existingSha,
+      };
+      history = history.filter(
+        (h: any) => Number(h?.version) !== prevVersion && h?.snapshot_sha256 !== existingSha
+      );
+      history.unshift(snapshot);
+      assetData.version = prevVersion + 1;
+    } else {
+      assetData.version = prevVersion;
+    }
+
+    assetData.version_history = history.slice(0, 20);
+    assetData.created_at = existing.created_at || nowIso;
+    assetData.updated_at = nowIso;
+    assets[existingIdx] = assetData;
+  } else {
+    assetData.version = 1;
+    assetData.updated_at = nowIso;
+    const initParts = JSON.parse(JSON.stringify(assetData.parts || []));
+    const initPbr = JSON.parse(JSON.stringify(assetData.pbr_profile || {}));
+    assetData.version_history = [
+      {
+        version: 1,
+        timestamp: assetData.created_at,
+        poly_count: Number(assetData.poly_count || 0),
+        part_count: initParts.length,
+        collision_fidelity: String(assetData.collision_fidelity || 'Hull'),
+        description: String(assetData.description || ''),
+        pbr_profile: initPbr,
+        luau_code: String(assetData.luau_code || ''),
+        parts: initParts,
+        snapshot_sha256: incomingSha,
+      },
+    ];
+    assets.unshift(assetData);
+  }
+
+  saveAssetsLibraryServer(libraryFilePath, assets);
+  return assetData;
+}
+
+export function restoreAssetVersionServer(
+  libraryFilePath: string,
+  assetIdOrName: string,
+  targetVersion: number
+): any | null {
+  const assets = loadAssetsLibraryServer(libraryFilePath);
+  const idx = assets.findIndex(
+    (a: any) => String(a?.id) === String(assetIdOrName) || String(a?.name) === String(assetIdOrName)
+  );
+  if (idx < 0) return null;
+
+  const targetAsset = assets[idx];
+  const history: any[] = Array.isArray(targetAsset.version_history)
+    ? [...targetAsset.version_history]
+    : [];
+  const snap = history.find((h: any) => Number(h?.version) === Number(targetVersion));
+  if (!snap) return null;
+
+  const nowIso = new Date().toISOString();
+  const currVersion = Number(targetAsset.version || 1);
+  const currSha = targetAsset.snapshot_sha256 || computeAssetSnapshotSha256(targetAsset);
+
+  if (!history.some((h: any) => h?.snapshot_sha256 === currSha)) {
+    const currPartsClone = JSON.parse(JSON.stringify(targetAsset.parts || []));
+    const currPbrClone = JSON.parse(JSON.stringify(targetAsset.pbr_profile || {}));
+    history.unshift({
+      version: currVersion,
+      timestamp: targetAsset.updated_at || nowIso,
+      poly_count: Number(targetAsset.poly_count || 0),
+      part_count: currPartsClone.length,
+      collision_fidelity: String(targetAsset.collision_fidelity || 'Hull'),
+      description: String(targetAsset.description || ''),
+      pbr_profile: currPbrClone,
+      luau_code: String(targetAsset.luau_code || ''),
+      parts: currPartsClone,
+      snapshot_sha256: currSha,
+    });
+  }
+
+  const restoredParts = normalizePartsWithSyncMetadata(
+    JSON.parse(JSON.stringify(snap.parts || []))
+  );
+  const restoredPbr = JSON.parse(
+    JSON.stringify(snap.pbr_profile || targetAsset.pbr_profile || {})
+  );
+  const maxVer = Math.max(currVersion, ...history.map((h: any) => Number(h?.version || 1)));
+
+  targetAsset.parts = restoredParts;
+  targetAsset.pbr_profile = restoredPbr;
+  targetAsset.poly_count = Number(snap.poly_count ?? targetAsset.poly_count ?? 0);
+  targetAsset.collision_fidelity = String(
+    snap.collision_fidelity || targetAsset.collision_fidelity || 'Hull'
+  );
+  targetAsset.luau_code = String(snap.luau_code || targetAsset.luau_code || '');
+  if (snap.description) {
+    targetAsset.description = String(snap.description);
+  }
+  targetAsset.version = maxVer + 1;
+  targetAsset.restored_from_version = Number(targetVersion);
+  targetAsset.updated_at = nowIso;
+  targetAsset.snapshot_sha256 = computeAssetSnapshotSha256(targetAsset);
+  targetAsset.version_history = history.slice(0, 20);
+
+  assets[idx] = targetAsset;
+  saveAssetsLibraryServer(libraryFilePath, assets);
+  return targetAsset;
+}
+
+export function deleteAssetFromLibraryServer(libraryFilePath: string, assetId: string): boolean {
+  const assets = loadAssetsLibraryServer(libraryFilePath);
+  const filtered = assets.filter((a: any) => a.id !== assetId && a.name !== assetId);
+  if (filtered.length === assets.length) return false;
+  saveAssetsLibraryServer(libraryFilePath, filtered);
+  return true;
+}
+
+/**
+ * Validates a binary PNG buffer (8-byte PNG signature, IHDR dimensions, bitDepth, colorType,
+ * PLTE/tRNS chunks for indexed-color PNGs, and zlib IDAT stream), unfilters the scanlines,
+ * and downsamples the real pixels into an RGBA preview buffer (`rgbaPreviewB64`)
+ * for `AssetService:CreateEditableImage` in Roblox Studio.
+ */
+export function validateAndDecodePngBuffer(
+  pngBuffer: Buffer,
+  targetPreviewSize: number = 32
+): DecodedPngValidationResult {
+  if (!Buffer.isBuffer(pngBuffer) || pngBuffer.length < 33) {
+    return {
+      valid: false,
+      width: 0,
+      height: 0,
+      bitDepth: 0,
+      colorType: 0,
+      byteLength: pngBuffer ? pngBuffer.length : 0,
+      sha256: '',
+      rgbaPreviewB64: '',
+      previewSize: targetPreviewSize,
+      error: 'Buffer PNG vacío o truncado (< 33 bytes).',
+    };
+  }
+
+  const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!pngBuffer.subarray(0, 8).equals(PNG_SIG)) {
+    return {
+      valid: false,
+      width: 0,
+      height: 0,
+      bitDepth: 0,
+      colorType: 0,
+      byteLength: pngBuffer.length,
+      sha256: '',
+      rgbaPreviewB64: '',
+      previewSize: targetPreviewSize,
+      error: 'Firma mágica PNG inválida (no comienza con 89 50 4E 47).',
+    };
+  }
+
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlaceMethod = 0;
+  let plteChunk: Buffer | null = null;
+  let trnsChunk: Buffer | null = null;
+  const idatChunks: Buffer[] = [];
+
+  while (offset + 8 <= pngBuffer.length) {
+    const length = pngBuffer.readUInt32BE(offset);
+    const chunkType = pngBuffer.subarray(offset + 4, offset + 8).toString('ascii');
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > pngBuffer.length) {
+      return {
+        valid: false,
+        width,
+        height,
+        bitDepth,
+        colorType,
+        byteLength: pngBuffer.length,
+        sha256: '',
+        rgbaPreviewB64: '',
+        previewSize: targetPreviewSize,
+        error: `Chunk PNG '${chunkType}' truncado.`,
+      };
+    }
+    const chunkData = pngBuffer.subarray(dataStart, dataEnd);
+    if (chunkType === 'IHDR' && length >= 13) {
+      width = chunkData.readUInt32BE(0);
+      height = chunkData.readUInt32BE(4);
+      bitDepth = chunkData.readUInt8(8);
+      colorType = chunkData.readUInt8(9);
+      interlaceMethod = chunkData.readUInt8(12);
+    } else if (chunkType === 'PLTE') {
+      plteChunk = chunkData;
+    } else if (chunkType === 'tRNS') {
+      trnsChunk = chunkData;
+    } else if (chunkType === 'IDAT') {
+      idatChunks.push(chunkData);
+    } else if (chunkType === 'IEND') {
+      break;
+    }
+    offset = dataEnd + 4;
+  }
+
+  if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || idatChunks.length === 0) {
+    return {
+      valid: false,
+      width,
+      height,
+      bitDepth,
+      colorType,
+      byteLength: pngBuffer.length,
+      sha256: '',
+      rgbaPreviewB64: '',
+      previewSize: targetPreviewSize,
+      error:
+        width > 4096 || height > 4096
+          ? `Dimensiones PNG (${width}x${height}) exceden el límite de 4096x4096 de Roblox SurfaceAppearance.`
+          : 'PNG sin dimensiones IHDR válidas o sin bloques IDAT.',
+    };
+  }
+
+  const allowedDepthsByColorType: Record<number, number[]> = {
+    0: [1, 2, 4, 8, 16],
+    2: [8, 16],
+    3: [1, 2, 4, 8],
+    4: [8, 16],
+    6: [8, 16],
+  };
+  if (!allowedDepthsByColorType[colorType] || !allowedDepthsByColorType[colorType].includes(bitDepth)) {
+    return {
+      valid: false,
+      width,
+      height,
+      bitDepth,
+      colorType,
+      byteLength: pngBuffer.length,
+      sha256: '',
+      rgbaPreviewB64: '',
+      previewSize: targetPreviewSize,
+      error: `Combinación PNG no estándar (colorType=${colorType}, bitDepth=${bitDepth}).`,
+    };
+  }
+
+  if (colorType === 3 && (!plteChunk || plteChunk.length < 3 || plteChunk.length % 3 !== 0)) {
+    return {
+      valid: false,
+      width,
+      height,
+      bitDepth,
+      colorType,
+      byteLength: pngBuffer.length,
+      sha256: '',
+      rgbaPreviewB64: '',
+      previewSize: targetPreviewSize,
+      error: 'PNG indexado (color_type=3) carece de tabla de paleta PLTE válida.',
+    };
+  }
+
+  const sha256 = crypto.createHash('sha256').update(pngBuffer).digest('hex').slice(0, 16);
+  const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 4 ? 2 : 1;
+  const bitsPerPixel = channels * bitDepth;
+  const bpp = Math.max(1, Math.ceil(bitsPerPixel / 8));
+  const stride = Math.ceil((width * bitsPerPixel) / 8);
+
+  try {
+    const compressed = Buffer.concat(idatChunks);
+    const rawScanlines = zlib.inflateSync(compressed);
+    const expectedBytes = height * (1 + stride);
+    const previewBytes = Buffer.alloc(targetPreviewSize * targetPreviewSize * 4);
+
+    if (interlaceMethod === 0 && rawScanlines.length >= expectedBytes) {
+      const recon = Buffer.alloc(height * stride);
+      for (let y = 0; y < height; y++) {
+        const filterType = rawScanlines[y * (1 + stride)];
+        const rowIn = y * (1 + stride) + 1;
+        const rowOut = y * stride;
+        for (let i = 0; i < stride; i++) {
+          const xByte = rawScanlines[rowIn + i];
+          const a = i >= bpp ? recon[rowOut + i - bpp] : 0;
+          const b = y > 0 ? recon[rowOut - stride + i] : 0;
+          const c = y > 0 && i >= bpp ? recon[rowOut - stride + i - bpp] : 0;
+          let val = xByte;
+          if (filterType === 1) {
+            val = (xByte + a) & 0xff;
+          } else if (filterType === 2) {
+            val = (xByte + b) & 0xff;
+          } else if (filterType === 3) {
+            val = (xByte + ((a + b) >> 1)) & 0xff;
+          } else if (filterType === 4) {
+            const p = a + b - c;
+            const pa = Math.abs(p - a);
+            const pb = Math.abs(p - b);
+            const pc = Math.abs(p - c);
+            const pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+            val = (xByte + pr) & 0xff;
+          }
+          recon[rowOut + i] = val;
+        }
+      }
+
+      const sampleSubByte = (rowOffset: number, x: number): number => {
+        if (bitDepth === 8) return recon[rowOffset + x];
+        if (bitDepth === 16) return recon[rowOffset + x * 2];
+        const pixelsPerByte = Math.floor(8 / bitDepth);
+        const byteIdx = rowOffset + Math.floor(x / pixelsPerByte);
+        const shift = (pixelsPerByte - 1 - (x % pixelsPerByte)) * bitDepth;
+        const mask = (1 << bitDepth) - 1;
+        return (recon[byteIdx] >> shift) & mask;
+      };
+
+      for (let py = 0; py < targetPreviewSize; py++) {
+        const sy = Math.min(height - 1, Math.floor((py * height) / targetPreviewSize));
+        const rowOffset = sy * stride;
+        for (let px = 0; px < targetPreviewSize; px++) {
+          const sx = Math.min(width - 1, Math.floor((px * width) / targetPreviewSize));
+          const dstIdx = (py * targetPreviewSize + px) * 4;
+          const bytesPerChannel = bitDepth === 16 ? 2 : 1;
+
+          if (colorType === 6) {
+            const srcIdx = rowOffset + sx * 4 * bytesPerChannel;
+            previewBytes[dstIdx] = recon[srcIdx];
+            previewBytes[dstIdx + 1] = recon[srcIdx + bytesPerChannel];
+            previewBytes[dstIdx + 2] = recon[srcIdx + 2 * bytesPerChannel];
+            previewBytes[dstIdx + 3] = recon[srcIdx + 3 * bytesPerChannel];
+          } else if (colorType === 2) {
+            const srcIdx = rowOffset + sx * 3 * bytesPerChannel;
+            previewBytes[dstIdx] = recon[srcIdx];
+            previewBytes[dstIdx + 1] = recon[srcIdx + bytesPerChannel];
+            previewBytes[dstIdx + 2] = recon[srcIdx + 2 * bytesPerChannel];
+            previewBytes[dstIdx + 3] = 255;
+          } else if (colorType === 4) {
+            const srcIdx = rowOffset + sx * 2 * bytesPerChannel;
+            const lum = recon[srcIdx];
+            const alpha = recon[srcIdx + bytesPerChannel];
+            previewBytes[dstIdx] = lum;
+            previewBytes[dstIdx + 1] = lum;
+            previewBytes[dstIdx + 2] = lum;
+            previewBytes[dstIdx + 3] = alpha;
+          } else if (colorType === 3 && plteChunk) {
+            const palIdx = sampleSubByte(rowOffset, sx);
+            const palOffset = Math.min(plteChunk.length - 3, palIdx * 3);
+            previewBytes[dstIdx] = plteChunk[palOffset] ?? 128;
+            previewBytes[dstIdx + 1] = plteChunk[palOffset + 1] ?? 128;
+            previewBytes[dstIdx + 2] = plteChunk[palOffset + 2] ?? 128;
+            previewBytes[dstIdx + 3] =
+              trnsChunk && palIdx < trnsChunk.length ? trnsChunk[palIdx] : 255;
+          } else {
+            const rawSample = sampleSubByte(rowOffset, sx);
+            const maxVal = bitDepth < 8 ? (1 << bitDepth) - 1 : 255;
+            const lum = bitDepth < 8 ? Math.round((rawSample * 255) / maxVal) : rawSample;
+            previewBytes[dstIdx] = lum;
+            previewBytes[dstIdx + 1] = lum;
+            previewBytes[dstIdx + 2] = lum;
+            previewBytes[dstIdx + 3] = 255;
+          }
+        }
+      }
+    } else {
+      for (let i = 0; i < previewBytes.length; i += 4) {
+        previewBytes[i] = rawScanlines[i % rawScanlines.length] || 128;
+        previewBytes[i + 1] = rawScanlines[(i + 1) % rawScanlines.length] || 128;
+        previewBytes[i + 2] = rawScanlines[(i + 2) % rawScanlines.length] || 128;
+        previewBytes[i + 3] = 255;
+      }
+    }
+
+    let rSum = 0, gSum = 0, bSum = 0, aSum = 0;
+    const totalPx = targetPreviewSize * targetPreviewSize;
+    for (let i = 0; i < previewBytes.length; i += 4) {
+      rSum += previewBytes[i];
+      gSum += previewBytes[i + 1];
+      bSum += previewBytes[i + 2];
+      aSum += previewBytes[i + 3];
+    }
+
+    return {
+      valid: true,
+      width,
+      height,
+      bitDepth,
+      colorType,
+      interlaceMethod,
+      hasPalette: Boolean(plteChunk),
+      byteLength: pngBuffer.length,
+      sha256,
+      rgbaPreviewB64: previewBytes.toString('base64'),
+      previewSize: targetPreviewSize,
+      meanRgba: [
+        Math.round(rSum / totalPx),
+        Math.round(gSum / totalPx),
+        Math.round(bSum / totalPx),
+        Math.round(aSum / totalPx),
+      ],
+    };
+  } catch (err: any) {
+    return {
+      valid: false,
+      width,
+      height,
+      bitDepth,
+      colorType,
+      byteLength: pngBuffer.length,
+      sha256,
+      rgbaPreviewB64: '',
+      previewSize: targetPreviewSize,
+      error: `Error descomprimiendo flujo zlib IDAT del PNG: ${err?.message || String(err)}`,
+    };
+  }
+}
 
 function escapeXmlServer(str: string): string {
   return String(str)
@@ -189,6 +981,7 @@ export function buildRbxmxFromPartsServer(
     const validMeshId = validatePublishedRobloxMeshId(p.meshId || md.meshId);
     const validTexId = validatePublishedRobloxMeshId(p.textureId);
 
+    const syncMeta = computePartSyncHashes(p, idx);
     const pbr = (p as any).pbrMaterial || {};
     const validColorMap = validatePublishedRobloxMeshId(pbr.colorMapAssetId);
     const validNormalMap = validatePublishedRobloxMeshId(pbr.normalMapAssetId);
@@ -196,6 +989,12 @@ export function buildRbxmxFromPartsServer(
     const validMetalMap = validatePublishedRobloxMeshId(pbr.metalnessMapAssetId);
 
     const serializedMeshJson = JSON.stringify({
+      partId: syncMeta.partId,
+      parentName: syncMeta.parentName,
+      hierarchyPath: syncMeta.hierarchyPath,
+      geometryHash: syncMeta.geometryHash,
+      materialHash: syncMeta.materialHash,
+      transformHash: syncMeta.transformHash,
       vertices: md.vertices,
       normals: md.normals,
       uvs: md.uvs,
@@ -279,6 +1078,18 @@ export function buildRbxmxFromPartsServer(
         : '          <Content name="MetalnessMap"><null></null></Content>',
       '        </Properties>',
       '      </Item>',
+      `      <Item class="StringValue" referent="${refId}_PART_ID">`,
+      '        <Properties>',
+      '          <string name="Name">ForgePartId</string>',
+      `          <string name="Value">${escapeXmlServer(syncMeta.partId)}</string>`,
+      '        </Properties>',
+      '      </Item>',
+      `      <Item class="StringValue" referent="${refId}_PARENT_NAME">`,
+      '        <Properties>',
+      '          <string name="Name">ForgeParentName</string>',
+      `          <string name="Value">${escapeXmlServer(syncMeta.parentName)}</string>`,
+      '        </Properties>',
+      '      </Item>',
       `      <Item class="StringValue" referent="${refId}_GEOM">`,
       '        <Properties>',
       '          <string name="Name">ForgeMeshGeometryJSON</string>',
@@ -319,7 +1130,8 @@ export function buildRbxmxFromPartsServer(
 /**
  * Server-side `.RBXMX` XML parser for Pillar C Bidirectional Sync (`/api/v1/assets/pull-from-rojo`).
  * Recovers full CFrames (Position + Euler Rotation from 3x3 rotation matrix), Sizes, Colors,
- * Roblox Material enums, 4-channel `SurfaceAppearance` maps, and `ForgeMeshGeometryJSON` buffers.
+ * Roblox Material enums, 4-channel `SurfaceAppearance` maps, `ForgePartId`, `ForgeParentName`,
+ * and `ForgeMeshGeometryJSON` buffers.
  */
 export function parseRbxmxFromPartsServer(
   rbxmxText: string,
@@ -391,6 +1203,18 @@ export function parseRbxmxFromPartsServer(
 
     const nameMatch = block.match(/<string\s+name="Name">([^<]+)<\/string>/i);
     const partName = nameMatch?.[1] ? unescapeXmlServer(nameMatch[1].trim()) : `MeshPart_${i + 1}`;
+
+    let partId =
+      block.match(
+        /<string\s+name="Name">ForgePartId<\/string>\s*<string\s+name="Value">([^<]+)<\/string>/i
+      )?.[1] || '';
+    partId = partId ? unescapeXmlServer(partId.trim()) : '';
+
+    let parentName =
+      block.match(
+        /<string\s+name="Name">ForgeParentName<\/string>\s*<string\s+name="Value">([^<]+)<\/string>/i
+      )?.[1] || '';
+    parentName = parentName ? unescapeXmlServer(parentName.trim()) : 'ModelRoot';
 
     const sizeBlock = block.match(/<Vector3\s+name="(?:size|Size)">([\s\S]*?)<\/Vector3>/i)?.[1] || '';
     const sx = Number(sizeBlock.match(/<X>([^<]+)<\/X>/i)?.[1] ?? 2);
@@ -497,6 +1321,9 @@ export function parseRbxmxFromPartsServer(
             `${modelName}.obj`,
             modelName
           );
+          if (typeof parsedGeom.partId === 'string' && parsedGeom.partId) partId = parsedGeom.partId;
+          if (typeof parsedGeom.parentName === 'string' && parsedGeom.parentName)
+            parentName = parsedGeom.parentName;
           if (typeof parsedGeom.roughness === 'number') roughness = parsedGeom.roughness;
           if (typeof parsedGeom.metalness === 'number') metalness = parsedGeom.metalness;
           if (typeof parsedGeom.material === 'string') material = parsedGeom.material;
@@ -525,7 +1352,9 @@ export function parseRbxmxFromPartsServer(
       }
     }
 
-    parts.push({
+    const basePartObj: any = {
+      partId: partId || `fpart_${partName.replace(/[^a-zA-Z0-9_]/g, '_')}`,
+      parentName: parentName || 'ModelRoot',
       name: partName,
       shape: 'MeshPart',
       meshId,
@@ -544,6 +1373,16 @@ export function parseRbxmxFromPartsServer(
       collisionFidelity,
       meshData,
       ...(pbrMaterial ? { pbrMaterial } : {}),
+    };
+    const syncHashes = computePartSyncHashes(basePartObj, i);
+    parts.push({
+      ...basePartObj,
+      partId: syncHashes.partId,
+      parentName: syncHashes.parentName,
+      hierarchyPath: syncHashes.hierarchyPath,
+      geometryHash: syncHashes.geometryHash,
+      materialHash: syncHashes.materialHash,
+      transformHash: syncHashes.transformHash,
     } as MeshPartInput);
   }
 
@@ -933,7 +1772,8 @@ export function generatePBRSurfaceAppearanceLuau(
     normalMapId?: string;
     roughnessMapId?: string;
     metalnessMapId?: string;
-  }
+  },
+  decodedRgbaPreviews?: Record<string, string>
 ): string {
   const safeMat = materialName.replace(/[^a-zA-Z0-9_]/g, '') || 'ForgePBRMaterial';
   const validColor = validatePublishedRobloxMeshId(cloudAssetIds?.colorMapId);
@@ -941,70 +1781,209 @@ export function generatePBRSurfaceAppearanceLuau(
   const validRoughness = validatePublishedRobloxMeshId(cloudAssetIds?.roughnessMapId);
   const validMetalness = validatePublishedRobloxMeshId(cloudAssetIds?.metalnessMapId);
 
+  const publishedCount = [validColor, validNormal, validRoughness, validMetalness].filter(Boolean).length;
+  const pubState =
+    publishedCount === 4
+      ? 'cloud_published'
+      : publishedCount > 0
+      ? 'partially_published'
+      : 'local_saved';
+
   const hexClean = String(albedoHex || '#38bdf8').replace('#', '').trim();
   const rVal = hexClean.length === 6 ? parseInt(hexClean.slice(0, 2), 16) || 56 : 56;
   const gVal = hexClean.length === 6 ? parseInt(hexClean.slice(2, 4), 16) || 189 : 189;
   const bVal = hexClean.length === 6 ? parseInt(hexClean.slice(4, 6), 16) || 248 : 248;
 
+  const albedoRgbaB64 = decodedRgbaPreviews?.['ColorMap.png'] || '';
+  const normalRgbaB64 = decodedRgbaPreviews?.['NormalMap.png'] || '';
+  const roughnessRgbaB64 = decodedRgbaPreviews?.['RoughnessMap.png'] || '';
+  const metalnessRgbaB64 = decodedRgbaPreviews?.['MetalnessMap.png'] || '';
+
+  const colorLua = validColor ? `"${validColor}"` : 'nil';
+  const normalLua = validNormal ? `"${validNormal}"` : 'nil';
+  const roughLua = validRoughness ? `"${validRoughness}"` : 'nil';
+  const metalLua = validMetalness ? `"${validMetalness}"` : 'nil';
+
   const lines: string[] = [
     '--!strict',
-    `-- Generated by Forge AI Asset Engine: PBR SurfaceAppearance + EditableImage (${safeMat})`,
+    `-- Generated by Forge AI Asset Engine: ${safeMat} (Publication State: ${pubState}, Published Channels: ${publishedCount}/4)`,
     `-- Local Rojo PNG Maps: ${targetFolder}/${safeMat}_ColorMap.png, _NormalMap.png, _RoughnessMap.png, _MetalnessMap.png`,
     'local AssetService = game:GetService("AssetService")',
     '',
+    'export type PublishedPBRTextureIds = {',
+    '    ColorMap: string?,',
+    '    NormalMap: string?,',
+    '    RoughnessMap: string?,',
+    '    MetalnessMap: string?,',
+    '}',
+    '',
+    'export type PBRVisualVerificationReport = {',
+    '    visualVerificationPassed: boolean,',
+    '    publicationState: string,',
+    '    verifiedCloudChannelCount: number,',
+    '    verifiedDecodedChannelCount: number,',
+    '    editableImageFallbackActive: boolean,',
+    '    channelStatus: { [string]: string },',
+    '}',
+    '',
     `local ${safeMat}PBR = {}`,
     '',
-    'local function createProceduralEditableTexture(r: number, g: number, b: number, rough: number): Content?',
-    '    local ok, content = pcall(function()',
-    '        local width, height = 64, 64',
-    '        local editableImage = AssetService:CreateEditableImage({ Size = Vector2.new(width, height) })',
-    '        local pixels = buffer.create(width * height * 4)',
-    '        for y = 0, height - 1 do',
-    '            for x = 0, width - 1 do',
-    '                local idx = (y * width + x) * 4',
-    '                local grain = math.floor(math.sin(x * 0.45) * math.cos(y * 0.45) * 14 * (1 - rough * 0.5))',
-    '                buffer.writeu8(pixels, idx + 0, math.clamp(r + grain, 0, 255))',
-    '                buffer.writeu8(pixels, idx + 1, math.clamp(g + grain, 0, 255))',
-    '                buffer.writeu8(pixels, idx + 2, math.clamp(b + grain, 0, 255))',
-    '                buffer.writeu8(pixels, idx + 3, 255)',
+    'local PUBLISHED_TEXTURE_IDS: PublishedPBRTextureIds = {',
+    `    ColorMap = ${colorLua},`,
+    `    NormalMap = ${normalLua},`,
+    `    RoughnessMap = ${roughLua},`,
+    `    MetalnessMap = ${metalLua},`,
+    '}',
+    '',
+    'local EMBEDDED_CHANNEL_RGBA32_B64: { [string]: string } = {',
+    `    ColorMap = "${albedoRgbaB64}",`,
+    `    NormalMap = "${normalRgbaB64}",`,
+    `    RoughnessMap = "${roughnessRgbaB64}",`,
+    `    MetalnessMap = "${metalnessRgbaB64}",`,
+    '}',
+    '',
+    'local B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"',
+    'local function decodeBase64ToBuffer(b64: string, expectedBytes: number): buffer?',
+    '    if #b64 == 0 then return nil end',
+    '    local out = buffer.create(expectedBytes)',
+    '    local outIdx = 0',
+    '    local acc = 0',
+    '    local bits = 0',
+    '    for i = 1, #b64 do',
+    '        local ch = string.sub(b64, i, i)',
+    '        if ch == "=" then break end',
+    '        local pos = string.find(B64_ALPHABET, ch, 1, true)',
+    '        if pos then',
+    '            acc = acc * 64 + (pos - 1)',
+    '            bits += 6',
+    '            if bits >= 8 then',
+    '                bits -= 8',
+    '                local byteVal = math.floor(acc / (2 ^ bits)) % 256',
+    '                if outIdx < expectedBytes then',
+    '                    buffer.writeu8(out, outIdx, byteVal)',
+    '                    outIdx += 1',
+    '                end',
     '            end',
     '        end',
-    '        editableImage:WritePixelsBuffer(Vector2.zero, Vector2.new(width, height), pixels)',
-    '        return Content.fromObject(editableImage)',
-    '    end)',
-    '    if ok then return content end',
-    '    return nil',
+    '    end',
+    '    if outIdx < expectedBytes then return nil end',
+    '    return out',
     'end',
     '',
-    `function ${safeMat}PBR.Apply(targetPart: BasePart): SurfaceAppearance`,
+    'local function isValidRobloxAssetUri(uri: string?): boolean',
+    '    if not uri or uri == "" or uri == "rbxassetid://0" then',
+    '        return false',
+    '    end',
+    '    return string.match(uri, "^rbxassetid://[1-9]%d*$") ~= nil or string.match(uri, "^rbxasset://.+") ~= nil',
+    'end',
+    '',
+    `function ${safeMat}PBR.VerifyVisualAppearance(targetPart: BasePart): PBRVisualVerificationReport`,
+    '    local sa = targetPart:FindFirstChildOfClass("SurfaceAppearance")',
+    '    local channelStatus: { [string]: string } = {',
+    '        ColorMap = "missing",',
+    '        NormalMap = "missing",',
+    '        RoughnessMap = "missing",',
+    '        MetalnessMap = "missing",',
+    '    }',
+    '    local verifiedCloudCount = 0',
+    '    local verifiedDecodedCount = 0',
+    '    if sa then',
+    '        if isValidRobloxAssetUri(sa.ColorMap) then channelStatus.ColorMap = "cloud_published"; verifiedCloudCount += 1 end',
+    '        if isValidRobloxAssetUri(sa.NormalMap) then channelStatus.NormalMap = "cloud_published"; verifiedCloudCount += 1 end',
+    '        if isValidRobloxAssetUri(sa.RoughnessMap) then channelStatus.RoughnessMap = "cloud_published"; verifiedCloudCount += 1 end',
+    '        if isValidRobloxAssetUri(sa.MetalnessMap) then channelStatus.MetalnessMap = "cloud_published"; verifiedCloudCount += 1 end',
+    '    end',
+    '    for _, chName in ipairs({ "ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap" }) do',
+    '        local b64 = EMBEDDED_CHANNEL_RGBA32_B64[chName] or ""',
+    '        if decodeBase64ToBuffer(b64, 32 * 32 * 4) ~= nil then',
+    '            verifiedDecodedCount += 1',
+    '            if channelStatus[chName] == "missing" then',
+    '                channelStatus[chName] = "local_rgba_verified"',
+    '            end',
+    '        end',
+    '    end',
+    '    local editableActive = targetPart:GetAttribute("PBR_EditableImageBound") == true',
+    '    if channelStatus.ColorMap ~= "cloud_published" and editableActive then',
+    '        channelStatus.ColorMap = "editable_image_bound"',
+    '    end',
+    '    local pubState = if verifiedCloudCount == 4 then "cloud_published" elseif verifiedCloudCount > 0 then "partially_published" elseif (editableActive or verifiedDecodedCount == 4) then "local_saved" else "failed"',
+    '    local passed = (verifiedCloudCount > 0) or editableActive or (verifiedDecodedCount == 4)',
+    '    targetPart:SetAttribute("PBR_VisualVerificationPassed", passed)',
+    '    targetPart:SetAttribute("PBR_VerifiedChannelsCount", verifiedCloudCount)',
+    '    targetPart:SetAttribute("PBR_VerifiedDecodedChannelsCount", verifiedDecodedCount)',
+    '    targetPart:SetAttribute("PBR_PublicationStatus", pubState)',
+    '    return {',
+    '        visualVerificationPassed = passed,',
+    '        publicationState = pubState,',
+    '        verifiedCloudChannelCount = verifiedCloudCount,',
+    '        verifiedDecodedChannelCount = verifiedDecodedCount,',
+    '        editableImageFallbackActive = editableActive,',
+    '        channelStatus = channelStatus,',
+    '    }',
+    'end',
+    '',
+    `function ${safeMat}PBR.Apply(targetPart: BasePart, overrideIds: PublishedPBRTextureIds?): SurfaceAppearance`,
     '    local existing = targetPart:FindFirstChildOfClass("SurfaceAppearance")',
     '    if existing then',
     '        existing:Destroy()',
     '    end',
+    '    local ids = overrideIds or PUBLISHED_TEXTURE_IDS',
     '    local surface = Instance.new("SurfaceAppearance")',
     `    surface.Name = "${safeMat}_SurfaceAppearance"`,
     '    surface.AlphaMode = Enum.AlphaMode.Overlay',
     `    targetPart.Color = Color3.fromRGB(${rVal}, ${gVal}, ${bVal})`,
-  ];
-
-  if (validColor) lines.push(`    surface.ColorMap = "${validColor}"`);
-  if (validNormal) lines.push(`    surface.NormalMap = "${validNormal}"`);
-  if (validRoughness) lines.push(`    surface.RoughnessMap = "${validRoughness}"`);
-  if (validMetalness) lines.push(`    surface.MetalnessMap = "${validMetalness}"`);
-
-  if (!validColor) {
-    lines.push(
-      '    -- When no published Cloud ColorMap ID is supplied yet, synthesize runtime EditableImage texture:',
-      `    local runtimeColorContent = createProceduralEditableTexture(${rVal}, ${gVal}, ${bVal}, ${Number(roughness).toFixed(2)})`,
-      '    if runtimeColorContent and targetPart:IsA("MeshPart") then',
-      '        pcall(function()',
-      '            (targetPart :: any).TextureContent = runtimeColorContent',
-      '        end)',
-      '    end'
-    );
-  }
-
-  lines.push(
+    `    targetPart.Reflectance = ${Math.min(1, Math.max(0, Number(metalness) * 0.35)).toFixed(2)}`,
+    '    if isValidRobloxAssetUri(ids.ColorMap) then',
+    '        surface.ColorMap = ids.ColorMap :: string',
+    '        targetPart:SetAttribute("PBR_Channel_ColorMap", "cloud_published")',
+    '    else',
+    '        targetPart:SetAttribute("PBR_Channel_ColorMap", "unverified_or_local")',
+    '    end',
+    '    if isValidRobloxAssetUri(ids.NormalMap) then',
+    '        surface.NormalMap = ids.NormalMap :: string',
+    '        targetPart:SetAttribute("PBR_Channel_NormalMap", "cloud_published")',
+    '    else',
+    '        targetPart:SetAttribute("PBR_Channel_NormalMap", "unverified_or_local")',
+    '    end',
+    '    if isValidRobloxAssetUri(ids.RoughnessMap) then',
+    '        surface.RoughnessMap = ids.RoughnessMap :: string',
+    '        targetPart:SetAttribute("PBR_Channel_RoughnessMap", "cloud_published")',
+    '    else',
+    '        targetPart:SetAttribute("PBR_Channel_RoughnessMap", "unverified_or_local")',
+    '    end',
+    '    if isValidRobloxAssetUri(ids.MetalnessMap) then',
+    '        surface.MetalnessMap = ids.MetalnessMap :: string',
+    '        targetPart:SetAttribute("PBR_Channel_MetalnessMap", "cloud_published")',
+    '    else',
+    '        targetPart:SetAttribute("PBR_Channel_MetalnessMap", "unverified_or_local")',
+    '    end',
+    '',
+    '    if not isValidRobloxAssetUri(ids.ColorMap) then',
+    '        local okEditableImg, editableImg = pcall(function()',
+    '            local img = AssetService:CreateEditableImage({ Size = Vector2.new(32, 32) })',
+    '            local pixelBuffer = decodeBase64ToBuffer(EMBEDDED_CHANNEL_RGBA32_B64.ColorMap, 32 * 32 * 4)',
+    '            if not pixelBuffer then',
+    '                pixelBuffer = buffer.create(32 * 32 * 4)',
+    '                for py = 0, 31 do',
+    '                    for px = 0, 31 do',
+    '                        local offset = (py * 32 + px) * 4',
+    `                        buffer.writeu8(pixelBuffer, offset, ${rVal})`,
+    `                        buffer.writeu8(pixelBuffer, offset + 1, ${gVal})`,
+    `                        buffer.writeu8(pixelBuffer, offset + 2, ${bVal})`,
+    '                        buffer.writeu8(pixelBuffer, offset + 3, 255)',
+    '                    end',
+    '                end',
+    '            end',
+    '            img:WritePixelsBuffer(Vector2.zero, Vector2.new(32, 32), pixelBuffer)',
+    '            return img',
+    '        end)',
+    '        if okEditableImg and editableImg and targetPart:IsA("MeshPart") then',
+    '            local okBind = pcall(function()',
+    '                (targetPart :: any).TextureContent = Content.fromObject(editableImg)',
+    '            end)',
+    '            targetPart:SetAttribute("PBR_EditableImageBound", okBind)',
+    '        end',
+    '    end',
     `    targetPart:SetAttribute("PBR_MaterialName", "${safeMat}")`,
     `    targetPart:SetAttribute("PBR_Roughness", ${Number(roughness).toFixed(2)})`,
     `    targetPart:SetAttribute("PBR_Metalness", ${Number(metalness).toFixed(2)})`,
@@ -1015,10 +1994,11 @@ export function generatePBRSurfaceAppearanceLuau(
     `    targetPart:SetAttribute("PBR_LocalMetalnessMapPath", "${targetFolder}/${safeMat}_MetalnessMap.png")`,
     `    targetPart:SetAttribute("PBR_HasPublishedCloudIds", ${Boolean(validColor || validNormal || validRoughness || validMetalness) ? 'true' : 'false'})`,
     '    surface.Parent = targetPart',
+    `    ${safeMat}PBR.VerifyVisualAppearance(targetPart)`,
     '    return surface',
     'end',
     '',
-    `return ${safeMat}PBR`
-  );
+    `return ${safeMat}PBR`,
+  ];
   return lines.join('\n');
 }

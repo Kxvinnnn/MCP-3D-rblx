@@ -418,7 +418,7 @@ export const Forge3DStudio: React.FC = () => {
       : `Forge_${pbrPreset}`;
     addLog(
       'info',
-      `Publicando 4 mapas PBR (${matName}: ColorMap, NormalMap, RoughnessMap, MetalnessMap) y módulo SurfaceAppearance en Rojo...`
+      `Publicando y validando 4 mapas PBR (${matName}: ColorMap, NormalMap, RoughnessMap, MetalnessMap) y módulo SurfaceAppearance en Rojo...`
     );
     try {
       handleAssociatePBRWithParts(pbrApplyScope);
@@ -440,15 +440,44 @@ export const Forge3DStudio: React.FC = () => {
         roughness_map_asset_id: roughnessMapAssetId.trim() || undefined,
         metalness_map_asset_id: metalnessMapAssetId.trim() || undefined,
       });
+
+      const pubStatus = res.status || (res.is_cloud_published ? 'cloud_published' : 'local_saved');
+      const publishedChannels = res.published_channels || [];
+      const missingChannels = res.missing_channels || [];
+      const decodeErrors = res.decode_errors || {};
+
+      if (pubStatus === 'asset_not_found' || pubStatus === 'failed' || !res.success) {
+        const errReasons = Object.entries(decodeErrors)
+          .map(([ch, msg]) => `${ch}: ${msg}`)
+          .join(' | ');
+        const failMsg =
+          pubStatus === 'asset_not_found'
+            ? `El asset destino '${activeAsset?.id || ''}' no existe en la Biblioteca. Guarda primero el modelo antes de asociar perfiles PBR.`
+            : `Fallo al publicar mapas PBR (${pubStatus}): ${errReasons || 'Texturas incompletas o inválidas'}`;
+        setError(failMsg);
+        addLog('error', failMsg);
+        return;
+      }
+
+      if (pubStatus === 'partially_published') {
+        addLog(
+          'info',
+          `[PBR Publicación Parcial] Canales publicados (${publishedChannels.length}/4): ${publishedChannels.join(', ')}. Faltantes: ${missingChannels.join(', ') || 'ninguno'}.`
+        );
+      }
+
+      const statusLabel =
+        pubStatus === 'cloud_published'
+          ? '4/4 AssetIds verificados en Roblox Cloud asociados a SurfaceAppearance'
+          : pubStatus === 'partially_published'
+          ? `Publicación parcial (${publishedChannels.length}/4 canales validados)`
+          : '4/4 PNGs validados en Textures/ + buffers RGBA32 embebidos para EditableImage';
+
       addLog(
         'rojo',
-        `PBR 4 Canales SurfaceAppearance publicado en ${
+        `PBR SurfaceAppearance [${pubStatus.toUpperCase()}] en ${
           res.luau_binder_path || `src/shared/Assets3D/${matName}_SurfaceAppearance.luau`
-        } (${
-          res.is_cloud_published
-            ? 'AssetIds verificados de Roblox Cloud asociados'
-            : '4 PNGs guardados en Textures/ + EditableImage runtime'
-        })`
+        } (${statusLabel})`
       );
       if (activeAsset) {
         fetchAssetLibrary();

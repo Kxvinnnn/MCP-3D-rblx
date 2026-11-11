@@ -26,7 +26,13 @@ export interface PartPBRMaterialSpec {
 }
 
 export interface MeshPart3DSpec {
+  partId?: string;
   name: string;
+  parentName?: string;
+  hierarchyPath?: string;
+  geometryHash?: string;
+  materialHash?: string;
+  transformHash?: string;
   shape: 'Block' | 'Cylinder' | 'Ball' | 'Wedge' | 'CornerWedge' | 'MeshPart';
   size: number[];
   position: number[];
@@ -2527,7 +2533,15 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
       part.pbrMaterial?.metalnessMapAssetId || asset.pbr_profile?.metalness_map_asset_id
     );
 
+    const partId = part.partId || `${safeName}::${partName}::${idx + 1}`;
+    const parentName = part.parentName || safeName;
+    const hierarchyPath = part.hierarchyPath || `${parentName}/${partName}`;
+
     const geometryJsonPayload = JSON.stringify({
+      partId,
+      name: partName,
+      parentName,
+      hierarchyPath,
       shape: 'MeshPart',
       meshId: validMeshId,
       size: [sx, sy, sz],
@@ -2605,6 +2619,18 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
       validMetalnessMap
         ? `          <Content name="MetalnessMap"><url>${escapeXml(validMetalnessMap)}</url></Content>`
         : '          <Content name="MetalnessMap"><null></null></Content>',
+      '        </Properties>',
+      '      </Item>',
+      `      <Item class="StringValue" referent="${refId}_PID">`,
+      '        <Properties>',
+      '          <string name="Name">ForgePartId</string>',
+      `          <string name="Value">${escapeXml(partId)}</string>`,
+      '        </Properties>',
+      '      </Item>',
+      `      <Item class="StringValue" referent="${refId}_PARENT">`,
+      '        <Properties>',
+      '          <string name="Name">ForgeParentName</string>',
+      `          <string name="Value">${escapeXml(parentName)}</string>`,
       '        </Properties>',
       '      </Item>',
       `      <Item class="StringValue" referent="${refId}_GEOM">`,
@@ -2794,18 +2820,27 @@ export function parseRBXMXToForgeAsset(
     let collisionFidelity: MeshPart3DSpec['collisionFidelity'] = 'Hull';
     let pbrMaterial: PartPBRMaterialSpec | undefined;
 
-    const geomValueNode = Array.from(itemNode.querySelectorAll('Item[class="StringValue"]')).find(
-      (sv) =>
-        sv.querySelector(':scope > Properties > string[name="Name"]')?.textContent?.trim() ===
-        'ForgeMeshGeometryJSON'
-    );
-    const geomJsonText = geomValueNode
-      ?.querySelector(':scope > Properties > string[name="Value"]')
-      ?.textContent?.trim();
+    const stringValues = Array.from(itemNode.querySelectorAll('Item[class="StringValue"]'));
+    const findStringValue = (targetName: string): string | undefined => {
+      const node = stringValues.find(
+        (sv) =>
+          sv.querySelector(':scope > Properties > string[name="Name"]')?.textContent?.trim() ===
+          targetName
+      );
+      return node?.querySelector(':scope > Properties > string[name="Value"]')?.textContent?.trim();
+    };
+
+    let partId = findStringValue('ForgePartId');
+    let parentName = findStringValue('ForgeParentName') || modelName;
+    const geomJsonText = findStringValue('ForgeMeshGeometryJSON');
 
     if (geomJsonText) {
       try {
         const parsedGeom = JSON.parse(geomJsonText);
+        if (!partId && typeof parsedGeom.partId === 'string') partId = parsedGeom.partId;
+        if (typeof parsedGeom.parentName === 'string' && parsedGeom.parentName) {
+          parentName = parsedGeom.parentName;
+        }
         if (Array.isArray(parsedGeom.vertices) && Array.isArray(parsedGeom.faces)) {
           meshData = {
             vertices: parsedGeom.vertices,
@@ -2838,8 +2873,12 @@ export function parseRBXMXToForgeAsset(
       };
     }
 
+    const resolvedPartId = partId || `${modelName}::${partName}::${idx + 1}`;
     const basePart: MeshPart3DSpec = {
+      partId: resolvedPartId,
       name: partName,
+      parentName,
+      hierarchyPath: `${parentName}/${partName}`,
       shape: 'MeshPart',
       size: [Number(sx.toFixed(2)), Number(sy.toFixed(2)), Number(sz.toFixed(2))],
       position: [Number(px.toFixed(2)), Number(py.toFixed(2)), Number(pz.toFixed(2))],
@@ -3242,9 +3281,11 @@ export function exportAssetToGLTF(
 }
 
 export interface PartSyncDiffEntry {
+  partId?: string;
   partName: string;
+  parentName?: string;
   status: 'added_in_studio' | 'removed_in_studio' | 'modified' | 'conflict' | 'unchanged';
-  changedFields: Array<'transform' | 'size' | 'material' | 'color' | 'pbr' | 'geometry'>;
+  changedFields: Array<'transform' | 'size' | 'material' | 'color' | 'pbr' | 'geometry' | 'hierarchy'>;
   forgeSummary: string;
   studioSummary: string;
   hasConflict: boolean;
@@ -3263,27 +3304,36 @@ export interface ModelVersionDiffReport {
 
 /**
  * Computes a granular part-by-part diff and conflict analysis between the active Forge asset
- * and an external version (from Roblox Studio `.rbxmx` / Rojo or Version History).
+ * and an external version (from Roblox Studio `.rbxmx` / Rojo or Version History), matching by
+ * stable `partId` (or `name` fallback) and comparing geometry, transforms, hierarchy, and PBR materials.
  */
 export function computeModelVersionDiff(
   forgeAsset: Forge3DAsset,
   studioAsset: Forge3DAsset,
   baseSnapshotAsset?: Forge3DAsset | null
 ): ModelVersionDiffReport {
-  const forgeMap = new Map<string, MeshPart3DSpec>();
-  for (const p of forgeAsset.parts || []) forgeMap.set(p.name, p);
+  const forgeByKey = new Map<string, MeshPart3DSpec>();
+  const forgeByName = new Map<string, MeshPart3DSpec>();
+  for (const p of forgeAsset.parts || []) {
+    if (p.partId) forgeByKey.set(p.partId, p);
+    forgeByName.set(p.name, p);
+  }
 
-  const studioMap = new Map<string, MeshPart3DSpec>();
-  for (const p of studioAsset.parts || []) studioMap.set(p.name, p);
+  const studioByKey = new Map<string, MeshPart3DSpec>();
+  const studioByName = new Map<string, MeshPart3DSpec>();
+  for (const p of studioAsset.parts || []) {
+    if (p.partId) studioByKey.set(p.partId, p);
+    studioByName.set(p.name, p);
+  }
 
-  const baseMap = new Map<string, MeshPart3DSpec>();
+  const baseByName = new Map<string, MeshPart3DSpec>();
   if (baseSnapshotAsset?.parts) {
-    for (const p of baseSnapshotAsset.parts) baseMap.set(p.name, p);
+    for (const p of baseSnapshotAsset.parts) baseByName.set(p.name, p);
   }
 
   const allNames = new Set<string>([
-    ...Array.from(forgeMap.keys()),
-    ...Array.from(studioMap.keys()),
+    ...Array.from(forgeByName.keys()),
+    ...Array.from(studioByName.keys()),
   ]);
 
   const entries: PartSyncDiffEntry[] = [];
@@ -3303,18 +3353,21 @@ export function computeModelVersionDiff(
   };
 
   for (const name of allNames) {
-    const fPart = forgeMap.get(name);
-    const sPart = studioMap.get(name);
-    const bPart = baseMap.get(name);
+    const fPart = forgeByName.get(name);
+    const sPart =
+      (fPart?.partId ? studioByKey.get(fPart.partId) : undefined) || studioByName.get(name);
+    const bPart = baseByName.get(name);
 
     if (!fPart && sPart) {
       addedCount++;
       entries.push({
+        partId: sPart.partId,
         partName: name,
+        parentName: sPart.parentName,
         status: 'added_in_studio',
-        changedFields: ['geometry', 'transform', 'material'],
+        changedFields: ['geometry', 'transform', 'material', 'hierarchy'],
         forgeSummary: 'No existe en Forge',
-        studioSummary: `Añadida en Studio (${sPart.meshData?.faces?.length || 12} tris, ${sPart.material})`,
+        studioSummary: `Añadida en Studio (${sPart.meshData?.faces?.length || 12} tris, ${sPart.material}, parent=${sPart.parentName || studioAsset.name})`,
         hasConflict: false,
       });
       continue;
@@ -3323,7 +3376,9 @@ export function computeModelVersionDiff(
     if (fPart && !sPart) {
       removedCount++;
       entries.push({
+        partId: fPart.partId,
         partName: name,
+        parentName: fPart.parentName,
         status: 'removed_in_studio',
         changedFields: ['geometry'],
         forgeSummary: `Presente en Forge (${fPart.meshData?.faces?.length || 12} tris, ${fPart.material})`,
@@ -3347,6 +3402,9 @@ export function computeModelVersionDiff(
       if (vecDiff(fPart.color, sPart.color, 2)) {
         changedFields.push('color');
       }
+      if ((fPart.parentName || forgeAsset.name) !== (sPart.parentName || studioAsset.name)) {
+        changedFields.push('hierarchy');
+      }
       if (
         Math.abs((fPart.roughness ?? 0.35) - (sPart.roughness ?? 0.35)) > 0.02 ||
         Math.abs((fPart.metalness ?? 0.65) - (sPart.metalness ?? 0.65)) > 0.02 ||
@@ -3365,7 +3423,9 @@ export function computeModelVersionDiff(
       if (changedFields.length === 0) {
         unchangedCount++;
         entries.push({
+          partId: fPart.partId || sPart.partId,
           partName: name,
+          parentName: sPart.parentName || fPart.parentName,
           status: 'unchanged',
           changedFields: [],
           forgeSummary: `${fTris} tris • ${fPart.material}`,
@@ -3395,7 +3455,9 @@ export function computeModelVersionDiff(
         else modifiedCount++;
 
         entries.push({
+          partId: fPart.partId || sPart.partId,
           partName: name,
+          parentName: sPart.parentName || fPart.parentName,
           status: hasConflict ? 'conflict' : 'modified',
           changedFields,
           forgeSummary: `Pos(${fPart.position.map((n) => n.toFixed(1)).join(',')}) Size(${fPart.size.map((n) => n.toFixed(1)).join(',')}) ${fPart.material} ${fTris}t`,
@@ -3420,7 +3482,7 @@ export function computeModelVersionDiff(
 
 /**
  * Performs incremental synchronization between Forge and Roblox Studio without replacing the entire model:
- * - `'smart_merge'`: Adopts Studio CFrame/Size/Material edits while preserving Forge high-resolution mesh topology & PBR maps unless Studio explicitly added new geometry.
+ * - `'smart_merge'`: Adopts Studio CFrame/Size/Material/Hierarchy edits while preserving Forge high-resolution mesh topology & PBR maps unless Studio explicitly added new geometry.
  * - `'accept_studio'`: Applies Studio changes for the selected parts while leaving unselected Forge parts untouched.
  * - `'keep_forge'`: Keeps Forge state for conflicted parts while importing newly added Studio parts.
  */
@@ -3433,16 +3495,22 @@ export function incrementalMergeAssets(
   const allowSet =
     selectedPartNames && selectedPartNames.length > 0 ? new Set(selectedPartNames) : null;
 
-  const studioMap = new Map<string, MeshPart3DSpec>();
-  for (const p of studioAsset.parts || []) studioMap.set(p.name, p);
+  const studioByName = new Map<string, MeshPart3DSpec>();
+  const studioById = new Map<string, MeshPart3DSpec>();
+  for (const p of studioAsset.parts || []) {
+    studioByName.set(p.name, p);
+    if (p.partId) studioById.set(p.partId, p);
+  }
 
   const mergedParts: MeshPart3DSpec[] = [];
   const handledNames = new Set<string>();
   let appliedCount = 0;
 
-  for (const fPart of forgeAsset.parts || []) {
+  for (let idx = 0; idx < (forgeAsset.parts || []).length; idx++) {
+    const fPart = forgeAsset.parts[idx];
     handledNames.add(fPart.name);
-    const sPart = studioMap.get(fPart.name);
+    const sPart =
+      (fPart.partId ? studioById.get(fPart.partId) : undefined) || studioByName.get(fPart.name);
 
     if (allowSet && !allowSet.has(fPart.name)) {
       mergedParts.push(fPart);
@@ -3464,9 +3532,13 @@ export function incrementalMergeAssets(
     }
 
     if (strategy === 'accept_studio') {
+      const resolvedParent = sPart.parentName || fPart.parentName || forgeAsset.name;
       mergedParts.push({
         ...fPart,
         ...sPart,
+        partId: sPart.partId || fPart.partId || `${forgeAsset.name}::${fPart.name}::${idx + 1}`,
+        parentName: resolvedParent,
+        hierarchyPath: `${resolvedParent}/${sPart.name || fPart.name}`,
         pbrMaterial: sPart.pbrMaterial || fPart.pbrMaterial,
         baseMeshData: sPart.meshData || fPart.baseMeshData,
       });
@@ -3474,13 +3546,17 @@ export function incrementalMergeAssets(
       continue;
     }
 
-    // smart_merge: combine Studio CFrame/Size/Material/Color with Forge's rich geometry & PBR unless Studio has higher triangle count
+    // smart_merge: combine Studio CFrame/Size/Material/Color/Hierarchy with Forge's rich geometry & PBR unless Studio has higher triangle count
     const fTris = fPart.meshData?.faces?.length || 0;
     const sTris = sPart.meshData?.faces?.length || 0;
     const bestMeshData = sTris > fTris ? sPart.meshData : fPart.meshData;
+    const resolvedParent = sPart.parentName || fPart.parentName || forgeAsset.name;
 
     let mergedPart: MeshPart3DSpec = {
       ...fPart,
+      partId: fPart.partId || sPart.partId || `${forgeAsset.name}::${fPart.name}::${idx + 1}`,
+      parentName: resolvedParent,
+      hierarchyPath: `${resolvedParent}/${fPart.name}`,
       position: sPart.position || fPart.position,
       rotation: sPart.rotation || fPart.rotation,
       material: sPart.material || fPart.material,
@@ -3510,8 +3586,12 @@ export function incrementalMergeAssets(
   for (const sPart of studioAsset.parts || []) {
     if (!handledNames.has(sPart.name)) {
       if (!allowSet || allowSet.has(sPart.name)) {
+        const resolvedParent = sPart.parentName || forgeAsset.name;
         mergedParts.push({
           ...sPart,
+          partId: sPart.partId || `${forgeAsset.name}::${sPart.name}::${mergedParts.length + 1}`,
+          parentName: resolvedParent,
+          hierarchyPath: `${resolvedParent}/${sPart.name}`,
           meshData: ensurePartHasMeshData(sPart),
         });
         appliedCount++;
@@ -3769,6 +3849,44 @@ export function runAutomatedValidationAndSelfHeal(
     details: luauPassed
       ? 'Módulo Luau --!strict válido con CreateEditableMesh(), ReconstructInPlace() y cero asignaciones inválidas a MeshPart.MeshId.'
       : 'El script Luau fue regenerado automáticamente para cumplir --!strict.',
+  });
+
+  // 6. DataModel Bidirectional Sync & Stable ForgePartId Hierarchy Test
+  let syncRoundtripPassed = false;
+  let syncRoundtripDetails = '';
+  try {
+    const xmlOut = exportAssetToRBXMX(healedAsset);
+    const studioSim = parseRBXMXToForgeAsset(xmlOut, `${healedAsset.name}.rbxmx`);
+    const hasStableIds = studioSim.parts.every((p) => Boolean(p.partId && p.parentName));
+    if (studioSim.parts.length > 0) {
+      studioSim.parts[0] = {
+        ...studioSim.parts[0],
+        position: [
+          (studioSim.parts[0].position[0] ?? 0) + 1.5,
+          studioSim.parts[0].position[1] ?? 1,
+          studioSim.parts[0].position[2] ?? 0,
+        ],
+        parentName: `${healedAsset.name}_SubGroup`,
+      };
+    }
+    const diffReport = computeModelVersionDiff(healedAsset, studioSim);
+    const mergedRes = incrementalMergeAssets(healedAsset, studioSim, 'smart_merge');
+    syncRoundtripPassed =
+      hasStableIds &&
+      diffReport.modifiedCount >= 1 &&
+      mergedRes.mergedAsset.parts.length === healedAsset.parts.length;
+    syncRoundtripDetails = `ForgePartId, ForgeParentName y sincronización incremental DataModel verificados (${mergedRes.mergedAsset.parts.length} MeshParts, diff detectado: ${diffReport.modifiedCount} modificada).`;
+  } catch (err: any) {
+    syncRoundtripDetails = `Error en prueba de sincronización DataModel: ${err.message}`;
+  }
+
+  checks.push({
+    id: 'datamodel_bidirectional_sync',
+    category: 'import_export',
+    title: 'Sincronización Bidireccional DataModel (ForgePartId, Jerarquía y PBR)',
+    passed: syncRoundtripPassed,
+    autoHealed: false,
+    details: syncRoundtripDetails,
   });
 
   const passedChecks = checks.filter((c) => c.passed).length;

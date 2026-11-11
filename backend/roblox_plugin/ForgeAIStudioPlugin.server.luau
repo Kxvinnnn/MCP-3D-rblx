@@ -348,6 +348,36 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?)
             light.Parent = part
         end
 
+        -- Preserve stable ForgePartId, parent hierarchy, and geometry buffer for bidirectional DataModel sync
+        local resolvedPartId = tostring(
+            partSpec.partId
+            or partSpec.id
+            or string.format("forge-part-%d-%s", idx, string.lower(string.gsub(part.Name, "[^%w_]", "_")))
+        )
+        local resolvedParentName = tostring(partSpec.parentName or "Root")
+        part:SetAttribute("ForgePartId", resolvedPartId)
+        part:SetAttribute("ForgeParentName", resolvedParentName)
+        part:SetAttribute("ForgeHierarchyPath", tostring(partSpec.hierarchyPath or part.Name))
+
+        if type(partSpec.meshData) == "table" and not part:FindFirstChild("ForgeMeshGeometryJSON") then
+            local okJson, encodedGeom = pcall(function()
+                return HttpService:JSONEncode({
+                    partId = resolvedPartId,
+                    parentName = resolvedParentName,
+                    vertices = partSpec.meshData.vertices or {},
+                    normals = partSpec.meshData.normals or {},
+                    uvs = partSpec.meshData.uvs or {},
+                    faces = partSpec.meshData.faces or {},
+                })
+            end)
+            if okJson and type(encodedGeom) == "string" then
+                local geomStringVal = Instance.new("StringValue")
+                geomStringVal.Name = "ForgeMeshGeometryJSON"
+                geomStringVal.Value = encodedGeom
+                geomStringVal.Parent = part
+            end
+        end
+
         part.Parent = model
         if idx == 1 then
             model.PrimaryPart = part
@@ -520,7 +550,99 @@ local function reconstructEditableMeshModelsInStudio(): string
     )
 end
 
--- Verify Rojo Sync Manifest against actual Roblox Studio DataModel
+-- FNV-1a 32-bit hash matching backend compute_fnv1a_32_hex / computeFnv1a32Hex
+local function computeLuauContentHash(content: string): string
+    local h: number = 0x811c9dc5
+    for i = 1, #content do
+        h = bit32.bxor(h, string.byte(content, i))
+        -- Multiply by 0x01000193 modulo 2^32 using 16-bit split to avoid float precision loss
+        local lo = bit32.band(h, 0xFFFF)
+        local hi = bit32.rshift(h, 16)
+        local prodLo = lo * 0x0193
+        local prodMid = lo * 0x0100 + hi * 0x0193 + bit32.rshift(prodLo, 16)
+        h = bit32.bor(bit32.lshift(bit32.band(prodMid, 0xFFFF), 16), bit32.band(prodLo, 0xFFFF))
+    end
+    return string.format("%08x", h)
+end
+
+-- Helper to serialize BaseParts from a Studio Model or Selection with ForgePartId, hierarchy, geometry, and PBR
+local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, rootModel: Model?): { [number]: { [string]: any } }
+    local serializedParts = {}
+    for idx, part in ipairs(collectedParts) do
+        local rx, ry, rz = part.CFrame:ToEulerAnglesXYZ()
+        local geomVal = part:FindFirstChild("ForgeMeshGeometryJSON")
+        local meshData = nil
+        if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
+            local okDec, decoded = pcall(function()
+                return HttpService:JSONDecode(geomVal.Value)
+            end)
+            if okDec and type(decoded) == "table" then
+                meshData = decoded
+            end
+        end
+
+        local partIdAttr = part:GetAttribute("ForgePartId")
+        local partId = if type(partIdAttr) == "string" and #partIdAttr > 0
+            then partIdAttr
+            elseif type(meshData) == "table" and type(meshData.partId) == "string" and #meshData.partId > 0
+            then meshData.partId
+            else string.format("forge-part-%d-%s", idx, string.lower(string.gsub(part.Name, "[^%w_]", "_")))
+
+        local parentName = "Root"
+        if part.Parent and part.Parent ~= Workspace then
+            if rootModel and part.Parent == rootModel then
+                local attrParent = part:GetAttribute("ForgeParentName")
+                parentName = if type(attrParent) == "string" and #attrParent > 0 then attrParent else "Root"
+            else
+                parentName = part.Parent.Name
+            end
+        end
+        local hierarchyPath = if parentName ~= "Root" then (parentName .. "/" .. part.Name) else part.Name
+
+        local sa = part:FindFirstChildOfClass("SurfaceAppearance")
+        local pbrSpec = nil
+        if sa then
+            pbrSpec = {
+                materialName = tostring(part:GetAttribute("PBR_MaterialName") or (part.Name .. "_PBR")),
+                albedoHex = string.format("#%02x%02x%02x", math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255)),
+                roughness = tonumber(part:GetAttribute("PBR_Roughness") or part:GetAttribute("ForgePBRRoughness")) or 0.35,
+                metalness = tonumber(part:GetAttribute("PBR_Metalness") or part:GetAttribute("ForgePBRMetalness")) or 0.65,
+                colorMapId = if isVerifiedRobloxAssetUri(sa.ColorMap) then sa.ColorMap else nil,
+                normalMapId = if isVerifiedRobloxAssetUri(sa.NormalMap) then sa.NormalMap else nil,
+                roughnessMapId = if isVerifiedRobloxAssetUri(sa.RoughnessMap) then sa.RoughnessMap else nil,
+                metalnessMapId = if isVerifiedRobloxAssetUri(sa.MetalnessMap) then sa.MetalnessMap else nil,
+                colorMapAssetId = if isVerifiedRobloxAssetUri(sa.ColorMap) then sa.ColorMap else nil,
+                normalMapAssetId = if isVerifiedRobloxAssetUri(sa.NormalMap) then sa.NormalMap else nil,
+                roughnessMapAssetId = if isVerifiedRobloxAssetUri(sa.RoughnessMap) then sa.RoughnessMap else nil,
+                metalnessMapAssetId = if isVerifiedRobloxAssetUri(sa.MetalnessMap) then sa.MetalnessMap else nil,
+            }
+        end
+
+        table.insert(serializedParts, {
+            partId = partId,
+            name = part.Name,
+            parentName = parentName,
+            hierarchyPath = hierarchyPath,
+            shape = "MeshPart",
+            size = { part.Size.X, part.Size.Y, part.Size.Z },
+            position = { part.Position.X, part.Position.Y, part.Position.Z },
+            rotation = { math.deg(rx), math.deg(ry), math.deg(rz) },
+            color = { math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255) },
+            material = part.Material.Name,
+            roughness = tonumber(part:GetAttribute("PBR_Roughness") or part:GetAttribute("ForgePBRRoughness")) or 0.35,
+            metalness = tonumber(part:GetAttribute("PBR_Metalness") or part:GetAttribute("ForgePBRMetalness")) or 0.65,
+            transparency = part.Transparency,
+            canCollide = part.CanCollide,
+            anchored = part.Anchored,
+            collisionFidelity = if part:IsA("MeshPart") then part.CollisionFidelity.Name else "Hull",
+            meshData = meshData,
+            pbrMaterial = pbrSpec,
+        })
+    end
+    return serializedParts
+end
+
+-- Verify Rojo Sync Manifest AND live 3D DataModel (geometry, transforms, hierarchies, materials) against Forge
 local function verifyRojoSyncInStudio(): (number, number, string)
     local ok, data = requestBackend("/api/v1/rojo/sync-manifest", "GET", nil)
     if not ok then
@@ -529,12 +651,14 @@ local function verifyRojoSyncInStudio(): (number, number, string)
 
     local files = data.files or {}
     local syncedCount = 0
+    local outdatedList = {}
     local missingList = {}
 
     for _, item in ipairs(files) do
         local name = item.name
         local relPath: string = item.relative_path or ""
-        local found = nil
+        local expectedHash: string = tostring(item.content_fnv32 or "")
+        local found: Instance? = nil
 
         if string.find(relPath, "^src/server") then
             found = ServerScriptService:FindFirstChild(name, true)
@@ -547,17 +671,101 @@ local function verifyRojoSyncInStudio(): (number, number, string)
         end
 
         if found then
-            syncedCount += 1
+            local contentMatch = true
+            if #expectedHash > 0 and found:IsA("LuaSourceContainer") then
+                local okSrc, srcText = pcall(function()
+                    return (found :: any).Source
+                end)
+                if okSrc and type(srcText) == "string" then
+                    local studioHash = computeLuauContentHash(srcText)
+                    if studioHash ~= expectedHash then
+                        contentMatch = false
+                        table.insert(outdatedList, string.format("%s (Studio:%s ≠ Rojo:%s)", name, studioHash, expectedHash))
+                    end
+                end
+            end
+            if contentMatch then
+                syncedCount += 1
+            end
         else
             table.insert(missingList, name .. " (" .. relPath .. ")")
         end
     end
 
+    -- Also compare active/selected 3D Model in Studio DataModel against Forge Web Editor
+    local dmSummary = ""
+    local targetModel: Model? = nil
+    for _, sel in ipairs(Selection:Get()) do
+        if sel:IsA("Model") then
+            targetModel = sel
+            break
+        elseif sel:IsA("BasePart") and sel.Parent and sel.Parent:IsA("Model") and sel.Parent ~= Workspace then
+            targetModel = sel.Parent
+            break
+        end
+    end
+    if not targetModel then
+        for _, child in ipairs(Workspace:GetChildren()) do
+            if child:IsA("Model") and (child:GetAttribute("ForgeEditableMeshReconstructed") ~= nil or child:FindFirstChild("ForgeStudioReconstructor")) then
+                targetModel = child
+                break
+            end
+        end
+    end
+
+    if targetModel then
+        local modelParts: { BasePart } = {}
+        for _, desc in ipairs(targetModel:GetDescendants()) do
+            if desc:IsA("BasePart") then
+                table.insert(modelParts, desc)
+            end
+        end
+        local serialized = serializeStudioPartsFromInstances(modelParts, targetModel)
+        local okDiff, diffResp = requestBackend("/api/v1/assets/compare-datamodel", "POST", {
+            model_name = targetModel.Name,
+            parts = serialized,
+        })
+        if okDiff and type(diffResp) == "table" and type(diffResp.diff) == "table" then
+            local d = diffResp.diff
+            local modCount = if type(d.modified_parts) == "table" then #d.modified_parts else 0
+            local addCount = if type(d.added_in_studio) == "table" then #d.added_in_studio else 0
+            local remCount = if type(d.removed_in_studio) == "table" then #d.removed_in_studio else 0
+            if d.in_sync then
+                dmSummary = string.format(
+                    "\nDataModel 3D '%s': ✅ 100%% en sincronía (%d MeshParts verificados en geometría, transformaciones, jerarquía y PBR).",
+                    targetModel.Name,
+                    tonumber(d.unchanged_count) or #serialized
+                )
+            else
+                dmSummary = string.format(
+                    "\nDataModel 3D '%s': ⚠️ Diferencias detectadas (%d modificadas, %d añadidas en Studio, %d eliminadas).",
+                    targetModel.Name,
+                    modCount,
+                    addCount,
+                    remCount
+                )
+            end
+        end
+    end
+
+    local statusLine = "✅ 100% Sincronizado con Rojo (Existencia + Hash FNV32)"
+    if #missingList > 0 or #outdatedList > 0 then
+        local parts = {}
+        if #missingList > 0 then
+            table.insert(parts, "Faltantes: " .. table.concat(missingList, ", "))
+        end
+        if #outdatedList > 0 then
+            table.insert(parts, "Contenido desactualizado: " .. table.concat(outdatedList, ", "))
+        end
+        statusLine = table.concat(parts, " | ")
+    end
+
     local report = string.format(
-        "Sincronizados en Studio: %d/%d archivos.\n%s",
+        "Sincronizados en Studio: %d/%d módulos Luau.\n%s%s",
         syncedCount,
         #files,
-        if #missingList > 0 then "Pendientes de Rojo serve: " .. table.concat(missingList, ", ") else "✅ 100% Sincronizado con Rojo"
+        statusLine,
+        dmSummary
     )
     return syncedCount, #files, report
 end
@@ -625,52 +833,7 @@ local function pushSelectedModelToForgeStudio(): string
     end
 
     local modelName = if targetModel then targetModel.Name else "StudioSyncedModel"
-    local serializedParts = {}
-
-    for _, part in ipairs(collectedParts) do
-        local rx, ry, rz = part.CFrame:ToEulerAnglesXYZ()
-        local geomVal = part:FindFirstChild("ForgeMeshGeometryJSON")
-        local meshData = nil
-        if geomVal and geomVal:IsA("StringValue") and #geomVal.Value > 2 then
-            local okDec, decoded = pcall(function()
-                return HttpService:JSONDecode(geomVal.Value)
-            end)
-            if okDec and type(decoded) == "table" then
-                meshData = decoded
-            end
-        end
-
-        local sa = part:FindFirstChildOfClass("SurfaceAppearance")
-        local pbrSpec = nil
-        if sa then
-            pbrSpec = {
-                materialName = part.Name .. "_PBR",
-                albedoHex = string.format("#%02x%02x%02x", math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255)),
-                roughness = part:GetAttribute("ForgePBRRoughness") or 0.35,
-                metalness = part:GetAttribute("ForgePBRMetalness") or 0.65,
-                colorMapAssetId = if isVerifiedRobloxAssetUri(sa.ColorMap) then sa.ColorMap else nil,
-                normalMapAssetId = if isVerifiedRobloxAssetUri(sa.NormalMap) then sa.NormalMap else nil,
-                roughnessMapAssetId = if isVerifiedRobloxAssetUri(sa.RoughnessMap) then sa.RoughnessMap else nil,
-                metalnessMapAssetId = if isVerifiedRobloxAssetUri(sa.MetalnessMap) then sa.MetalnessMap else nil,
-            }
-        end
-
-        table.insert(serializedParts, {
-            name = part.Name,
-            shape = "MeshPart",
-            size = { part.Size.X, part.Size.Y, part.Size.Z },
-            position = { part.Position.X, part.Position.Y, part.Position.Z },
-            rotation = { math.deg(rx), math.deg(ry), math.deg(rz) },
-            color = { math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255) },
-            material = part.Material.Name,
-            transparency = part.Transparency,
-            canCollide = part.CanCollide,
-            anchored = part.Anchored,
-            collisionFidelity = if part:IsA("MeshPart") then part.CollisionFidelity.Name else "Hull",
-            meshData = meshData,
-            pbrMaterial = pbrSpec,
-        })
-    end
+    local serializedParts = serializeStudioPartsFromInstances(collectedParts, targetModel)
 
     local ok, resp = requestBackend("/api/v1/assets/studio-push", "POST", {
         model_name = modelName,
@@ -682,11 +845,18 @@ local function pushSelectedModelToForgeStudio(): string
         return "Error en Push Incremental hacia Forge: " .. tostring(resp)
     end
 
+    local diffInfo = ""
+    if type(resp.sync_diff) == "table" then
+        local modCount = if type(resp.sync_diff.modified_parts) == "table" then #resp.sync_diff.modified_parts else 0
+        diffInfo = string.format(" | Diff: %d modificadas, %d sin cambios", modCount, tonumber(resp.sync_diff.unchanged_count) or 0)
+    end
+
     return string.format(
-        "✅ Push Incremental Studio → Forge completado: %s (%d piezas sincronizadas, v%s)\nRojo .rbxmx: %s",
+        "✅ Push Incremental Studio → Forge completado: %s (%d piezas sincronizadas, v%s%s)\nRojo .rbxmx: %s",
         modelName,
         #serializedParts,
         tostring(resp.asset and resp.asset.version or 1),
+        diffInfo,
         tostring(resp.rbxmx_saved_path or "Actualizado")
     )
 end

@@ -54,7 +54,12 @@ from engines.generation_3d_engine import (
     extract_mesh_geometry_from_processed_submesh,
     validate_published_roblox_mesh_id,
 )
-from engines.asset_engine import AssetEngine
+from engines.asset_engine import (
+    AssetEngine,
+    compute_fnv1a_32_hex,
+    normalize_parts_with_sync_metadata,
+    validate_and_decode_png_bytes,
+)
 from engines.world_engine import WorldEngine
 from engines.agents_engine import AGENT_DEFINITIONS, AutonomousMultiAgentOrchestrator
 from engines.context_pruner import (
@@ -265,10 +270,13 @@ def audit_project_modules() -> Dict[str, Any]:
         for luau_file in src_dir.rglob("*.luau"):
             rel_path = luau_file.relative_to(rojo_root).as_posix()
             module_name = luau_file.name.replace(".server.luau", "").replace(".client.luau", "").replace(".luau", "")
+            raw_bytes = luau_file.read_bytes()
+            raw_text = raw_bytes.decode("utf-8", errors="ignore")
             existing_files.append({
                 "name": module_name,
                 "relative_path": rel_path,
-                "sha256": hashlib.sha256(luau_file.read_bytes()).hexdigest()[:12],
+                "sha256": hashlib.sha256(raw_bytes).hexdigest()[:12],
+                "content_fnv32": compute_fnv1a_32_hex(raw_text),
             })
 
     existing_names = {f["name"] for f in existing_files}
@@ -549,43 +557,28 @@ def get_assets_library_path() -> Path:
             p.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(default_lib, p)
         else:
+            p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("[]", encoding="utf-8")
     return p
 
 
+def get_asset_engine() -> AssetEngine:
+    """
+    Returns the single authoritative AssetEngine persistence service for the active Rojo workspace.
+    """
+    return AssetEngine(get_assets_library_path())
+
+
 def load_assets_library() -> List[Dict[str, Any]]:
-    try:
-        return json.loads(get_assets_library_path().read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    return get_asset_engine().load_library()
 
 
 def save_asset_to_library(asset_data: Dict[str, Any]) -> Dict[str, Any]:
-    assets = load_assets_library()
-    if not asset_data.get("id"):
-        asset_data["id"] = f"asset-{int(time.time() * 1000)}"
-    now_iso = datetime.utcnow().isoformat() + "Z"
-    existing = next((a for a in assets if a.get("id") == asset_data["id"] or a.get("name") == asset_data.get("name")), None)
-    prev_version = int(existing.get("version", 0)) if existing else 0
-    next_version = prev_version + 1
-    history = list(existing.get("version_history", [])) if existing and isinstance(existing.get("version_history"), list) else []
-    if existing and existing.get("parts"):
-        history.insert(0, {
-            "version": prev_version or 1,
-            "timestamp": existing.get("updated_at") or existing.get("created_at") or now_iso,
-            "poly_count": existing.get("poly_count", 0),
-            "part_count": len(existing.get("parts", [])),
-            "parts": existing.get("parts", []),
-            "luau_code": existing.get("luau_code", ""),
-        })
-    asset_data["created_at"] = existing.get("created_at", now_iso) if existing else now_iso
-    asset_data["updated_at"] = now_iso
-    asset_data["version"] = next_version
-    asset_data["version_history"] = history[:15]
-    assets = [a for a in assets if a.get("id") != asset_data["id"]]
-    assets.insert(0, asset_data)
-    get_assets_library_path().write_text(json.dumps(assets, indent=2), encoding="utf-8")
-    return asset_data
+    """
+    Unified persistence wrapper delegating to AssetEngine.upsert_asset()
+    (with SHA-256 snapshot deduplication, 20-version history, and full PBR metadata).
+    """
+    return get_asset_engine().upsert_asset(asset_data)
 
 
 @app.get("/api/v1/assets")
@@ -601,10 +594,10 @@ def add_asset(asset: Dict[str, Any]):
 
 @app.delete("/api/v1/assets/{asset_id}")
 def delete_asset(asset_id: str):
-    assets = load_assets_library()
-    filtered = [a for a in assets if a.get("id") != asset_id]
-    get_assets_library_path().write_text(json.dumps(filtered, indent=2), encoding="utf-8")
-    return {"deleted": asset_id, "remaining": len(filtered)}
+    engine = get_asset_engine()
+    deleted_ok = engine.delete_asset(asset_id)
+    remaining = len(engine.load_library())
+    return {"deleted": asset_id, "deleted_ok": deleted_ok, "remaining": remaining}
 
 
 # ------------------------------------------------------------------------------
@@ -980,18 +973,53 @@ def export_roblox_package(payload_body: Dict[str, Any], x_forge_token: Optional[
 def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     """
     Publishes browser-synthesized 4-channel PBR texture maps (Albedo, Normal, Roughness, Metalness PNGs)
-    into `src/shared/Assets3D/Textures/`, optionally uploads them to Roblox Open Cloud (with async Operation polling)
-    if `roblox_api_key` and `roblox_creator_id` are supplied, associates the PBR material with either
-    a specific `target_part_name` or all MeshParts on `target_asset_id`, and generates a `--!strict`
-    Luau `SurfaceAppearance` + `EditableImage` binder module (never outputting `rbxassetid://0`).
+    into `src/shared/Assets3D/Textures/`, validates and decodes all 4 PNG buffers (including indexed PLTE/tRNS),
+    checks that `target_asset_id` exists before persisting any PBR profile, optionally uploads decals to
+    Roblox Open Cloud (with async Operation polling), and reports an honest publication status:
+    `local_saved` | `cloud_publishing` | `cloud_published` | `partially_published` | `failed` | `asset_not_found`.
     """
     verify_security_token(x_forge_token)
     material_name = re.sub(r"[^a-zA-Z0-9_]", "", str(payload_body.get("material_name", "ForgePBRMaterial"))) or "ForgePBRMaterial"
     target_asset_id = str(payload_body.get("target_asset_id", "") or "").strip() or None
     target_part_name = str(payload_body.get("target_part_name", "") or "").strip() or None
     target_folder = "src/shared/Assets3D/Textures"
+
+    asset_engine = get_asset_engine()
+    existing_asset: Optional[Dict[str, Any]] = None
+    if target_asset_id:
+        existing_asset = asset_engine.get_asset(target_asset_id)
+        if not existing_asset:
+            return {
+                "success": False,
+                "status": "asset_not_found",
+                "error": f"El asset destino '{target_asset_id}' no existe en la biblioteca de assets.",
+                "material_name": material_name,
+                "target_asset_id": target_asset_id,
+                "target_part_name": target_part_name,
+                "saved_textures": {},
+                "published_channels": [],
+                "missing_channels": ["ColorMap.png", "NormalMap.png", "RoughnessMap.png", "MetalnessMap.png"],
+                "decode_errors": {},
+                "channel_status": {
+                    "ColorMap.png": "asset_not_found",
+                    "NormalMap.png": "asset_not_found",
+                    "RoughnessMap.png": "asset_not_found",
+                    "MetalnessMap.png": "asset_not_found",
+                },
+                "is_cloud_published": False,
+                "verified_cloud_ids": {},
+                "verified_cloud_uris": {},
+                "updated_asset": None,
+            }
+
     saved_textures: Dict[str, str] = {}
     raw_png_buffers: Dict[str, bytes] = {}
+    decoded_rgba_previews: Dict[str, str] = {}
+    png_validation_reports: Dict[str, Any] = {}
+    decode_errors: Dict[str, str] = {}
+    received_channels: List[str] = []
+    missing_channels: List[str] = []
+    channel_status: Dict[str, str] = {}
 
     for map_key, suffix in [
         ("albedo_data_url", "ColorMap.png"),
@@ -999,16 +1027,40 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
         ("roughness_data_url", "RoughnessMap.png"),
         ("metalness_data_url", "MetalnessMap.png"),
     ]:
-        data_url = str(payload_body.get(map_key, ""))
-        if "," in data_url:
-            _, b64_part = data_url.split(",", 1)
-            try:
-                raw_bytes = base64.b64decode(b64_part)
-                raw_png_buffers[suffix] = raw_bytes
-                tex_file = f"{material_name}_{suffix}"
-                saved_textures[suffix] = save_raw_asset_to_rojo(target_folder, tex_file, raw_bytes)
-            except Exception as err:
-                logger.warning(f"Failed to decode {map_key}: {err}")
+        data_url = str(payload_body.get(map_key, "") or "").strip()
+        if not data_url:
+            missing_channels.append(suffix)
+            channel_status[suffix] = "missing"
+            continue
+        b64_part = data_url.split(",", 1)[1] if "," in data_url else data_url
+        try:
+            raw_bytes = base64.b64decode(b64_part, validate=False)
+            validation = validate_and_decode_png_bytes(raw_bytes)
+            png_validation_reports[suffix] = {
+                "valid": validation["valid"],
+                "width": validation.get("width", 0),
+                "height": validation.get("height", 0),
+                "bit_depth": validation.get("bit_depth"),
+                "color_type": validation.get("color_type"),
+                "sha256": validation.get("sha256"),
+                "mean_rgba": validation.get("mean_rgba"),
+                "error": validation.get("error"),
+            }
+            if not validation["valid"]:
+                decode_errors[suffix] = str(validation.get("error") or "Invalid PNG buffer")
+                channel_status[suffix] = "decode_failed"
+                continue
+            raw_png_buffers[suffix] = raw_bytes
+            received_channels.append(suffix)
+            if validation.get("rgba_preview_b64"):
+                decoded_rgba_previews[suffix] = str(validation["rgba_preview_b64"])
+            tex_file = f"{material_name}_{suffix}"
+            saved_textures[suffix] = save_raw_asset_to_rojo(target_folder, tex_file, raw_bytes)
+            channel_status[suffix] = "local_saved"
+        except Exception as err:
+            decode_errors[suffix] = str(err)
+            channel_status[suffix] = "decode_failed"
+            logger.warning(f"Failed to decode {map_key}: {err}")
 
     roughness_val = float(payload_body.get("roughness", 0.35))
     metalness_val = float(payload_body.get("metalness", 0.75))
@@ -1021,9 +1073,6 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
     roughness_map_id = str(payload_body.get("roughness_map_asset_id", "") or "").strip()
     metalness_map_id = str(payload_body.get("metalness_map_asset_id", "") or "").strip()
 
-    asset_engine = AssetEngine(get_assets_library_path())
-
-    # Optional Roblox Open Cloud Asset API upload when credentials are provided
     roblox_api_key = str(
         payload_body.get("roblox_api_key")
         or payload_body.get("roblox_open_cloud_api_key")
@@ -1035,8 +1084,10 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
         or os.getenv("ROBLOX_CREATOR_ID", "")
     ).strip()
     cloud_publish_results: Dict[str, Any] = {}
+    cloud_requested = bool(roblox_api_key and roblox_creator_id)
+    cloud_publishing_channels: List[str] = []
 
-    if roblox_api_key and roblox_creator_id:
+    if cloud_requested:
         for suffix, attr_name in [
             ("ColorMap.png", "color"),
             ("NormalMap.png", "normal"),
@@ -1053,6 +1104,7 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
                 cloud_publish_results[suffix] = pub_res
                 if isinstance(pub_res, dict) and pub_res.get("published") and pub_res.get("roblox_asset_uri"):
                     uri = str(pub_res["roblox_asset_uri"])
+                    channel_status[suffix] = "cloud_published"
                     if attr_name == "color" and not color_map_id:
                         color_map_id = uri
                     elif attr_name == "normal" and not normal_map_id:
@@ -1061,6 +1113,56 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
                         roughness_map_id = uri
                     elif attr_name == "metalness" and not metalness_map_id:
                         metalness_map_id = uri
+                elif isinstance(pub_res, dict) and pub_res.get("status") == "cloud_publishing":
+                    channel_status[suffix] = "cloud_publishing"
+                    cloud_publishing_channels.append(suffix)
+                else:
+                    channel_status[suffix] = "cloud_publish_failed"
+
+    verified_cloud_uris = {
+        "color_map_id": color_map_id if asset_engine.is_verified_roblox_asset_uri(color_map_id) else None,
+        "normal_map_id": normal_map_id if asset_engine.is_verified_roblox_asset_uri(normal_map_id) else None,
+        "roughness_map_id": roughness_map_id if asset_engine.is_verified_roblox_asset_uri(roughness_map_id) else None,
+        "metalness_map_id": metalness_map_id if asset_engine.is_verified_roblox_asset_uri(metalness_map_id) else None,
+    }
+    if verified_cloud_uris["color_map_id"]:
+        channel_status["ColorMap.png"] = "cloud_published"
+    if verified_cloud_uris["normal_map_id"]:
+        channel_status["NormalMap.png"] = "cloud_published"
+    if verified_cloud_uris["roughness_map_id"]:
+        channel_status["RoughnessMap.png"] = "cloud_published"
+    if verified_cloud_uris["metalness_map_id"]:
+        channel_status["MetalnessMap.png"] = "cloud_published"
+
+    published_channels = [
+        ch
+        for ch, uri_key in [
+            ("ColorMap.png", "color_map_id"),
+            ("NormalMap.png", "normal_map_id"),
+            ("RoughnessMap.png", "roughness_map_id"),
+            ("MetalnessMap.png", "metalness_map_id"),
+        ]
+        if verified_cloud_uris[uri_key] is not None
+    ]
+    is_cloud_published = len(published_channels) == 4
+
+    # Determine honest publication status
+    if len(received_channels) == 0 or len(decode_errors) > 0:
+        pub_status = "failed"
+    elif len(published_channels) == 4:
+        pub_status = "cloud_published"
+    elif len(cloud_publishing_channels) > 0:
+        pub_status = "cloud_publishing"
+    elif len(published_channels) > 0:
+        pub_status = "partially_published"
+    elif cloud_requested and len(published_channels) == 0:
+        pub_status = "failed"
+    elif len(received_channels) == 4:
+        pub_status = "local_saved"
+    else:
+        pub_status = "partially_published"
+
+    is_success = pub_status in ("local_saved", "cloud_published", "partially_published", "cloud_publishing")
 
     pbr_luau = asset_engine.generate_pbr_surface_appearance_luau(
         material_name=material_name,
@@ -1074,74 +1176,99 @@ def publish_pbr_to_rojo(payload_body: Dict[str, Any], x_forge_token: Optional[st
         emissive_hex=emissive_hex,
         pattern=pattern,
         target_folder=target_folder,
+        decoded_rgba_previews=decoded_rgba_previews,
     )
     luau_file_name = f"{material_name}_SurfaceAppearance.luau"
-    luau_saved_path = save_luau_to_rojo("src/shared/Assets3D", luau_file_name, pbr_luau)
+    luau_saved_path = save_luau_to_rojo("src/shared/Assets3D", luau_file_name, pbr_luau) if is_success else None
 
-    verified_cloud_uris = {
-        "color_map_id": color_map_id if asset_engine.is_verified_roblox_asset_uri(color_map_id) else None,
-        "normal_map_id": normal_map_id if asset_engine.is_verified_roblox_asset_uri(normal_map_id) else None,
-        "roughness_map_id": roughness_map_id if asset_engine.is_verified_roblox_asset_uri(roughness_map_id) else None,
-        "metalness_map_id": metalness_map_id if asset_engine.is_verified_roblox_asset_uri(metalness_map_id) else None,
-    }
-    is_cloud_published = any(v is not None for v in verified_cloud_uris.values())
-
-    # Persist PBR profile and per-MeshPart pbrMaterial onto the target asset if specified
     updated_asset: Optional[Dict[str, Any]] = None
-    if target_asset_id:
-        assets = load_assets_library()
-        existing_asset = next((a for a in assets if str(a.get("id")) == target_asset_id or str(a.get("name")) == target_asset_id), None)
-        if existing_asset:
-            pbr_spec = {
-                "materialName": material_name,
-                "albedoHex": albedo_hex,
-                "roughness": roughness_val,
-                "metalness": metalness_val,
-                "emissiveHex": emissive_hex,
-                "pattern": pattern,
-                "colorMapAssetId": verified_cloud_uris["color_map_id"],
-                "normalMapAssetId": verified_cloud_uris["normal_map_id"],
-                "roughnessMapAssetId": verified_cloud_uris["roughness_map_id"],
-                "metalnessMapAssetId": verified_cloud_uris["metalness_map_id"],
-                "localColorMapFile": saved_textures.get("ColorMap.png"),
-                "localNormalMapFile": saved_textures.get("NormalMap.png"),
-                "localRoughnessMapFile": saved_textures.get("RoughnessMap.png"),
-                "localMetalnessMapFile": saved_textures.get("MetalnessMap.png"),
-            }
-            existing_asset["pbr_profile"] = {
-                "roughness": roughness_val,
-                "metalness": metalness_val,
-                "surface_appearance": True,
-                "emissive_accent": emissive_hex,
-                "color_map_asset_id": verified_cloud_uris["color_map_id"],
-                "normal_map_asset_id": verified_cloud_uris["normal_map_id"],
-                "roughness_map_asset_id": verified_cloud_uris["roughness_map_id"],
-                "metalness_map_asset_id": verified_cloud_uris["metalness_map_id"],
-                "local_color_map_file": saved_textures.get("ColorMap.png"),
-                "local_normal_map_file": saved_textures.get("NormalMap.png"),
-                "local_roughness_map_file": saved_textures.get("RoughnessMap.png"),
-                "local_metalness_map_file": saved_textures.get("MetalnessMap.png"),
-            }
-            if isinstance(existing_asset.get("parts"), list):
-                new_parts = []
-                for pt in existing_asset["parts"]:
-                    if not target_part_name or target_part_name == "__ALL__" or pt.get("name") == target_part_name:
-                        pt = {
-                            **pt,
-                            "roughness": roughness_val,
-                            "metalness": metalness_val,
-                            "pbrMaterial": pbr_spec,
-                        }
-                    new_parts.append(pt)
-                existing_asset["parts"] = new_parts
-            updated_asset = save_asset_to_library(existing_asset)
+    if existing_asset and is_success:
+        pbr_spec = {
+            "materialName": material_name,
+            "albedoHex": albedo_hex,
+            "roughness": roughness_val,
+            "metalness": metalness_val,
+            "emissiveHex": emissive_hex,
+            "pattern": pattern,
+            "publicationStatus": pub_status,
+            "colorMapId": verified_cloud_uris["color_map_id"],
+            "normalMapId": verified_cloud_uris["normal_map_id"],
+            "roughnessMapId": verified_cloud_uris["roughness_map_id"],
+            "metalnessMapId": verified_cloud_uris["metalness_map_id"],
+            "colorMapAssetId": verified_cloud_uris["color_map_id"],
+            "normalMapAssetId": verified_cloud_uris["normal_map_id"],
+            "roughnessMapAssetId": verified_cloud_uris["roughness_map_id"],
+            "metalnessMapAssetId": verified_cloud_uris["metalness_map_id"],
+            "localColorMapFile": saved_textures.get("ColorMap.png"),
+            "localNormalMapFile": saved_textures.get("NormalMap.png"),
+            "localRoughnessMapFile": saved_textures.get("RoughnessMap.png"),
+            "localMetalnessMapFile": saved_textures.get("MetalnessMap.png"),
+            "rgbaPreviewByChannel": decoded_rgba_previews,
+        }
+        existing_asset["pbr_profile"] = {
+            **(existing_asset.get("pbr_profile") or {}),
+            "albedo_hex": albedo_hex,
+            "emissive_hex": emissive_hex,
+            "roughness": roughness_val,
+            "metalness": metalness_val,
+            "pattern": pattern,
+            "surface_appearance": True,
+            "emissive_accent": emissive_hex,
+            "publication_status": pub_status,
+            "color_map_asset_id": verified_cloud_uris["color_map_id"],
+            "normal_map_asset_id": verified_cloud_uris["normal_map_id"],
+            "roughness_map_asset_id": verified_cloud_uris["roughness_map_id"],
+            "metalness_map_asset_id": verified_cloud_uris["metalness_map_id"],
+            "local_color_map_file": saved_textures.get("ColorMap.png"),
+            "local_normal_map_file": saved_textures.get("NormalMap.png"),
+            "local_roughness_map_file": saved_textures.get("RoughnessMap.png"),
+            "local_metalness_map_file": saved_textures.get("MetalnessMap.png"),
+        }
+        if isinstance(existing_asset.get("parts"), list):
+            new_parts = []
+            for pt in existing_asset["parts"]:
+                if not target_part_name or target_part_name == "__ALL__" or pt.get("name") == target_part_name:
+                    pt = {
+                        **pt,
+                        "roughness": roughness_val,
+                        "metalness": metalness_val,
+                        "pbrMaterial": pbr_spec,
+                    }
+                new_parts.append(pt)
+            existing_asset["parts"] = new_parts
+
+        safe_asset_name = re.sub(r"[^a-zA-Z0-9_]", "", str(existing_asset.get("name", "Model3D"))) or "Model3D"
+        part_specs = [MeshPart3DSpec(**p) for p in existing_asset.get("parts", [])]
+        enriched_specs = generation_3d_engine.ensure_mesh_data_on_parts(safe_asset_name, part_specs)
+        collision_fid = str(existing_asset.get("collision_fidelity", "Hull"))
+        rebuilt_luau = generation_3d_engine.build_luau_from_parts(safe_asset_name, enriched_specs, collision_fid)
+        rebuilt_rbxmx = generation_3d_engine.build_rbxmx_from_parts(
+            safe_asset_name,
+            enriched_specs,
+            collision_fid,
+            str(existing_asset.get("category", "3D Asset")),
+            rebuilt_luau,
+        )
+        asset_folder = str(existing_asset.get("rojo_target_folder", "src/shared/Assets3D"))
+        save_luau_to_rojo(asset_folder, f"{safe_asset_name}.luau", rebuilt_luau)
+        save_raw_asset_to_rojo(asset_folder, f"{safe_asset_name}.rbxmx", rebuilt_rbxmx.encode("utf-8"))
+        existing_asset["luau_code"] = rebuilt_luau
+        existing_asset["parts"] = [p.model_dump() for p in enriched_specs]
+        updated_asset = asset_engine.upsert_asset(existing_asset)
 
     return {
-        "success": True,
+        "success": is_success,
+        "status": pub_status,
         "material_name": material_name,
         "target_asset_id": target_asset_id,
         "target_part_name": target_part_name,
         "saved_textures": saved_textures,
+        "received_channels": received_channels,
+        "published_channels": published_channels,
+        "missing_channels": missing_channels,
+        "decode_errors": decode_errors,
+        "channel_status": channel_status,
+        "png_validation": png_validation_reports,
         "is_cloud_published": is_cloud_published,
         "verified_cloud_ids": verified_cloud_uris,
         "verified_cloud_uris": verified_cloud_uris,
@@ -1223,45 +1350,42 @@ def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Op
     asset_name = str(payload_body.get("asset_name", "")).strip()
     restore_version = payload_body.get("restore_version")
 
-    assets = load_assets_library()
-    target_asset = next(
-        (a for a in assets if (asset_id and a.get("id") == asset_id) or (asset_name and a.get("name") == asset_name)),
-        None,
-    )
+    engine = get_asset_engine()
+    target_asset = engine.get_asset(asset_id or asset_name)
     if not target_asset:
         raise HTTPException(status_code=404, detail="Asset not found in library.")
 
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "", str(target_asset.get("name", "Model3D"))) or "Model3D"
 
     if restore_version is not None:
-        history = target_asset.get("version_history", [])
-        snap = next((h for h in history if int(h.get("version", -1)) == int(restore_version)), None)
-        if not snap:
+        restored = engine.restore_asset_version(
+            str(target_asset.get("id") or target_asset.get("name")),
+            int(restore_version),
+        )
+        if not restored:
             raise HTTPException(status_code=404, detail=f"Version {restore_version} not found in asset history.")
-        target_asset["parts"] = snap.get("parts", target_asset.get("parts", []))
-        target_asset["luau_code"] = snap.get("luau_code", target_asset.get("luau_code", ""))
-        target_asset["poly_count"] = snap.get("poly_count", target_asset.get("poly_count", 0))
-        if snap.get("pbr_profile"):
-            target_asset["pbr_profile"] = snap["pbr_profile"]
-        if snap.get("collision_fidelity"):
-            target_asset["collision_fidelity"] = snap["collision_fidelity"]
-        if snap.get("description"):
-            target_asset["description"] = snap["description"]
-        saved = save_asset_to_library(target_asset)
-        part_specs = [MeshPart3DSpec(**p) for p in saved.get("parts", [])]
+        part_specs = [MeshPart3DSpec(**p) for p in restored.get("parts", [])]
+        enriched_specs = generation_3d_engine.ensure_mesh_data_on_parts(safe_name, part_specs)
+        collision_fid = str(restored.get("collision_fidelity", "Hull"))
+        rebuilt_luau = str(restored.get("luau_code") or "") or generation_3d_engine.build_luau_from_parts(
+            safe_name, enriched_specs, collision_fid
+        )
         rbxmx_content = generation_3d_engine.build_rbxmx_from_parts(
             safe_name,
-            part_specs,
-            str(saved.get("collision_fidelity", "Hull")),
-            str(saved.get("category", "3D Asset")),
-            str(saved.get("luau_code", "")),
+            enriched_specs,
+            collision_fid,
+            str(restored.get("category", "3D Asset")),
+            rebuilt_luau,
         )
+        target_folder = str(restored.get("rojo_target_folder", "src/shared/Assets3D"))
+        save_luau_to_rojo(target_folder, f"{safe_name}.luau", rebuilt_luau)
+        save_raw_asset_to_rojo(target_folder, f"{safe_name}.rbxmx", rbxmx_content.encode("utf-8"))
         return {
             "success": True,
             "source": f"version_history_v{restore_version}",
             "rbxmx_content": rbxmx_content,
-            "luau_content": saved.get("luau_code", ""),
-            "asset": saved,
+            "luau_content": rebuilt_luau,
+            "asset": restored,
         }
 
     rojo_root = Path(RUNTIME_CONFIG["rojo_project_path"]).resolve()
@@ -1333,12 +1457,44 @@ def pull_asset_changes_from_rojo(payload_body: Dict[str, Any], x_forge_token: Op
     }
 
 
+@app.post("/api/v1/assets/compare-datamodel")
+def compare_studio_datamodel(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    """
+    Pillar C Real DataModel Bidirectional Sync Diff:
+    Compares the live Roblox Studio DataModel (`studio_parts`) against the active asset in Forge (`asset_id` / `model_name`)
+    using stable `partId` (`ForgePartId`), `geometryHash`, `materialHash`, `transformHash`, and `parentName` hierarchy.
+    """
+    verify_security_token(x_forge_token)
+    model_name = str(payload_body.get("model_name") or payload_body.get("asset_id") or "").strip()
+    studio_parts = payload_body.get("parts") or payload_body.get("studio_parts") or []
+    engine = get_asset_engine()
+    existing = engine.get_asset(model_name)
+    if not existing:
+        return {
+            "found_in_forge": False,
+            "model_name": model_name,
+            "diff": engine.compare_datamodel([], studio_parts if isinstance(studio_parts, list) else []),
+        }
+    diff = engine.compare_datamodel(
+        existing.get("parts", []),
+        studio_parts if isinstance(studio_parts, list) else [],
+    )
+    return {
+        "found_in_forge": True,
+        "asset_id": existing.get("id"),
+        "model_name": existing.get("name"),
+        "version": existing.get("version", 1),
+        "diff": diff,
+    }
+
+
 @app.post("/api/v1/assets/studio-push")
 def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     """
     Pillar C Bidirectional Sync: Receives incremental part updates directly from the Roblox Studio Plugin
-    (`Selection` or `Workspace` model changes) and updates the asset in `assets_library.json` and Rojo `.rbxmx`/`.luau`
-    without overwriting unmodified geometry buffers or unrelated parts.
+    (`Selection` or `Workspace` model changes), matches parts by `partId` (`ForgePartId`) or `name`,
+    computes the exact DataModel diff (geometry, transforms, hierarchies, materials), and updates
+    the asset in `assets_library.json` and Rojo `.rbxmx`/`.luau` via the unified `AssetEngine`.
     """
     verify_security_token(x_forge_token)
     model_name = str(payload_body.get("model_name") or payload_body.get("name") or "StudioModel").strip()
@@ -1346,21 +1502,35 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
     if not isinstance(incoming_parts, list) or len(incoming_parts) == 0:
         raise HTTPException(status_code=400, detail="Requires non-empty parts array from Roblox Studio.")
 
-    assets = load_assets_library()
+    engine = get_asset_engine()
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "", model_name) or "StudioModel"
-    existing = next((a for a in assets if a.get("name") == model_name or a.get("name") == safe_name), None)
+    existing = engine.get_asset(model_name) or engine.get_asset(safe_name)
+
+    sync_diff = engine.compare_datamodel(
+        existing.get("parts", []) if existing else [],
+        incoming_parts,
+    )
 
     merged_parts: List[Dict[str, Any]] = []
     if existing and isinstance(existing.get("parts"), list):
-        existing_by_name = {str(p.get("name")): p for p in existing["parts"]}
+        norm_existing = normalize_parts_with_sync_metadata(existing["parts"])
+        existing_by_id = {str(p.get("partId")): p for p in norm_existing}
+        existing_by_name = {str(p.get("name")): p for p in norm_existing}
+        seen_ids = set()
         seen_names = set()
-        for inc in incoming_parts:
-            pname = str(inc.get("name", f"MeshPart_{len(merged_parts)+1}"))
+        for idx, inc in enumerate(incoming_parts):
+            inc_id = str(inc.get("partId") or inc.get("id") or "")
+            pname = str(inc.get("name", f"MeshPart_{idx + 1}"))
+            base_part = (existing_by_id.get(inc_id) if inc_id else None) or existing_by_name.get(pname, {})
+            resolved_id = inc_id or str(base_part.get("partId") or f"forge-part-{idx + 1}-{pname.lower()}")
+            seen_ids.add(resolved_id)
             seen_names.add(pname)
-            base_part = existing_by_name.get(pname, {})
             merged_part = {
                 **base_part,
+                "partId": resolved_id,
                 "name": pname,
+                "parentName": str(inc.get("parentName") or base_part.get("parentName") or "Root"),
+                "hierarchyPath": str(inc.get("hierarchyPath") or base_part.get("hierarchyPath") or pname),
                 "shape": "MeshPart",
                 "size": inc.get("size", base_part.get("size", [2.0, 2.0, 2.0])),
                 "position": inc.get("position", base_part.get("position", [0.0, 1.0, 0.0])),
@@ -1377,13 +1547,12 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
                 "pbrMaterial": inc.get("pbrMaterial") or base_part.get("pbrMaterial"),
             }
             merged_parts.append(merged_part)
-        # Preserve any parts in Forge that weren't removed unless remove_missing is explicitly true
         if not payload_body.get("remove_missing", False):
-            for ep in existing["parts"]:
-                if str(ep.get("name")) not in seen_names:
+            for ep in norm_existing:
+                if str(ep.get("partId")) not in seen_ids and str(ep.get("name")) not in seen_names:
                     merged_parts.append(ep)
     else:
-        merged_parts = incoming_parts
+        merged_parts = normalize_parts_with_sync_metadata(incoming_parts)
 
     part_specs = [MeshPart3DSpec(**p) for p in merged_parts]
     enriched_specs = generation_3d_engine.ensure_mesh_data_on_parts(safe_name, part_specs)
@@ -1401,6 +1570,7 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
     luau_saved = save_luau_to_rojo(target_folder, f"{safe_name}.luau", luau_code)
     rbxmx_saved = save_raw_asset_to_rojo(target_folder, f"{safe_name}.rbxmx", rbxmx_content.encode("utf-8"))
 
+    enriched_dicts = normalize_parts_with_sync_metadata([p.model_dump() for p in enriched_specs])
     total_tris = sum(len(p.meshData.faces) for p in enriched_specs if p.meshData)
     asset_payload = {
         **(existing or {}),
@@ -1412,7 +1582,7 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
         "collision_fidelity": collision_fidelity,
         "rojo_target_folder": target_folder,
         "file_name": f"{safe_name}.luau",
-        "parts": [p.model_dump() for p in enriched_specs],
+        "parts": enriched_dicts,
         "luau_code": luau_code,
         "saved_path": luau_saved,
     }
@@ -1420,6 +1590,7 @@ def receive_studio_incremental_push(payload_body: Dict[str, Any], x_forge_token:
     return {
         "success": True,
         "asset": saved,
+        "sync_diff": sync_diff,
         "luau_saved_path": luau_saved,
         "rbxmx_saved_path": rbxmx_saved,
         "updated_part_count": len(enriched_specs),

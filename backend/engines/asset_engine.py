@@ -44,16 +44,195 @@ def is_verified_roblox_asset_uri(uri: Optional[str]) -> bool:
     return False
 
 
+def compute_fnv1a_32_hex(content: str) -> str:
+    """
+    Computes an 8-character lowercase hex FNV-1a 32-bit hash identical to the Luau
+    and TypeScript sync engines so file and part hashes match across Python, Node, and Roblox Studio.
+    """
+    h = 0x811C9DC5
+    for b in content.encode("utf-8"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08x}"
+
+
+def compute_part_sync_hashes(part: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Computes deterministic FNV-1a 32-bit hashes for a part's geometry, material/PBR,
+    and spatial transform + hierarchy so bidirectional sync between Forge and Roblox Studio
+    can detect partial changes per MeshPart.
+    """
+    mesh_data = part.get("meshData") if isinstance(part.get("meshData"), dict) else {}
+    verts = mesh_data.get("vertices") if isinstance(mesh_data.get("vertices"), list) else []
+    faces = mesh_data.get("faces") if isinstance(mesh_data.get("faces"), list) else []
+    uvs = mesh_data.get("uvs") if isinstance(mesh_data.get("uvs"), list) else []
+    normals = mesh_data.get("normals") if isinstance(mesh_data.get("normals"), list) else []
+    first_v = ",".join(f"{float(n):.3f}" for n in verts[0][:3]) if verts and isinstance(verts[0], list) else ""
+    last_v = ",".join(f"{float(n):.3f}" for n in verts[-1][:3]) if verts and isinstance(verts[-1], list) else ""
+    geom_sig = (
+        f"shape:{part.get('shape', 'MeshPart')}|v:{len(verts)}|f:{len(faces)}|"
+        f"uv:{len(uvs)}|vn:{len(normals)}|fv:{first_v}|lv:{last_v}|"
+        f"meshId:{part.get('meshId') or ''}"
+    )
+
+    pbr = part.get("pbrMaterial") if isinstance(part.get("pbrMaterial"), dict) else {}
+    mat_sig = (
+        f"mat:{part.get('material', 'SmoothPlastic')}|color:{str(part.get('color', '#38bdf8')).lower()}|"
+        f"trans:{float(part.get('transparency', 0) or 0):.3f}|refl:{float(part.get('reflectance', 0) or 0):.3f}|"
+        f"pbr:{float(pbr.get('roughness', -1)):.2f},{float(pbr.get('metalness', -1)):.2f},"
+        f"{pbr.get('colorMapId') or ''},{pbr.get('normalMapId') or ''},"
+        f"{pbr.get('roughnessMapId') or ''},{pbr.get('metalnessMapId') or ''}"
+    )
+
+    pos = part.get("position") if isinstance(part.get("position"), list) and len(part["position"]) >= 3 else [0, 0, 0]
+    sz = part.get("size") if isinstance(part.get("size"), list) and len(part["size"]) >= 3 else [4, 4, 4]
+    rot = part.get("rotation") if isinstance(part.get("rotation"), list) and len(part["rotation"]) >= 3 else [0, 0, 0]
+    parent_name = str(part.get("parentName") or part.get("hierarchyPath") or "Root")
+    transform_sig = (
+        f"p:{float(pos[0]):.3f},{float(pos[1]):.3f},{float(pos[2]):.3f}|"
+        f"s:{float(sz[0]):.3f},{float(sz[1]):.3f},{float(sz[2]):.3f}|"
+        f"r:{float(rot[0]):.2f},{float(rot[1]):.2f},{float(rot[2]):.2f}|"
+        f"parent:{parent_name}|anc:{bool(part.get('anchored', True))}|col:{bool(part.get('canCollide', True))}"
+    )
+
+    return {
+        "geometryHash": compute_fnv1a_32_hex(geom_sig),
+        "materialHash": compute_fnv1a_32_hex(mat_sig),
+        "transformHash": compute_fnv1a_32_hex(transform_sig),
+    }
+
+
+def normalize_parts_with_sync_metadata(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ensures every part in an asset has a stable `partId` (`ForgePartId`), `parentName`,
+    `hierarchyPath`, and fresh `geometryHash`, `materialHash`, and `transformHash`.
+    """
+    if not isinstance(parts, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for idx, raw in enumerate(parts):
+        if not isinstance(raw, dict):
+            continue
+        p = dict(raw)
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", str(p.get("name") or f"Part_{idx + 1}"))
+        part_id = str(p.get("partId") or p.get("id") or f"forge-part-{idx + 1}-{safe_name.lower()}")
+        parent_name = str(p.get("parentName") or "Root")
+        hierarchy_path = str(
+            p.get("hierarchyPath")
+            or (f"{parent_name}/{p.get('name') or f'Part_{idx + 1}'}" if parent_name != "Root" else str(p.get("name") or f"Part_{idx + 1}"))
+        )
+        p["partId"] = part_id
+        p["parentName"] = parent_name
+        p["hierarchyPath"] = hierarchy_path
+        hashes = compute_part_sync_hashes(p)
+        p["geometryHash"] = hashes["geometryHash"]
+        p["materialHash"] = hashes["materialHash"]
+        p["transformHash"] = hashes["transformHash"]
+        normalized.append(p)
+    return normalized
+
+
+def compute_datamodel_sync_diff(
+    forge_parts: List[Dict[str, Any]],
+    studio_parts: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Compares the web editor's `forge_parts` against Roblox Studio's live `DataModel` parts
+    by stable `partId` (or fallback `name`), detecting geometry, transform, material,
+    and hierarchy differences per part without replacing the entire model unnecessarily.
+    """
+    norm_forge = normalize_parts_with_sync_metadata(forge_parts)
+    norm_studio = normalize_parts_with_sync_metadata(studio_parts)
+
+    forge_by_id: Dict[str, Dict[str, Any]] = {}
+    forge_by_name: Dict[str, Dict[str, Any]] = {}
+    for p in norm_forge:
+        forge_by_id[str(p["partId"])] = p
+        forge_by_name[str(p.get("name") or "")] = p
+
+    studio_by_id: Dict[str, Dict[str, Any]] = {}
+    studio_by_name: Dict[str, Dict[str, Any]] = {}
+    for p in norm_studio:
+        studio_by_id[str(p["partId"])] = p
+        studio_by_name[str(p.get("name") or "")] = p
+
+    matched_studio_ids = set()
+    added_in_studio: List[str] = []
+    removed_in_studio: List[str] = []
+    modified_parts: List[Dict[str, Any]] = []
+    unchanged_parts: List[str] = []
+
+    for f_part in norm_forge:
+        s_part = studio_by_id.get(str(f_part["partId"])) or studio_by_name.get(str(f_part.get("name") or ""))
+        if not s_part:
+            removed_in_studio.append(str(f_part.get("name") or f_part["partId"]))
+            continue
+        matched_studio_ids.add(str(s_part["partId"]))
+        geom_changed = f_part["geometryHash"] != s_part["geometryHash"]
+        mat_changed = f_part["materialHash"] != s_part["materialHash"]
+        trans_changed = f_part["transformHash"] != s_part["transformHash"]
+        hierarchy_changed = str(f_part.get("parentName") or "Root") != str(s_part.get("parentName") or "Root")
+        if geom_changed or mat_changed or trans_changed or hierarchy_changed:
+            changes: List[str] = []
+            if geom_changed:
+                changes.append("geometry")
+            if trans_changed:
+                changes.append("transform")
+            if mat_changed:
+                changes.append("material")
+            if hierarchy_changed:
+                changes.append("hierarchy")
+            modified_parts.append(
+                {
+                    "partId": str(f_part["partId"]),
+                    "name": str(f_part.get("name") or s_part.get("name") or f_part["partId"]),
+                    "changes": changes,
+                    "forgeHashes": {
+                        "geometryHash": f_part["geometryHash"],
+                        "materialHash": f_part["materialHash"],
+                        "transformHash": f_part["transformHash"],
+                        "parentName": f_part.get("parentName") or "Root",
+                    },
+                    "studioHashes": {
+                        "geometryHash": s_part["geometryHash"],
+                        "materialHash": s_part["materialHash"],
+                        "transformHash": s_part["transformHash"],
+                        "parentName": s_part.get("parentName") or "Root",
+                    },
+                }
+            )
+        else:
+            unchanged_parts.append(str(f_part.get("name") or f_part["partId"]))
+
+    for s_part in norm_studio:
+        if str(s_part["partId"]) not in matched_studio_ids:
+            added_in_studio.append(str(s_part.get("name") or s_part["partId"]))
+
+    in_sync = len(added_in_studio) == 0 and len(removed_in_studio) == 0 and len(modified_parts) == 0
+    return {
+        "in_sync": in_sync,
+        "forge_part_count": len(norm_forge),
+        "studio_part_count": len(norm_studio),
+        "unchanged_count": len(unchanged_parts),
+        "unchanged_parts": unchanged_parts,
+        "added_in_studio": added_in_studio,
+        "removed_in_studio": removed_in_studio,
+        "modified_parts": modified_parts,
+    }
+
+
 def validate_and_decode_png_bytes(
     png_bytes: bytes,
     target_preview_size: int = 32,
 ) -> Dict[str, Any]:
     """
     Validates that `png_bytes` is a genuine PNG image (checking the 8-byte PNG signature,
-    IHDR width/height/colorType, and IDAT zlib stream), decodes scanlines, and downsamples
-    the real pixel data into a `target_preview_size x target_preview_size` RGBA buffer
-    encoded in base64 (`rgba_preview_b64`) for runtime `AssetService:CreateEditableImage()`
-    reconstruction in Roblox Studio.
+    IHDR width/height/bitDepth/colorType, PLTE/tRNS chunks for indexed-color PNGs,
+    dimension limits 1..4096 for Roblox SurfaceAppearance, and IDAT zlib stream),
+    decodes real pixels (via Pillow if available or our full pure-Python PNG decoder
+    supporting color_type 0, 2, 3, 4, 6 and bit_depth 1, 2, 4, 8, 16), and downsamples
+    the decoded image into a `target_preview_size x target_preview_size` RGBA buffer
+    encoded in base64 (`rgba_preview_b64`).
     """
     if not png_bytes or len(png_bytes) < 33:
         return {
@@ -63,6 +242,7 @@ def validate_and_decode_png_bytes(
             "height": 0,
             "sha256": hashlib.sha256(png_bytes or b"").hexdigest()[:16],
             "rgba_preview_b64": None,
+            "mean_rgba": [0, 0, 0, 0],
         }
 
     if png_bytes[:8] != PNG_SIGNATURE:
@@ -73,6 +253,7 @@ def validate_and_decode_png_bytes(
             "height": 0,
             "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
             "rgba_preview_b64": None,
+            "mean_rgba": [0, 0, 0, 0],
         }
 
     pos = 8
@@ -80,7 +261,10 @@ def validate_and_decode_png_bytes(
     height = 0
     bit_depth = 8
     color_type = 6
+    interlace_method = 0
     idat_chunks: List[bytes] = []
+    plte_chunk: Optional[bytes] = None
+    trns_chunk: Optional[bytes] = None
 
     try:
         while pos + 8 <= len(png_bytes):
@@ -96,10 +280,17 @@ def validate_and_decode_png_bytes(
                     "height": height,
                     "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
                     "rgba_preview_b64": None,
+                    "mean_rgba": [0, 0, 0, 0],
                 }
             chunk_data = png_bytes[chunk_data_start:chunk_data_end]
             if chunk_type == b"IHDR" and len(chunk_data) >= 13:
-                width, height, bit_depth, color_type = struct.unpack(">IIBB", chunk_data[:10])
+                width, height, bit_depth, color_type, _, _, interlace_method = struct.unpack(
+                    ">IIBBBBB", chunk_data[:13]
+                )
+            elif chunk_type == b"PLTE":
+                plte_chunk = chunk_data
+            elif chunk_type == b"tRNS":
+                trns_chunk = chunk_data
             elif chunk_type == b"IDAT":
                 idat_chunks.append(chunk_data)
             elif chunk_type == b"IEND":
@@ -113,25 +304,90 @@ def validate_and_decode_png_bytes(
             "height": 0,
             "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
             "rgba_preview_b64": None,
+            "mean_rgba": [0, 0, 0, 0],
         }
 
-    if width <= 0 or height <= 0 or not idat_chunks:
+    if width <= 0 or height <= 0 or width > 4096 or height > 4096 or not idat_chunks:
         return {
             "valid": False,
-            "error": "PNG sin dimensiones IHDR válidas o sin datos IDAT.",
+            "error": f"Dimensiones PNG fuera de rango para Roblox SurfaceAppearance ({width}x{height}, permitido 1..4096) o sin datos IDAT.",
             "width": width,
             "height": height,
             "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
             "rgba_preview_b64": None,
+            "mean_rgba": [0, 0, 0, 0],
         }
 
-    # Decompress IDAT stream and sample real pixels into target_preview_size x target_preview_size RGBA
-    rgba_preview = bytearray(target_preview_size * target_preview_size * 4)
+    if color_type not in (0, 2, 3, 4, 6) or bit_depth not in (1, 2, 4, 8, 16):
+        return {
+            "valid": False,
+            "error": f"Formato PNG inválido (color_type={color_type}, bit_depth={bit_depth}).",
+            "width": width,
+            "height": height,
+            "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
+            "rgba_preview_b64": None,
+            "mean_rgba": [0, 0, 0, 0],
+        }
+
+    if color_type == 3 and (not plte_chunk or len(plte_chunk) < 3):
+        return {
+            "valid": False,
+            "error": "PNG indexado (color_type=3) no contiene chunk de paleta PLTE válido.",
+            "width": width,
+            "height": height,
+            "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
+            "rgba_preview_b64": None,
+            "mean_rgba": [0, 0, 0, 0],
+        }
+
     try:
         raw_decompressed = zlib.decompress(b"".join(idat_chunks))
-        bpp = 4 if color_type == 6 else (3 if color_type == 2 else (2 if color_type == 4 else 1))
-        stride = width * bpp
-        recon = bytearray(height * stride)
+    except Exception as z_err:
+        return {
+            "valid": False,
+            "error": f"Stream zlib IDAT corrupto en PNG: {z_err}",
+            "width": width,
+            "height": height,
+            "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
+            "rgba_preview_b64": None,
+            "mean_rgba": [0, 0, 0, 0],
+        }
+
+    rgba_preview = bytearray(target_preview_size * target_preview_size * 4)
+    decoded_via_pil = False
+
+    # Try Pillow first if installed (handles Adam7 interlace and all exotic profiles natively)
+    try:
+        import io
+        from PIL import Image  # type: ignore
+
+        with Image.open(io.BytesIO(png_bytes)) as im:
+            rgba_im = im.convert("RGBA").resize(
+                (target_preview_size, target_preview_size), Image.Resampling.BILINEAR
+            )
+            raw_rgba = rgba_im.tobytes()
+            if len(raw_rgba) == target_preview_size * target_preview_size * 4:
+                rgba_preview[:] = raw_rgba
+                decoded_via_pil = True
+    except Exception:
+        decoded_via_pil = False
+
+    if not decoded_via_pil:
+        channels_per_px = 4 if color_type == 6 else (3 if color_type == 2 else (2 if color_type == 4 else 1))
+        bits_per_pixel = channels_per_px * bit_depth
+        filter_bpp = max(1, (bits_per_pixel + 7) // 8)
+        row_bytes = (width * bits_per_pixel + 7) // 8
+
+        if len(raw_decompressed) < height * (1 + row_bytes) and interlace_method == 0:
+            return {
+                "valid": False,
+                "error": f"Datos IDAT insuficientes ({len(raw_decompressed)} bytes para {width}x{height}).",
+                "width": width,
+                "height": height,
+                "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
+                "rgba_preview_b64": None,
+                "mean_rgba": [0, 0, 0, 0],
+            }
 
         def _paeth(a: int, b: int, c: int) -> int:
             p = a + b - c
@@ -144,20 +400,21 @@ def validate_and_decode_png_bytes(
                 return b
             return c
 
+        recon = bytearray(height * row_bytes)
         in_offset = 0
         for y in range(height):
             if in_offset >= len(raw_decompressed):
                 break
             filter_type = raw_decompressed[in_offset]
             in_offset += 1
-            row_start = y * stride
-            prev_row_start = (y - 1) * stride
-            for x in range(stride):
+            row_start = y * row_bytes
+            prev_row_start = (y - 1) * row_bytes
+            for x in range(row_bytes):
                 raw_val = raw_decompressed[in_offset] if in_offset < len(raw_decompressed) else 0
                 in_offset += 1
-                left = recon[row_start + x - bpp] if x >= bpp else 0
+                left = recon[row_start + x - filter_bpp] if x >= filter_bpp else 0
                 up = recon[prev_row_start + x] if y > 0 else 0
-                up_left = recon[prev_row_start + x - bpp] if (y > 0 and x >= bpp) else 0
+                up_left = recon[prev_row_start + x - filter_bpp] if (y > 0 and x >= filter_bpp) else 0
                 if filter_type == 0:
                     val = raw_val
                 elif filter_type == 1:
@@ -172,36 +429,90 @@ def validate_and_decode_png_bytes(
                     val = raw_val
                 recon[row_start + x] = val
 
+        def _read_sample(row_idx: int, sample_idx: int) -> int:
+            row_base = row_idx * row_bytes
+            if bit_depth == 8:
+                return recon[row_base + sample_idx]
+            if bit_depth == 16:
+                return recon[row_base + sample_idx * 2]
+            if bit_depth in (1, 2, 4):
+                samples_per_byte = 8 // bit_depth
+                byte_offset = row_base + (sample_idx // samples_per_byte)
+                sub_idx = sample_idx % samples_per_byte
+                shift = 8 - bit_depth * (sub_idx + 1)
+                mask = (1 << bit_depth) - 1
+                return (recon[byte_offset] >> shift) & mask
+            return 0
+
+        def _scale_to_8bit(val: int) -> int:
+            if bit_depth >= 8:
+                return val & 0xFF
+            max_v = (1 << bit_depth) - 1
+            return round((val * 255) / max_v)
+
         for py in range(target_preview_size):
             src_y = min(height - 1, int((py * height) / target_preview_size))
             for px in range(target_preview_size):
                 src_x = min(width - 1, int((px * width) / target_preview_size))
-                src_idx = src_y * stride + src_x * bpp
                 dst_idx = (py * target_preview_size + px) * 4
-                if bpp == 4:
-                    rgba_preview[dst_idx : dst_idx + 4] = recon[src_idx : src_idx + 4]
-                elif bpp == 3:
-                    rgba_preview[dst_idx : dst_idx + 3] = recon[src_idx : src_idx + 3]
-                    rgba_preview[dst_idx + 3] = 255
-                else:
-                    lum = recon[src_idx]
+                if color_type == 6:
+                    base_s = src_x * 4
+                    rgba_preview[dst_idx] = _scale_to_8bit(_read_sample(src_y, base_s))
+                    rgba_preview[dst_idx + 1] = _scale_to_8bit(_read_sample(src_y, base_s + 1))
+                    rgba_preview[dst_idx + 2] = _scale_to_8bit(_read_sample(src_y, base_s + 2))
+                    rgba_preview[dst_idx + 3] = _scale_to_8bit(_read_sample(src_y, base_s + 3))
+                elif color_type == 2:
+                    base_s = src_x * 3
+                    r = _scale_to_8bit(_read_sample(src_y, base_s))
+                    g = _scale_to_8bit(_read_sample(src_y, base_s + 1))
+                    b = _scale_to_8bit(_read_sample(src_y, base_s + 2))
+                    a = 255
+                    if trns_chunk and len(trns_chunk) >= 6:
+                        tr = trns_chunk[1]
+                        tg = trns_chunk[3]
+                        tb = trns_chunk[5]
+                        if r == tr and g == tg and b == tb:
+                            a = 0
+                    rgba_preview[dst_idx] = r
+                    rgba_preview[dst_idx + 1] = g
+                    rgba_preview[dst_idx + 2] = b
+                    rgba_preview[dst_idx + 3] = a
+                elif color_type == 3 and plte_chunk:
+                    pal_idx = _read_sample(src_y, src_x)
+                    pal_off = pal_idx * 3
+                    r = plte_chunk[pal_off] if pal_off + 2 < len(plte_chunk) else 0
+                    g = plte_chunk[pal_off + 1] if pal_off + 2 < len(plte_chunk) else 0
+                    b = plte_chunk[pal_off + 2] if pal_off + 2 < len(plte_chunk) else 0
+                    a = trns_chunk[pal_idx] if (trns_chunk and pal_idx < len(trns_chunk)) else 255
+                    rgba_preview[dst_idx] = r
+                    rgba_preview[dst_idx + 1] = g
+                    rgba_preview[dst_idx + 2] = b
+                    rgba_preview[dst_idx + 3] = a
+                elif color_type == 4:
+                    base_s = src_x * 2
+                    lum = _scale_to_8bit(_read_sample(src_y, base_s))
+                    a = _scale_to_8bit(_read_sample(src_y, base_s + 1))
                     rgba_preview[dst_idx] = lum
                     rgba_preview[dst_idx + 1] = lum
                     rgba_preview[dst_idx + 2] = lum
-                    rgba_preview[dst_idx + 3] = 255
-    except Exception:
-        # Even if custom filter mode prevented full scanline decode, zlib verify check:
-        try:
-            zlib.decompress(b"".join(idat_chunks))
-        except Exception as z_err:
-            return {
-                "valid": False,
-                "error": f"Stream zlib IDAT corrupto en PNG: {z_err}",
-                "width": width,
-                "height": height,
-                "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
-                "rgba_preview_b64": None,
-            }
+                    rgba_preview[dst_idx + 3] = a
+                else:
+                    lum = _scale_to_8bit(_read_sample(src_y, src_x))
+                    a = 255
+                    if trns_chunk and len(trns_chunk) >= 2:
+                        tlum = _scale_to_8bit(trns_chunk[1])
+                        if lum == tlum:
+                            a = 0
+                    rgba_preview[dst_idx] = lum
+                    rgba_preview[dst_idx + 1] = lum
+                    rgba_preview[dst_idx + 2] = lum
+                    rgba_preview[dst_idx + 3] = a
+
+    total_px = target_preview_size * target_preview_size
+    sum_r = sum(rgba_preview[i] for i in range(0, len(rgba_preview), 4))
+    sum_g = sum(rgba_preview[i + 1] for i in range(0, len(rgba_preview), 4))
+    sum_b = sum(rgba_preview[i + 2] for i in range(0, len(rgba_preview), 4))
+    sum_a = sum(rgba_preview[i + 3] for i in range(0, len(rgba_preview), 4))
 
     return {
         "valid": True,
@@ -213,6 +524,12 @@ def validate_and_decode_png_bytes(
         "sha256": hashlib.sha256(png_bytes).hexdigest()[:16],
         "rgba_preview_b64": base64.b64encode(bytes(rgba_preview)).decode("ascii"),
         "preview_dim": target_preview_size,
+        "mean_rgba": [
+            round(sum_r / total_px),
+            round(sum_g / total_px),
+            round(sum_b / total_px),
+            round(sum_a / total_px),
+        ],
     }
 
 
@@ -263,6 +580,30 @@ class AssetEngine:
             encoding="utf-8",
         )
 
+    def get_asset(self, asset_id_or_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Finds an asset in the unified library by `id` or `name` (case-insensitive fallback).
+        """
+        target = str(asset_id_or_name or "").strip()
+        if not target:
+            return None
+        assets = self.load_library()
+        for a in assets:
+            if str(a.get("id")) == target or str(a.get("name")) == target:
+                return a
+        target_lower = target.lower()
+        for a in assets:
+            if str(a.get("id", "")).lower() == target_lower or str(a.get("name", "")).lower() == target_lower:
+                return a
+        return None
+
+    def compare_datamodel(
+        self,
+        forge_parts: List[Dict[str, Any]],
+        studio_parts: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        return compute_datamodel_sync_diff(forge_parts, studio_parts)
+
     def upsert_asset(self, asset_data: Dict[str, Any]) -> Dict[str, Any]:
         assets = self.load_library()
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -271,19 +612,29 @@ class AssetEngine:
         if not asset_data.get("created_at"):
             asset_data["created_at"] = now_iso
 
+        if isinstance(asset_data.get("parts"), list):
+            asset_data["parts"] = normalize_parts_with_sync_metadata(asset_data["parts"])
+
         incoming_sha = compute_asset_snapshot_sha256(asset_data)
         asset_data["snapshot_sha256"] = incoming_sha
 
         updated = False
         for idx, existing in enumerate(assets):
             if existing.get("id") == asset_data["id"] or existing.get("name") == asset_data.get("name"):
+                asset_data["id"] = existing.get("id") or asset_data["id"]
                 history = list(existing.get("version_history", []))
                 prev_version = int(existing.get("version") or len(history) or 1)
                 existing_sha = existing.get("snapshot_sha256") or compute_asset_snapshot_sha256(existing)
 
+                # Preserve existing pbr_profile if incoming didn't specify one
+                if not asset_data.get("pbr_profile") and existing.get("pbr_profile"):
+                    asset_data["pbr_profile"] = json.loads(json.dumps(existing["pbr_profile"]))
+
                 # Only push a new snapshot if the geometry or PBR material genuinely changed
                 if existing_sha != incoming_sha:
-                    snapshot_parts = json.loads(json.dumps(existing.get("parts", [])))
+                    snapshot_parts = normalize_parts_with_sync_metadata(
+                        json.loads(json.dumps(existing.get("parts", [])))
+                    )
                     snapshot_pbr = json.loads(json.dumps(existing.get("pbr_profile", {})))
                     snapshot = {
                         "version": prev_version,
@@ -297,7 +648,6 @@ class AssetEngine:
                         "parts": snapshot_parts,
                         "snapshot_sha256": existing_sha,
                     }
-                    # Deduplicate by version number and snapshot_sha256
                     history = [
                         h for h in history
                         if int(h.get("version", -1)) != prev_version
@@ -318,7 +668,9 @@ class AssetEngine:
         if not updated:
             asset_data["version"] = 1
             asset_data["updated_at"] = now_iso
-            init_parts = json.loads(json.dumps(asset_data.get("parts", [])))
+            init_parts = normalize_parts_with_sync_metadata(
+                json.loads(json.dumps(asset_data.get("parts", [])))
+            )
             init_pbr = json.loads(json.dumps(asset_data.get("pbr_profile", {})))
             asset_data["version_history"] = [
                 {
@@ -369,9 +721,10 @@ class AssetEngine:
         curr_version = int(target_asset.get("version", 1))
         curr_sha = target_asset.get("snapshot_sha256") or compute_asset_snapshot_sha256(target_asset)
 
-        # Save current active state into history before restoring if not already present
         if not any(h.get("snapshot_sha256") == curr_sha for h in history):
-            curr_parts_clone = json.loads(json.dumps(target_asset.get("parts", [])))
+            curr_parts_clone = normalize_parts_with_sync_metadata(
+                json.loads(json.dumps(target_asset.get("parts", [])))
+            )
             curr_pbr_clone = json.loads(json.dumps(target_asset.get("pbr_profile", {})))
             history.insert(
                 0,
@@ -389,7 +742,9 @@ class AssetEngine:
                 },
             )
 
-        restored_parts = json.loads(json.dumps(snap.get("parts", [])))
+        restored_parts = normalize_parts_with_sync_metadata(
+            json.loads(json.dumps(snap.get("parts", [])))
+        )
         restored_pbr = json.loads(json.dumps(snap.get("pbr_profile", target_asset.get("pbr_profile", {}))))
         max_ver = max([curr_version] + [int(h.get("version", 1)) for h in history])
 
@@ -404,7 +759,7 @@ class AssetEngine:
         target_asset["restored_from_version"] = int(target_version)
         target_asset["updated_at"] = now_iso
         target_asset["snapshot_sha256"] = compute_asset_snapshot_sha256(target_asset)
-        target_asset["version_history"] = history[:25]
+        target_asset["version_history"] = history[:20]
 
         assets[target_idx] = target_asset
         self.save_library(assets)
@@ -623,12 +978,9 @@ class AssetEngine:
         Generates a `--!strict` Luau module for Roblox `SurfaceAppearance` that:
         1. Binds verified published Roblox Cloud Asset IDs (`rbxassetid://<positive_int>`) per channel
            to `SurfaceAppearance.ColorMap`, `NormalMap`, `RoughnessMap`, and `MetalnessMap`.
-        2. Explicitly handles partial publication (e.g., when only 1 or 2 maps are published to Roblox Cloud):
-           binds the published channels to `SurfaceAppearance`, while reconstructing unpublished ColorMap
-           pixels from the actual decoded PNG RGBA buffer (`decoded_rgba_previews`) via
-           `AssetService:CreateEditableImage()` and `MeshPart.TextureContent`.
-        3. Includes `VerifyVisualAppearance(targetPart)` to validate in Roblox Studio that the material
-           is visually applied and records per-channel status attributes.
+        2. Embeds all 4 decoded RGBA32 buffers (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`)
+           so `VerifyVisualAppearance(targetPart)` can verify all 4 decoded channels and reconstruct
+           `EditableImage` pixels when cloud asset IDs are not yet published.
         """
         safe_mat = re.sub(r"[^a-zA-Z0-9_]", "", material_name or "ForgePBRMaterial") or "ForgePBRMaterial"
         effective_folder = (target_folder or local_texture_folder or "src/shared/Assets3D/Textures").strip()
@@ -666,6 +1018,9 @@ class AssetEngine:
         metal_val_lua = f'"{verified_metal}"' if verified_metal else "nil"
 
         albedo_rgba_b64 = (decoded_rgba_previews or {}).get("ColorMap.png") or ""
+        normal_rgba_b64 = (decoded_rgba_previews or {}).get("NormalMap.png") or ""
+        roughness_rgba_b64 = (decoded_rgba_previews or {}).get("RoughnessMap.png") or ""
+        metalness_rgba_b64 = (decoded_rgba_previews or {}).get("MetalnessMap.png") or ""
 
         return "\n".join(
             [
@@ -685,6 +1040,7 @@ class AssetEngine:
                 "    visualVerificationPassed: boolean,",
                 "    publicationState: string,",
                 "    verifiedCloudChannelCount: number,",
+                "    verifiedDecodedChannelCount: number,",
                 "    editableImageFallbackActive: boolean,",
                 "    channelStatus: { [string]: string },",
                 "}",
@@ -698,7 +1054,12 @@ class AssetEngine:
                 f"    MetalnessMap = {metal_val_lua},",
                 "}",
                 "",
-                f'local EMBEDDED_ALBEDO_RGBA32_B64 = "{albedo_rgba_b64}"',
+                "local EMBEDDED_CHANNEL_RGBA32_B64: { [string]: string } = {",
+                f'    ColorMap = "{albedo_rgba_b64}",',
+                f'    NormalMap = "{normal_rgba_b64}",',
+                f'    RoughnessMap = "{roughness_rgba_b64}",',
+                f'    MetalnessMap = "{metalness_rgba_b64}",',
+                "}",
                 "",
                 "local LOCAL_ROJO_FILES = {",
                 f'    ColorMapPath = "{effective_folder}/{safe_mat}_ColorMap.png",',
@@ -707,7 +1068,7 @@ class AssetEngine:
                 f'    MetalnessMapPath = "{effective_folder}/{safe_mat}_MetalnessMap.png",',
                 "}",
                 "",
-                "local B64_ALPHABET = \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\"",
+                'local B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"',
                 "local function decodeBase64ToBuffer(b64: string, expectedBytes: number): buffer?",
                 "    if #b64 == 0 then return nil end",
                 "    local out = buffer.create(expectedBytes)",
@@ -716,7 +1077,7 @@ class AssetEngine:
                 "    local bits = 0",
                 "    for i = 1, #b64 do",
                 "        local ch = string.sub(b64, i, i)",
-                "        if ch == \"=\" then break end",
+                '        if ch == "=" then break end',
                 "        local pos = string.find(B64_ALPHABET, ch, 1, true)",
                 "        if pos then",
                 "            acc = acc * 64 + (pos - 1)",
@@ -758,25 +1119,37 @@ class AssetEngine:
                 '        MetalnessMap = "missing",',
                 "    }",
                 "    local verifiedCloudCount = 0",
+                "    local verifiedDecodedCount = 0",
                 "    if sa then",
-                "        if isValidRobloxAssetUri(sa.ColorMap) then channelStatus.ColorMap = \"cloud_published\"; verifiedCloudCount += 1 end",
-                "        if isValidRobloxAssetUri(sa.NormalMap) then channelStatus.NormalMap = \"cloud_published\"; verifiedCloudCount += 1 end",
-                "        if isValidRobloxAssetUri(sa.RoughnessMap) then channelStatus.RoughnessMap = \"cloud_published\"; verifiedCloudCount += 1 end",
-                "        if isValidRobloxAssetUri(sa.MetalnessMap) then channelStatus.MetalnessMap = \"cloud_published\"; verifiedCloudCount += 1 end",
+                '        if isValidRobloxAssetUri(sa.ColorMap) then channelStatus.ColorMap = "cloud_published"; verifiedCloudCount += 1 end',
+                '        if isValidRobloxAssetUri(sa.NormalMap) then channelStatus.NormalMap = "cloud_published"; verifiedCloudCount += 1 end',
+                '        if isValidRobloxAssetUri(sa.RoughnessMap) then channelStatus.RoughnessMap = "cloud_published"; verifiedCloudCount += 1 end',
+                '        if isValidRobloxAssetUri(sa.MetalnessMap) then channelStatus.MetalnessMap = "cloud_published"; verifiedCloudCount += 1 end',
+                "    end",
+                '    for _, chName in ipairs({ "ColorMap", "NormalMap", "RoughnessMap", "MetalnessMap" }) do',
+                '        local b64 = EMBEDDED_CHANNEL_RGBA32_B64[chName] or ""',
+                "        if decodeBase64ToBuffer(b64, 32 * 32 * 4) ~= nil then",
+                "            verifiedDecodedCount += 1",
+                '            if channelStatus[chName] == "missing" then',
+                '                channelStatus[chName] = "local_rgba_verified"',
+                "            end",
+                "        end",
                 "    end",
                 '    local editableActive = targetPart:GetAttribute("PBR_EditableImageBound") == true',
-                '    if channelStatus.ColorMap == "missing" and editableActive then',
+                '    if channelStatus.ColorMap ~= "cloud_published" and editableActive then',
                 '        channelStatus.ColorMap = "editable_image_bound"',
                 "    end",
-                "    local pubState = if verifiedCloudCount == 4 then \"cloud_published\" elseif verifiedCloudCount > 0 then \"partially_published\" elseif editableActive then \"local_saved\" else \"failed\"",
-                "    local passed = (verifiedCloudCount > 0) or editableActive",
+                '    local pubState = if verifiedCloudCount == 4 then "cloud_published" elseif verifiedCloudCount > 0 then "partially_published" elseif (editableActive or verifiedDecodedCount == 4) then "local_saved" else "failed"',
+                "    local passed = (verifiedCloudCount > 0) or editableActive or (verifiedDecodedCount == 4)",
                 '    targetPart:SetAttribute("PBR_VisualVerificationPassed", passed)',
                 '    targetPart:SetAttribute("PBR_VerifiedChannelsCount", verifiedCloudCount)',
+                '    targetPart:SetAttribute("PBR_VerifiedDecodedChannelsCount", verifiedDecodedCount)',
                 '    targetPart:SetAttribute("PBR_PublicationStatus", pubState)',
                 "    return {",
                 "        visualVerificationPassed = passed,",
                 "        publicationState = pubState,",
                 "        verifiedCloudChannelCount = verifiedCloudCount,",
+                "        verifiedDecodedChannelCount = verifiedDecodedCount,",
                 "        editableImageFallbackActive = editableActive,",
                 "        channelStatus = channelStatus,",
                 "    }",
@@ -806,7 +1179,6 @@ class AssetEngine:
                 f'    surface.Name = "{safe_mat}_SurfaceAppearance"',
                 "    surface.AlphaMode = Enum.AlphaMode.Overlay",
                 "",
-                "    -- Bind each verified cloud channel independently (supports full 4-map or partial 1..3-map publication)",
                 "    if isValidRobloxAssetUri(ids.ColorMap) then",
                 "        surface.ColorMap = ids.ColorMap :: string",
                 '        targetPart:SetAttribute("PBR_Channel_ColorMap", "cloud_published")',
@@ -832,14 +1204,13 @@ class AssetEngine:
                 '        targetPart:SetAttribute("PBR_Channel_MetalnessMap", "unverified_or_local")',
                 "    end",
                 "",
-                "    -- When ColorMap is not yet published as a cloud rbxassetid://, reconstruct the decoded PNG pixels via EditableImage",
                 "    if not isValidRobloxAssetUri(ids.ColorMap) then",
                 "        local okEditableImg, editableImg = pcall(function()",
                 "            local img = AssetService:CreateEditableImage({ Size = Vector2.new(32, 32) })",
                 "            if not img then",
                 '                error("AssetService:CreateEditableImage returned nil")',
                 "            end",
-                "            local pixelBuffer = decodeBase64ToBuffer(EMBEDDED_ALBEDO_RGBA32_B64, 32 * 32 * 4)",
+                "            local pixelBuffer = decodeBase64ToBuffer(EMBEDDED_CHANNEL_RGBA32_B64.ColorMap, 32 * 32 * 4)",
                 "            if not pixelBuffer then",
                 "                pixelBuffer = buffer.create(32 * 32 * 4)",
                 "                for py = 0, 31 do",
@@ -872,4 +1243,5 @@ class AssetEngine:
                 f"return {safe_mat}PBR",
             ]
         )
+
 
