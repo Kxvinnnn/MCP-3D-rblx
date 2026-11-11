@@ -40,6 +40,7 @@ function MainStudioContent() {
   const {
     activeTab,
     setActiveTab,
+    safeNavigateTab,
     uiMode,
     setUiMode,
     notification,
@@ -48,6 +49,7 @@ function MainStudioContent() {
     activeAsset,
     showUnsavedModal,
     pendingSwitchTarget,
+    pendingSwitchTab,
     confirmSwitchDiscard,
     confirmSwitchSaveAndProceed,
     cancelSwitch,
@@ -56,6 +58,12 @@ function MainStudioContent() {
   const [devMenuOpen, setDevMenuOpen] = useState(false);
 
   const isPrimaryTab = ['home', 'create', 'edit', 'materials', 'studio'].includes(activeTab);
+
+  const destinationLabel = pendingSwitchTarget
+    ? `abrir '${pendingSwitchTarget.name}'`
+    : pendingSwitchTab
+    ? `ir a la sección '${pendingSwitchTab}'`
+    : 'continuar';
 
   return (
     <div className="min-h-screen bg-[#07090e] text-gray-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-white">
@@ -78,7 +86,7 @@ function MainStudioContent() {
             </div>
 
             <p className="text-slate-300 text-xs leading-relaxed">
-              Has realizado modificaciones que aún no se han guardado en disco ni sincronizado con Roblox. ¿Deseas guardarlas antes de abrir <span className="font-semibold text-white font-mono">{pendingSwitchTarget?.name}</span>?
+              Has realizado modificaciones que aún no se han guardado en disco ni sincronizado con Roblox. ¿Deseas guardarlas antes de {destinationLabel}?
             </p>
 
             <div className="flex flex-col sm:flex-row items-center justify-end gap-2 pt-2">
@@ -101,7 +109,7 @@ function MainStudioContent() {
                 onClick={confirmSwitchSaveAndProceed}
                 className="w-full sm:w-auto px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer transition shadow-md shadow-cyan-900/30"
               >
-                Guardar y abrir
+                Guardar y continuar
               </button>
             </div>
           </div>
@@ -143,7 +151,7 @@ function MainStudioContent() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
           {/* Zone 1: Brand Wordmark */}
           <div
-            onClick={() => setActiveTab('home')}
+            onClick={() => safeNavigateTab('home')}
             className="flex items-center gap-2.5 cursor-pointer shrink-0"
           >
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 p-0.5">
@@ -166,7 +174,7 @@ function MainStudioContent() {
             {/* 1. INICIO */}
             <button
               type="button"
-              onClick={() => setActiveTab('home')}
+              onClick={() => safeNavigateTab('home')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
                 activeTab === 'home'
                   ? 'bg-cyan-600 text-white'
@@ -180,7 +188,7 @@ function MainStudioContent() {
             {/* 2. CREAR */}
             <button
               type="button"
-              onClick={() => setActiveTab('create')}
+              onClick={() => safeNavigateTab('create')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
                 activeTab === 'create'
                   ? 'bg-cyan-600 text-white'
@@ -194,7 +202,7 @@ function MainStudioContent() {
             {/* 3. EDITAR */}
             <button
               type="button"
-              onClick={() => setActiveTab('edit')}
+              onClick={() => safeNavigateTab('edit')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
                 activeTab === 'edit'
                   ? 'bg-cyan-600 text-white'
@@ -211,7 +219,7 @@ function MainStudioContent() {
             {/* 4. MATERIALES */}
             <button
               type="button"
-              onClick={() => setActiveTab('materials')}
+              onClick={() => safeNavigateTab('materials')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
                 activeTab === 'materials'
                   ? 'bg-cyan-600 text-white'
@@ -225,7 +233,7 @@ function MainStudioContent() {
             {/* 5. ROBLOX STUDIO */}
             <button
               type="button"
-              onClick={() => setActiveTab('studio')}
+              onClick={() => safeNavigateTab('studio')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
                 activeTab === 'studio'
                   ? 'bg-cyan-600 text-white'
@@ -287,7 +295,7 @@ function MainStudioContent() {
                     <button
                       type="button"
                       onClick={() => {
-                        setActiveTab('agents');
+                        safeNavigateTab('agents');
                         setDevMenuOpen(false);
                       }}
                       className={`w-full px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 cursor-pointer ${
@@ -301,7 +309,7 @@ function MainStudioContent() {
                     <button
                       type="button"
                       onClick={() => {
-                        setActiveTab('script');
+                        safeNavigateTab('script');
                         setDevMenuOpen(false);
                       }}
                       className={`w-full px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 cursor-pointer ${
@@ -315,7 +323,7 @@ function MainStudioContent() {
                     <button
                       type="button"
                       onClick={() => {
-                        setActiveTab('ui');
+                        safeNavigateTab('ui');
                         setDevMenuOpen(false);
                       }}
                       className={`w-full px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 cursor-pointer ${
@@ -329,7 +337,7 @@ function MainStudioContent() {
                     <button
                       type="button"
                       onClick={() => {
-                        setActiveTab('rojo');
+                        safeNavigateTab('rojo');
                         setDevMenuOpen(false);
                       }}
                       className={`w-full px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 cursor-pointer ${
@@ -343,7 +351,7 @@ function MainStudioContent() {
                     <button
                       type="button"
                       onClick={() => {
-                        setActiveTab('context');
+                        safeNavigateTab('context');
                         setDevMenuOpen(false);
                       }}
                       className={`w-full px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 cursor-pointer ${
@@ -357,7 +365,7 @@ function MainStudioContent() {
                     <button
                       type="button"
                       onClick={() => {
-                        setActiveTab('backend');
+                        safeNavigateTab('backend');
                         setDevMenuOpen(false);
                       }}
                       className={`w-full px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 cursor-pointer ${

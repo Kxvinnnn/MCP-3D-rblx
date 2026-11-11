@@ -95,87 +95,144 @@ export interface GeometryMetrics {
   vertices: number;
   triangles: number;
   partsCount: number;
+  realVertices: number;
+  realTriangles: number;
+  estimatedVertices: number;
+  estimatedTriangles: number;
+  hasEstimatedGeometry: boolean;
 }
 
+/**
+ * Calculates geometry metrics, distinguishing between real mesh vertex/face data
+ * (including quads and N-gons) and estimated primitive shapes.
+ */
 export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
-  let vertices = 0;
-  let triangles = 0;
+  let realVertices = 0;
+  let realTriangles = 0;
+  let estimatedVertices = 0;
+  let estimatedTriangles = 0;
+  let hasEstimatedGeometry = false;
+
   const parts = Array.isArray(asset.parts) ? asset.parts : [];
 
   for (const part of parts) {
-    if (part.meshData) {
-      vertices += Array.isArray(part.meshData.vertices) ? part.meshData.vertices.length : 0;
-      triangles += Array.isArray(part.meshData.faces) ? part.meshData.faces.length : 0;
+    if (part.meshData && Array.isArray(part.meshData.vertices) && part.meshData.vertices.length > 0) {
+      realVertices += part.meshData.vertices.length;
+
+      const faces = part.meshData.faces;
+      if (Array.isArray(faces)) {
+        if (faces.length > 0 && Array.isArray(faces[0])) {
+          // Polygon face array: each face with N vertices decomposes into (N - 2) triangles
+          for (const face of faces as number[][]) {
+            if (Array.isArray(face)) {
+              realTriangles += Math.max(1, face.length - 2);
+            }
+          }
+        } else if (faces.length > 0 && typeof faces[0] === 'number') {
+          // Flat index array where 3 indices form 1 triangle
+          realTriangles += Math.floor(faces.length / 3);
+        } else {
+          realTriangles += faces.length;
+        }
+      }
     } else {
-      // Estimated primitive geometries
+      // Primitive Roblox geometry estimation
+      hasEstimatedGeometry = true;
       switch (part.shape) {
         case 'Block':
-          vertices += 8;
-          triangles += 12;
+          estimatedVertices += 8;
+          estimatedTriangles += 12;
           break;
         case 'Cylinder':
-          vertices += 48;
-          triangles += 92;
+          estimatedVertices += 48;
+          estimatedTriangles += 92;
           break;
         case 'Ball':
-          vertices += 64;
-          triangles += 120;
+          estimatedVertices += 64;
+          estimatedTriangles += 120;
           break;
         case 'Wedge':
         case 'CornerWedge':
-          vertices += 6;
-          triangles += 8;
+          estimatedVertices += 6;
+          estimatedTriangles += 8;
           break;
         default:
-          vertices += 8;
-          triangles += 12;
+          estimatedVertices += 8;
+          estimatedTriangles += 12;
       }
     }
   }
 
+  const totalVertices = realVertices + estimatedVertices;
+  const totalTriangles = realTriangles + estimatedTriangles;
+
   return {
-    vertices,
-    triangles: triangles > 0 ? triangles : (asset.poly_count || 0),
+    vertices: totalVertices,
+    triangles: totalTriangles > 0 ? totalTriangles : (asset.poly_count || 0),
     partsCount: parts.length,
+    realVertices,
+    realTriangles,
+    estimatedVertices,
+    estimatedTriangles,
+    hasEstimatedGeometry,
   };
 }
 
 /**
  * Computes a deterministic canonical string representation of the asset contents
- * to reliably detect pending changes and equality between snapshots.
+ * incorporating vertex coordinates, face indices, materials, and physical properties.
  */
 export function computeAssetContentHash(asset: Forge3DAsset | null): string {
   if (!asset) return '';
+
   const partsSummary = (asset.parts || []).map((p, idx) => {
     const id = p.partId || `part_${idx}`;
-    const pos = (p.position || [0, 0, 0]).map((n) => Number(n).toFixed(2)).join(',');
-    const rot = (p.rotation || [0, 0, 0]).map((n) => Number(n).toFixed(2)).join(',');
-    const sz = (p.size || [1, 1, 1]).map((n) => Number(n).toFixed(2)).join(',');
-    const faceCount = p.meshData?.faces ? p.meshData.faces.length : 0;
-    const vertCount = p.meshData?.vertices ? p.meshData.vertices.length : 0;
-    const mat = `${p.material || 'Plastic'}_${p.roughness ?? 0.5}_${p.metalness ?? 0}`;
-    return `${id}|${p.name}|${p.shape}|${pos}|${rot}|${sz}|${mat}|v:${vertCount}|f:${faceCount}`;
+    const pos = (p.position || [0, 0, 0]).map((n) => Number(n).toFixed(3)).join(',');
+    const rot = (p.rotation || [0, 0, 0]).map((n) => Number(n).toFixed(3)).join(',');
+    const sz = (p.size || [1, 1, 1]).map((n) => Number(n).toFixed(3)).join(',');
+    const col = (p.color || [163, 162, 165]).join(',');
+    const trans = Number(p.transparency ?? 0).toFixed(3);
+    const anch = p.anchored ? '1' : '0';
+    const coll = p.canCollide !== false ? '1' : '0';
+    const mat = `${p.material || 'Plastic'}_${Number(p.roughness ?? 0.5).toFixed(3)}_${Number(p.metalness ?? 0).toFixed(3)}`;
+
+    // Canonical representation of mesh geometry data (coordinates & faces)
+    let meshHash = 'none';
+    if (p.meshData) {
+      const vCoords = Array.isArray(p.meshData.vertices)
+        ? p.meshData.vertices.map((v: number[]) => (Array.isArray(v) ? v.map((c) => Number(c).toFixed(3)).join(',') : String(v))).join(';')
+        : '';
+      const fIndices = Array.isArray(p.meshData.faces)
+        ? p.meshData.faces.map((f: any) => (Array.isArray(f) ? f.join(',') : String(f))).join(';')
+        : '';
+      meshHash = `v[${p.meshData.vertices?.length || 0}:${vCoords}]_f[${p.meshData.faces?.length || 0}:${fIndices}]`;
+    }
+
+    return `${id}|${p.name}|${p.shape}|${pos}|${rot}|${sz}|${col}|t:${trans}|a:${anch}|c:${coll}|${mat}|mesh:${meshHash}`;
   });
 
   const pbr = asset.pbr_profile
-    ? `${asset.pbr_profile.pattern}_${asset.pbr_profile.albedo_hex}_${asset.pbr_profile.roughness}_${asset.pbr_profile.metalness}`
+    ? `${asset.pbr_profile.pattern}_${asset.pbr_profile.albedo_hex}_${asset.pbr_profile.emissive_hex || ''}_${asset.pbr_profile.roughness}_${asset.pbr_profile.metalness}_${asset.pbr_profile.roblox_material || ''}`
     : '';
 
-  return `${asset.name}#${asset.category || 'Props'}#${asset.collision_fidelity}#${pbr}#[${partsSummary.join(';')}]`;
+  return `${asset.name}#${asset.category || 'Props'}#${asset.collision_fidelity || 'Hull'}#${pbr}#[${partsSummary.join(';;')}]`;
 }
 
 /**
- * Ensures each part in the asset has a stable partId for persistent selection.
+ * Ensures each part in the asset has a truly persistent, stable partId.
+ * Preserves existing partIds across renames and reordering.
  */
 export function ensureStablePartIds(parts: MeshPart3DSpec[], assetName: string): MeshPart3DSpec[] {
   return parts.map((part, index) => {
-    if (part.partId && part.partId.trim().length > 0) {
+    if (part.partId && typeof part.partId === 'string' && part.partId.trim().length > 0) {
       return part;
     }
+    // Generate an intrinsic persistent ID
+    const randomSuffix = Math.random().toString(36).slice(2, 8);
     const safeName = (part.name || `Part_${index + 1}`).replace(/[^a-zA-Z0-9_]/g, '_');
     return {
       ...part,
-      partId: `${assetName}_${safeName}_${index + 1}`,
+      partId: `pid_${safeName}_${Date.now().toString(36)}_${randomSuffix}`,
       hierarchyPath: part.hierarchyPath || `Workspace/${assetName}/${part.name}`,
     };
   });
@@ -183,14 +240,14 @@ export function ensureStablePartIds(parts: MeshPart3DSpec[], assetName: string):
 
 /**
  * Finds the matching part in an updated parts array using stable ID first,
- * then hierarchy path, then name, falling back to the first part.
+ * then hierarchy path and name.
+ * If the part no longer exists, returns NULL instead of silently picking an arbitrary part.
  */
 export function findMatchingPart(
   parts: MeshPart3DSpec[],
   target: MeshPart3DSpec | null
 ): MeshPart3DSpec | null {
-  if (!parts || parts.length === 0) return null;
-  if (!target) return parts[0];
+  if (!parts || parts.length === 0 || !target) return null;
 
   if (target.partId) {
     const byId = parts.find((p) => p.partId === target.partId);
@@ -198,14 +255,15 @@ export function findMatchingPart(
   }
 
   if (target.hierarchyPath) {
-    const byPath = parts.find((p) => p.hierarchyPath === target.hierarchyPath);
+    const byPath = parts.find((p) => p.hierarchyPath === target.hierarchyPath && p.name === target.name);
     if (byPath) return byPath;
   }
 
   const byName = parts.find((p) => p.name === target.name);
   if (byName) return byName;
 
-  return parts[0];
+  // Explicitly return null if no matching part exists
+  return null;
 }
 
 interface ForgeContextType {
@@ -244,6 +302,8 @@ interface ForgeContextType {
   saveAssetToDisk: (saveToRojo?: boolean) => Promise<boolean>;
   showUnsavedModal: boolean;
   pendingSwitchTarget: Forge3DAsset | null;
+  pendingSwitchTab: AppTab | null;
+  safeNavigateTab: (tab: AppTab) => void;
   confirmSwitchDiscard: () => void;
   confirmSwitchSaveAndProceed: () => Promise<void>;
   cancelSwitch: () => void;
@@ -254,7 +314,7 @@ interface ForgeContextType {
 
   // Bidirectional Synchronization
   currentSyncStatus: SyncOperationStatus;
-  pushToStudio: (targetAsset?: Forge3DAsset) => Promise<{ success: boolean; message: string }>;
+  pushToStudio: (targetAsset?: Forge3DAsset) => Promise<{ success: boolean; appliedInStudio: boolean; message: string; taskId?: string }>;
   pullFromStudio: () => Promise<{ success: boolean; message: string; asset?: Forge3DAsset }>;
   syncHistory: SyncHistoryItem[];
 
@@ -328,6 +388,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Unsaved changes confirmation modal state
   const [showUnsavedModal, setShowUnsavedModal] = useState<boolean>(false);
   const [pendingSwitchTarget, setPendingSwitchTarget] = useState<Forge3DAsset | null>(null);
+  const [pendingSwitchTab, setPendingSwitchTab] = useState<AppTab | null>(null);
 
   // System & Bridge Status with differentiated backend health
   const [bridgeStatus, setBridgeStatus] = useState<BridgeHealthStatus>(defaultBridgeStatus);
@@ -355,6 +416,21 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // Ignore storage errors
     }
   };
+
+  /**
+   * Safe tab navigation guard that intercepts navigation when pending changes exist
+   */
+  const safeNavigateTab = useCallback(
+    (targetTab: AppTab) => {
+      if (pendingChanges && (activeTab === 'edit' || activeTab === 'materials') && targetTab !== activeTab) {
+        setPendingSwitchTab(targetTab);
+        setShowUnsavedModal(true);
+        return;
+      }
+      setActiveTab(targetTab);
+    },
+    [pendingChanges, activeTab]
+  );
 
   /**
    * Internal setter for active asset without prompt
@@ -404,17 +480,28 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const confirmSwitchDiscard = useCallback(() => {
     setShowUnsavedModal(false);
-    applyActiveAssetDirectly(pendingSwitchTarget);
-    setPendingSwitchTarget(null);
-    setNotification({
-      type: 'info',
-      message: 'Cambios descartados. Se abrió el modelo seleccionado.',
-    });
-  }, [pendingSwitchTarget, applyActiveAssetDirectly]);
+    if (pendingSwitchTarget) {
+      applyActiveAssetDirectly(pendingSwitchTarget);
+      setPendingSwitchTarget(null);
+      setNotification({
+        type: 'info',
+        message: 'Cambios descartados. Se abrió el modelo seleccionado.',
+      });
+    } else {
+      // Revert dirty state on current model
+      setPendingChanges(false);
+    }
+
+    if (pendingSwitchTab) {
+      setActiveTab(pendingSwitchTab);
+      setPendingSwitchTab(null);
+    }
+  }, [pendingSwitchTarget, pendingSwitchTab, applyActiveAssetDirectly]);
 
   const cancelSwitch = useCallback(() => {
     setShowUnsavedModal(false);
     setPendingSwitchTarget(null);
+    setPendingSwitchTab(null);
   }, []);
 
   // Fetch asset library from backend
@@ -681,19 +768,27 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const success = await saveAssetToDisk(true);
     if (success) {
       setShowUnsavedModal(false);
-      applyActiveAssetDirectly(pendingSwitchTarget);
-      setPendingSwitchTarget(null);
+      if (pendingSwitchTarget) {
+        applyActiveAssetDirectly(pendingSwitchTarget);
+        setPendingSwitchTarget(null);
+      }
+      if (pendingSwitchTab) {
+        setActiveTab(pendingSwitchTab);
+        setPendingSwitchTab(null);
+      }
     }
-  }, [saveAssetToDisk, pendingSwitchTarget, applyActiveAssetDirectly]);
+  }, [saveAssetToDisk, pendingSwitchTarget, pendingSwitchTab, applyActiveAssetDirectly]);
 
   /**
-   * Pushes model to Roblox Studio via Local Bridge with differentiated operation states
+   * Pushes model to Roblox Studio via Local Bridge with strictly verified operation states
    */
   const pushToStudio = useCallback(
-    async (targetAsset?: Forge3DAsset): Promise<{ success: boolean; message: string }> => {
+    async (
+      targetAsset?: Forge3DAsset
+    ): Promise<{ success: boolean; appliedInStudio: boolean; message: string; taskId?: string }> => {
       const assetToPush = targetAsset || activeAsset;
       if (!assetToPush) {
-        return { success: false, message: 'No hay ningún modelo activo para enviar.' };
+        return { success: false, appliedInStudio: false, message: 'No hay ningún modelo activo para enviar.' };
       }
 
       // Step 1: Preparing
@@ -704,9 +799,12 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         timestamp: new Date().toLocaleTimeString(),
       });
 
+      let rojoSaved = false;
+      let rebuildError: string | null = null;
+
       try {
-        // Step 2: Ensure saved in Rojo disk
-        await fetch('/api/v1/assets/rebuild-luau', {
+        // Step 2: Ensure saved in Rojo disk with explicit response check
+        const rebuildRes = await fetch('/api/v1/assets/rebuild-luau', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -716,7 +814,47 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }),
         });
 
-        // Step 3: Sending to Bridge
+        if (rebuildRes.ok) {
+          const rebuildData = await rebuildRes.json();
+          if (rebuildData.asset) {
+            rojoSaved = true;
+            savedAssetHashRef.current = computeAssetContentHash(rebuildData.asset);
+            setPendingChanges(false);
+          } else {
+            rebuildError = 'El backend no devolvió el asset guardado.';
+          }
+        } else {
+          const errData = await rebuildRes.json().catch(() => ({}));
+          rebuildError = errData.error || `HTTP ${rebuildRes.status}`;
+        }
+      } catch (err: any) {
+        rebuildError = err.message || 'Error de red al guardar en disco Rojo';
+      }
+
+      if (!rojoSaved) {
+        const errMsg = `Fallo al guardar en disco Rojo: ${rebuildError || 'Error desconocido'}. Envío a Studio cancelado.`;
+        setCurrentSyncStatus({
+          state: 'error',
+          operation: 'push',
+          message: errMsg,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        const errItem: SyncHistoryItem = {
+          id: `sync-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'push',
+          modelName: assetToPush.name,
+          partCount: assetToPush.parts.length,
+          status: 'error',
+          details: errMsg,
+        };
+        setSyncHistory((prev) => [errItem, ...prev].slice(0, 20));
+        setNotification({ type: 'error', message: errMsg });
+        return { success: false, appliedInStudio: false, message: errMsg };
+      }
+
+      // Step 3: Sending to Bridge
+      try {
         setCurrentSyncStatus({
           state: 'sending',
           operation: 'push',
@@ -748,8 +886,9 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const taskId = taskResult.taskId;
         const taskStatus = taskResult.status;
 
-        if (taskStatus === 'completed') {
-          const successMsg = `Modelo '${assetToPush.name}' aplicado correctamente en Roblox Studio (${assetToPush.parts.length} piezas).`;
+        // ONLY completed is a true success applied in Studio
+        if (taskStatus === 'completed' && taskResult.result?.status !== 'error') {
+          const successMsg = `Modelo '${assetToPush.name}' aplicado y verificado en Roblox Studio (${assetToPush.parts.length} piezas).`;
           setCurrentSyncStatus({
             state: 'applied_successfully',
             operation: 'push',
@@ -770,17 +909,17 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             taskId,
           };
           setSyncHistory((prev) => [successItem, ...prev].slice(0, 20));
-
           setNotification({ type: 'success', message: successMsg });
-          return { success: true, message: successMsg };
+          return { success: true, appliedInStudio: true, message: successMsg, taskId };
         } else if (taskStatus === 'awaiting_studio_confirmation' || taskStatus === 'queued') {
-          const queuedMsg = 'Solicitud recibida por el puente local. Esperando que Roblox Studio aplique el modelo.';
+          // Queued in Bridge: NOT applied yet in Studio
+          const queuedMsg = `Solicitud en cola en el puente local (ID: ${taskId || 'N/A'}). Pendiente de ejecución en Studio.`;
           setCurrentSyncStatus({
             state: 'awaiting_studio',
             operation: 'push',
             taskId,
             message: queuedMsg,
-            details: 'Abre Roblox Studio con el plugin Forge AI Studio activo.',
+            details: 'Abre Roblox Studio con el plugin Forge AI Studio activo para procesar la cola.',
             timestamp: new Date().toLocaleTimeString(),
           });
 
@@ -795,11 +934,10 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             taskId,
           };
           setSyncHistory((prev) => [queuedItem, ...prev].slice(0, 20));
-
           setNotification({ type: 'info', message: queuedMsg });
-          return { success: true, message: queuedMsg };
+          return { success: false, appliedInStudio: false, message: queuedMsg, taskId };
         } else {
-          const errMsg = taskResult.error || 'Roblox Studio no pudo aplicar el modelo';
+          const errMsg = taskResult.error || taskResult.result?.error || 'Roblox Studio no pudo aplicar el modelo';
           setCurrentSyncStatus({
             state: 'error',
             operation: 'push',
@@ -819,17 +957,16 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             taskId,
           };
           setSyncHistory((prev) => [errorItem, ...prev].slice(0, 20));
-
           setNotification({ type: 'error', message: errMsg });
-          return { success: false, message: errMsg };
+          return { success: false, appliedInStudio: false, message: errMsg, taskId };
         }
       } catch (err: any) {
-        // Fallback message when bridge is offline
-        const fallbackMsg = `Modelo guardado en disco Rojo local. Inicia el puente local (puerto 48720) para transferir directamente a Roblox Studio.`;
+        // Differentiate bridge failure: Model was saved to Rojo, but bridge transfer failed
+        const bridgeMsg = `Modelo guardado en disco Rojo, pero el puente local (puerto 48720) no respondió: ${err?.message || 'Inicia npm run bridge'}.`;
         setCurrentSyncStatus({
-          state: 'queued',
+          state: 'error',
           operation: 'push',
-          message: fallbackMsg,
+          message: bridgeMsg,
           details: err?.message,
           timestamp: new Date().toLocaleTimeString(),
         });
@@ -840,13 +977,12 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           type: 'push',
           modelName: assetToPush.name,
           partCount: assetToPush.parts.length,
-          status: 'queued',
-          details: fallbackMsg,
+          status: 'error',
+          details: bridgeMsg,
         };
         setSyncHistory((prev) => [fallbackItem, ...prev].slice(0, 20));
-
-        setNotification({ type: 'warning', message: fallbackMsg });
-        return { success: true, message: fallbackMsg };
+        setNotification({ type: 'warning', message: bridgeMsg });
+        return { success: false, appliedInStudio: false, message: bridgeMsg };
       }
     },
     [activeAsset]
@@ -939,6 +1075,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setUiMode,
         activeTab,
         setActiveTab,
+        safeNavigateTab,
         activeAsset,
         setActiveAsset,
         selectedPart,
@@ -958,6 +1095,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         saveAssetToDisk,
         showUnsavedModal,
         pendingSwitchTarget,
+        pendingSwitchTab,
         confirmSwitchDiscard,
         confirmSwitchSaveAndProceed,
         cancelSwitch,

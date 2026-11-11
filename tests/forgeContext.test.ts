@@ -28,6 +28,7 @@ function createSampleAsset(name = 'CyberTurret'): Forge3DAsset {
     },
     parts: [
       {
+        partId: 'part_base_fixed',
         name: 'Base',
         shape: 'Block',
         size: [4, 1, 4],
@@ -43,6 +44,7 @@ function createSampleAsset(name = 'CyberTurret'): Forge3DAsset {
         collisionFidelity: 'Hull',
       },
       {
+        partId: 'part_cannon_fixed',
         name: 'Cannon',
         shape: 'Cylinder',
         size: [1, 5, 1],
@@ -62,7 +64,7 @@ function createSampleAsset(name = 'CyberTurret'): Forge3DAsset {
   };
 }
 
-test('1. computeAssetContentHash es determinista y sensible a cambios', () => {
+test('1. computeAssetContentHash es determinista e incorpora coordenadas de vértices, caras y propiedades físicas', () => {
   const assetA = createSampleAsset('TurretA');
   const assetB = createSampleAsset('TurretA');
 
@@ -70,45 +72,101 @@ test('1. computeAssetContentHash es determinista y sensible a cambios', () => {
   const hashA2 = computeAssetContentHash(assetB);
   assert.equal(hashA1, hashA2, 'Dos assets idénticos deben tener exactamente el mismo hash');
 
-  // Modificar posición de una pieza
-  const modifiedAsset = JSON.parse(JSON.stringify(assetA)) as Forge3DAsset;
-  modifiedAsset.parts[0].position = [1.5, 0.5, 0];
-  const hashMod = computeAssetContentHash(modifiedAsset);
-
-  assert.notEqual(hashA1, hashMod, 'Modificar la posición de una pieza debe alterar el hash');
-});
-
-test('2. calculateAssetMetrics diferencia vértices, caras y triángulos reales', () => {
-  const asset = createSampleAsset('TestMetrics');
-  const metrics = calculateAssetMetrics(asset);
-
-  // Block (8 verts, 12 tris) + Cylinder (48 verts, 92 tris) = 56 verts, 104 tris
-  assert.equal(metrics.partsCount, 2);
-  assert.equal(metrics.vertices, 56, 'Debe calcular la suma de vértices de las formas primitivas');
-  assert.equal(metrics.triangles, 104, 'Debe calcular la suma de triángulos reales');
-
-  // Malla con datos explícitos meshData
+  // Prueba 1A: Malla con vértices internos: desplazar un vértice intermedio sin alterar la cantidad total
   const meshAsset: Forge3DAsset = {
-    ...asset,
+    ...assetA,
     parts: [
       {
-        ...asset.parts[0],
+        ...assetA.parts[0],
         meshData: {
-          vertices: [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+          vertices: [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+          ],
           faces: [[0, 1, 2]],
         },
       },
     ],
   };
 
-  const meshMetrics = calculateAssetMetrics(meshAsset);
-  assert.equal(meshMetrics.vertices, 3);
-  assert.equal(meshMetrics.triangles, 1);
+  const originalMeshHash = computeAssetContentHash(meshAsset);
+
+  // Desplazar vértice intermedio [1.0, 0.0, 0.0] a [1.08, 0.0, 0.0] (mismo número de vértices y caras)
+  const deformedMeshAsset: Forge3DAsset = JSON.parse(JSON.stringify(meshAsset));
+  deformedMeshAsset.parts[0].meshData!.vertices[1][0] = 1.08;
+
+  const deformedMeshHash = computeAssetContentHash(deformedMeshAsset);
+  assert.notEqual(
+    originalMeshHash,
+    deformedMeshHash,
+    'CRÍTICO: El hash debe detectar el desplazamiento de coordenadas de vértices aunque la cantidad de vértices sea idéntica'
+  );
+
+  // Prueba 1B: Modificar color de una pieza
+  const recoloredAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  recoloredAsset.parts[0].color = [255, 0, 0];
+  assert.notEqual(computeAssetContentHash(recoloredAsset), hashA1, 'Modificar el color debe alterar el hash');
+
+  // Prueba 1C: Modificar propiedad física anchored
+  const unanchoredAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  unanchoredAsset.parts[0].anchored = false;
+  assert.notEqual(computeAssetContentHash(unanchoredAsset), hashA1, 'Modificar anchored debe alterar el hash');
+
+  // Prueba 1D: Modificar canCollide
+  const ghostAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  ghostAsset.parts[0].canCollide = false;
+  assert.notEqual(computeAssetContentHash(ghostAsset), hashA1, 'Modificar canCollide debe alterar el hash');
+
+  // Prueba 1E: Modificar transparency
+  const glassAsset: Forge3DAsset = JSON.parse(JSON.stringify(assetA));
+  glassAsset.parts[0].transparency = 0.5;
+  assert.notEqual(computeAssetContentHash(glassAsset), hashA1, 'Modificar transparency debe alterar el hash');
 });
 
-test('3. ensureStablePartIds genera identificadores estables sin alterar los existentes', () => {
+test('2. calculateAssetMetrics distingue entre geometría real y estimada, y calcula quads y N-gons', () => {
+  // Caso A: Primitivas Roblox puras
+  const primitiveAsset = createSampleAsset('TestPrimitives');
+  const primMetrics = calculateAssetMetrics(primitiveAsset);
+
+  assert.equal(primMetrics.hasEstimatedGeometry, true, 'Debe marcar hasEstimatedGeometry=true para primitivas');
+  assert.equal(primMetrics.realVertices, 0, 'No hay vértices reales en primitivas');
+  assert.equal(primMetrics.estimatedVertices, 56, 'Block (8) + Cylinder (48) = 56');
+  assert.equal(primMetrics.estimatedTriangles, 104, 'Block (12) + Cylinder (92) = 104');
+  assert.equal(primMetrics.vertices, 56);
+  assert.equal(primMetrics.triangles, 104);
+
+  // Caso B: Malla real con quads (caras de 4 vértices) y pentágonos (caras de 5 vértices)
+  const quadMeshAsset: Forge3DAsset = {
+    ...primitiveAsset,
+    parts: [
+      {
+        ...primitiveAsset.parts[0],
+        meshData: {
+          vertices: [
+            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], // quad 1 (4 vértices -> 2 triángulos)
+            [2, 0, 0], [3, 0, 0], [3.5, 0.5, 0], [3, 1, 0], [2, 1, 0], // pentágono (5 vértices -> 3 triángulos)
+          ],
+          faces: [
+            [0, 1, 2, 3], // Quad: 4 - 2 = 2 triángulos
+            [4, 5, 6, 7, 8], // Pentágono: 5 - 2 = 3 triángulos
+          ],
+        },
+      },
+    ],
+  };
+
+  const quadMetrics = calculateAssetMetrics(quadMeshAsset);
+  assert.equal(quadMetrics.hasEstimatedGeometry, false, 'Malla explícita no debe ser estimada');
+  assert.equal(quadMetrics.realVertices, 9, 'Debe registrar 9 vértices reales');
+  assert.equal(quadMetrics.realTriangles, 5, '1 Quad (2 tris) + 1 Pentágono (3 tris) = 5 triángulos reales');
+  assert.equal(quadMetrics.triangles, 5);
+});
+
+test('3. ensureStablePartIds garantiza persistencia real ante reordenamiento y renombrado', () => {
   const parts: MeshPart3DSpec[] = [
     {
+      partId: 'alpha_uuid_001',
       name: 'LeftWing',
       shape: 'Block',
       size: [2, 1, 5],
@@ -124,7 +182,7 @@ test('3. ensureStablePartIds genera identificadores estables sin alterar los exi
       collisionFidelity: 'Box',
     },
     {
-      partId: 'custom_fixed_id_999',
+      partId: 'beta_uuid_002',
       name: 'RightWing',
       shape: 'Block',
       size: [2, 1, 5],
@@ -141,12 +199,58 @@ test('3. ensureStablePartIds genera identificadores estables sin alterar los exi
     },
   ];
 
-  const stabilized = ensureStablePartIds(parts, 'StarFighter');
-  assert.equal(stabilized[0].partId, 'StarFighter_LeftWing_1');
-  assert.equal(stabilized[1].partId, 'custom_fixed_id_999', 'No debe sobrescribir IDs existentes');
+  // Caso 3A: Reordenamiento del array de piezas
+  const reorderedParts = [parts[1], parts[0]];
+  const stabilizedReordered = ensureStablePartIds(reorderedParts, 'StarFighter');
+
+  assert.equal(
+    stabilizedReordered[0].partId,
+    'beta_uuid_002',
+    'La pieza RightWing debe mantener su ID original incluso si pasa al índice 0'
+  );
+  assert.equal(
+    stabilizedReordered[1].partId,
+    'alpha_uuid_001',
+    'La pieza LeftWing debe mantener su ID original incluso si pasa al índice 1'
+  );
+
+  // Caso 3B: Renombrado de una pieza con ID existente
+  const renamedParts: MeshPart3DSpec[] = [
+    {
+      ...parts[0],
+      name: 'ReinforcedLeftWing',
+    },
+  ];
+  const stabilizedRenamed = ensureStablePartIds(renamedParts, 'StarFighter');
+  assert.equal(
+    stabilizedRenamed[0].partId,
+    'alpha_uuid_001',
+    'Renombrar una pieza debe preservar estrictamente su partId'
+  );
+
+  // Caso 3C: Pieza nueva sin ID asignado
+  const unassignedPart: MeshPart3DSpec[] = [
+    {
+      name: 'Cockpit',
+      shape: 'Block',
+      size: [1, 1, 1],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      color: [0, 0, 0],
+      material: 'Plastic',
+      roughness: 0.5,
+      metalness: 0,
+      transparency: 0,
+      canCollide: true,
+      anchored: false,
+      collisionFidelity: 'Box',
+    },
+  ];
+  const assigned = ensureStablePartIds(unassignedPart, 'Ship');
+  assert.ok(assigned[0].partId && assigned[0].partId.length > 5, 'Debe generar un ID persistente no vacío');
 });
 
-test('4. findMatchingPart prioriza partId, luego hierarchyPath, luego nombre', () => {
+test('4. findMatchingPart no selecciona piezas arbitrarias si la pieza fue eliminada', () => {
   const parts: MeshPart3DSpec[] = [
     {
       partId: 'id_alpha',
@@ -167,63 +271,111 @@ test('4. findMatchingPart prioriza partId, luego hierarchyPath, luego nombre', (
     },
     {
       partId: 'id_beta',
-      name: 'Door', // Mismo nombre pero diferente ID y jerarquía
-      hierarchyPath: 'Workspace/Tavern/Door',
+      name: 'Window',
+      hierarchyPath: 'Workspace/Castle/Window',
       shape: 'Block',
-      size: [1, 2, 1],
-      position: [10, 0, 0],
+      size: [1, 1, 1],
+      position: [5, 2, 0],
       rotation: [0, 0, 0],
-      color: [0, 0, 0],
-      material: 'Wood',
-      roughness: 0.7,
+      color: [200, 200, 200],
+      material: 'Glass',
+      roughness: 0.1,
       metalness: 0,
-      transparency: 0,
-      canCollide: true,
+      transparency: 0.6,
+      canCollide: false,
       anchored: true,
       collisionFidelity: 'Box',
     },
   ];
 
-  // Match por ID
-  const matchedById = findMatchingPart(parts, { partId: 'id_beta', name: 'Other' } as any);
-  assert.equal(matchedById?.hierarchyPath, 'Workspace/Tavern/Door');
+  // Caso 4A: Coincidencia exacta por partId
+  const matchA = findMatchingPart(parts, { partId: 'id_beta', name: 'AlteredName' } as any);
+  assert.equal(matchA?.partId, 'id_beta');
 
-  // Match por jerarquía cuando no hay ID
-  const matchedByPath = findMatchingPart(parts, { hierarchyPath: 'Workspace/Castle/Door' } as any);
-  assert.equal(matchedByPath?.partId, 'id_alpha');
+  // Caso 4B: Pieza eliminada que ya no existe en el array
+  const deletedTarget: MeshPart3DSpec = {
+    partId: 'id_deleted_turret',
+    name: 'DeletedTurret',
+    hierarchyPath: 'Workspace/Castle/DeletedTurret',
+    shape: 'Block',
+    size: [1, 1, 1],
+    position: [0, 0, 0],
+    rotation: [0, 0, 0],
+    color: [0, 0, 0],
+    material: 'Wood',
+    roughness: 0.5,
+    metalness: 0,
+    transparency: 0,
+    canCollide: true,
+    anchored: true,
+    collisionFidelity: 'Box',
+  };
+
+  const matchDeleted = findMatchingPart(parts, deletedTarget);
+  assert.equal(
+    matchDeleted,
+    null,
+    'CRÍTICO: Si la pieza seleccionada fue eliminada, findMatchingPart debe devolver null, NO seleccionar arbitrariamente parts[0]'
+  );
+
+  // Caso 4C: Target nulo devuelve null
+  assert.equal(findMatchingPart(parts, null), null);
 });
 
-test('5. Historial, Deshacer y Rehacer mantienen snapshots inmutables', () => {
-  const asset0 = createSampleAsset('Initial');
+test('5. Historial, Deshacer y Rehacer limpian y reactivan pendingChanges según el hash baseline', () => {
+  const asset0 = createSampleAsset('InitialModel');
+  const baselineHash = computeAssetContentHash(asset0);
+
+  // Simulación del motor de estados de ForgeContext
+  let currentAsset = JSON.parse(JSON.stringify(asset0)) as Forge3DAsset;
   const undoStack: Forge3DAsset[] = [];
   const redoStack: Forge3DAsset[] = [];
 
-  // Snapshot 1
-  undoStack.push(JSON.parse(JSON.stringify(asset0)));
-
-  // Operación 1: modificar tamaño
-  const asset1: Forge3DAsset = {
-    ...asset0,
-    parts: asset0.parts.map((p) => (p.name === 'Base' ? { ...p, size: [6, 1, 6] } : p)),
+  const checkPendingChanges = (asset: Forge3DAsset) => {
+    return computeAssetContentHash(asset) !== baselineHash;
   };
 
-  // Snapshot 2
-  undoStack.push(JSON.parse(JSON.stringify(asset1)));
+  assert.equal(checkPendingChanges(currentAsset), false, 'Inicialmente no hay cambios pendientes');
 
-  // Operación 2: modificar color
-  const asset2: Forge3DAsset = {
-    ...asset1,
-    parts: asset1.parts.map((p) => (p.name === 'Cannon' ? { ...p, color: [255, 0, 0] } : p)),
-  };
+  // Operación 1: Modificar posición de la base
+  undoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
+  currentAsset.parts[0].position = [2, 0.5, 0];
+  redoStack.length = 0;
 
-  // Deshacer Operación 2
-  const prevSnapshot = undoStack.pop()!;
-  redoStack.push(JSON.parse(JSON.stringify(asset2)));
+  assert.equal(checkPendingChanges(currentAsset), true, 'Tras la operación 1, pendingChanges debe ser true');
 
-  assert.deepEqual(prevSnapshot.parts[0].size, [6, 1, 6]);
-  assert.deepEqual(prevSnapshot.parts[1].color, [56, 189, 248], 'El color debe volver al original');
+  // Operación 2: Modificar color del cañón
+  undoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
+  currentAsset.parts[1].color = [255, 0, 0];
+  redoStack.length = 0;
 
-  // Rehacer
-  const redoSnapshot = redoStack.pop()!;
-  assert.deepEqual(redoSnapshot.parts[1].color, [255, 0, 0], 'El color debe volver al modificado');
+  assert.equal(checkPendingChanges(currentAsset), true, 'Tras la operación 2, pendingChanges sigue siendo true');
+
+  // Deshacer Operación 2 (volver a Op 1)
+  const prev1 = undoStack.shift()!;
+  redoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
+  currentAsset = prev1;
+
+  assert.deepEqual(currentAsset.parts[1].color, [56, 189, 248], 'El color debe volver al original');
+  assert.equal(checkPendingChanges(currentAsset), true, 'Aún queda la operación 1, pendingChanges sigue en true');
+
+  // Deshacer Operación 1 (volver a estado base Inicial)
+  const prev0 = undoStack.shift()!;
+  redoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
+  currentAsset = prev0;
+
+  assert.deepEqual(currentAsset.parts[0].position, [0, 0.5, 0], 'La posición debe volver a [0, 0.5, 0]');
+  assert.equal(
+    checkPendingChanges(currentAsset),
+    false,
+    'CRÍTICO: Al deshacer hasta el baseline guardado, pendingChanges debe volver a false limpiamente'
+  );
+
+  // Rehacer Operación 1
+  const next1 = redoStack.shift()!;
+  undoStack.unshift(JSON.parse(JSON.stringify(currentAsset)));
+  currentAsset = next1;
+
+  assert.deepEqual(currentAsset.parts[0].position, [2, 0.5, 0]);
+  assert.equal(checkPendingChanges(currentAsset), true, 'Al rehacer, pendingChanges vuelve a true');
 });

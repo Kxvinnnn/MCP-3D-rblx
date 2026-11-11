@@ -141,7 +141,7 @@ export const CreateWizardView: React.FC = () => {
     setNotification({ type: 'info', message: 'Generación 3D cancelada.' });
   };
 
-  // Step 4: Execute Generation via real SSE stream
+  // Step 4: Execute Generation via robust SSE stream parser
   const handleStartGeneration = async () => {
     setCurrentStep(4);
     setIsGenerating(true);
@@ -184,68 +184,124 @@ export const CreateWizardView: React.FC = () => {
       let sseBuffer = '';
       let assetCompleted: Forge3DAsset | null = null;
 
+      const processSseBlock = (block: string) => {
+        const lines = block.split('\n');
+        let eventType = 'message';
+        const dataLines: string[] = [];
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line || line.startsWith(':')) continue;
+          if (line.startsWith('event:')) {
+            eventType = line.replace(/^event:\s*/, '').trim();
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.replace(/^data:\s*/, ''));
+          }
+        }
+
+        if (dataLines.length === 0) return;
+        const jsonStr = dataLines.join('\n');
+
+        let payload: any = null;
+        try {
+          payload = JSON.parse(jsonStr);
+        } catch {
+          // Log unparseable non-empty payload
+          setActivityLogs((prev) => [
+            ...prev,
+            `[AVISO]: Fragmento no parseable: ${jsonStr.slice(0, 80)}`,
+          ]);
+          return;
+        }
+
+        // Explicit treatment of SSE error events
+        if (eventType === 'error' || payload.type === 'error' || payload.error) {
+          const errMsg = payload.error || payload.message || 'Error en la generación 3D';
+          throw new Error(errMsg);
+        }
+
+        if (payload.type === 'stage') {
+          setProgressStatus(payload.message || 'Procesando...');
+          if (payload.stage === 'init') setProgressPercent(20);
+          else if (payload.stage === 'geometry' || payload.stage === 'synthesis') setProgressPercent(50);
+          else if (payload.stage === 'materials' || payload.stage === 'pbr') setProgressPercent(75);
+          else if (payload.stage === 'validation') setProgressPercent(90);
+          setActivityLogs((prev) => [...prev, payload.message]);
+        } else if (payload.type === 'log') {
+          setActivityLogs((prev) => [...prev, payload.message]);
+        } else if (payload.type === 'rojo_write') {
+          setActivityLogs((prev) => [
+            ...prev,
+            payload.saved
+              ? `Guardado en disco Rojo: ${payload.path}`
+              : `Rojo: ${payload.message}`,
+          ]);
+        } else if (payload.type === 'done' || payload.type === 'complete') {
+          const res = payload.data || payload.result;
+          if (res) {
+            assetCompleted = res;
+            setProgressPercent(100);
+            setProgressStatus(`Modelo '${res.name}' construido con éxito.`);
+          }
+        }
+      };
+
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          // Process residual buffer when stream concludes
+          if (sseBuffer.trim()) {
+            processSseBlock(sseBuffer.trim());
+            sseBuffer = '';
+          }
+          break;
+        }
 
-        sseBuffer += decoder.decode(value, { stream: true });
+        // Normalize CRLF (\r\n) and legacy CR (\r) to standard \n
+        sseBuffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
         const events = sseBuffer.split('\n\n');
         sseBuffer = events.pop() || '';
 
         for (const evt of events) {
-          const line = evt.trim();
-          if (!line.startsWith('data:')) continue;
-          const jsonStr = line.replace(/^data:\s*/, '');
-          try {
-            const payload = JSON.parse(jsonStr);
-
-            if (payload.type === 'stage') {
-              setProgressStatus(payload.message || 'Procesando...');
-              if (payload.stage === 'init') setProgressPercent(20);
-              else if (payload.stage === 'geometry' || payload.stage === 'synthesis') setProgressPercent(50);
-              else if (payload.stage === 'materials' || payload.stage === 'pbr') setProgressPercent(75);
-              else if (payload.stage === 'validation') setProgressPercent(90);
-              setActivityLogs((prev) => [...prev, payload.message]);
-            } else if (payload.type === 'log') {
-              setActivityLogs((prev) => [...prev, payload.message]);
-            } else if (payload.type === 'rojo_write') {
-              setActivityLogs((prev) => [
-                ...prev,
-                payload.saved
-                  ? `Guardado en disco Rojo: ${payload.path}`
-                  : `Rojo: ${payload.message}`,
-              ]);
-            } else if (payload.type === 'done' || payload.type === 'complete') {
-              const res = payload.data || payload.result;
-              if (res) {
-                assetCompleted = res;
-                setProgressPercent(100);
-                setProgressStatus(`Modelo '${res.name}' construido con éxito.`);
-              }
-            }
-          } catch {
-            // Transient SSE chunk formatting
+          if (evt.trim()) {
+            processSseBlock(evt);
           }
         }
       }
 
-      if (assetCompleted) {
-        setGeneratedAsset(assetCompleted);
-        applyAssetChange(assetCompleted, `Generado con IA: ${assetCompleted.name}`, 'add_part');
-        setActiveAsset(assetCompleted);
+      // Structural validation of received 3D asset model using a TypeScript type guard
+      const isValidForgeAsset = (obj: any): obj is Forge3DAsset => {
+        return (
+          obj &&
+          typeof obj === 'object' &&
+          typeof obj.name === 'string' &&
+          obj.name.trim().length > 0 &&
+          Array.isArray(obj.parts) &&
+          obj.parts.length > 0 &&
+          obj.parts.every((p: any) => p && typeof p === 'object' && typeof p.name === 'string')
+        );
+      };
+
+      if (isValidForgeAsset(assetCompleted)) {
+        const completedAsset: Forge3DAsset = assetCompleted;
+        setGeneratedAsset(completedAsset);
+        applyAssetChange(completedAsset, `Generado con IA: ${completedAsset.name}`, 'add_part');
+        setActiveAsset(completedAsset);
         fetchAssetLibrary();
         setIsGenerating(false);
         setCurrentStep(5);
         setNotification({
           type: 'success',
-          message: `Modelo '${assetCompleted.name}' creado con ${assetCompleted.parts.length} piezas.`,
+          message: `Modelo '${completedAsset.name}' creado con ${completedAsset.parts.length} piezas.`,
         });
       } else {
-        throw new Error('La respuesta del motor 3D no devolvió un modelo válido.');
+        throw new Error('La respuesta del motor 3D no devolvió una estructura 3D válida con piezas y nombre.');
       }
     } catch (err: any) {
-      if (err.name === 'AbortError') {
-        // Handled cleanly by cancel button
+      if (err.name === 'AbortError' || controller.signal.aborted) {
+        setIsGenerating(false);
+        setProgressStatus('Generación cancelada por el usuario');
+        setActivityLogs((prev) => [...prev, '[CANCELADO]: Operación abortada por el usuario.']);
         return;
       }
       setIsGenerating(false);
