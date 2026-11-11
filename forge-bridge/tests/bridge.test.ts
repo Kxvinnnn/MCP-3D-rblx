@@ -38,12 +38,18 @@ const SHARED_SECRET = 'test-shared-secret-2026-hmac-key';
 const PLUGIN_TOKEN = 'test-local-plugin-token-2026';
 
 function resolveTestRojoProjectRoot(): string {
-  const parentDir = path.resolve(process.cwd(), '../');
-  const rojoWorkspaceDir = path.resolve(process.cwd(), '../rojo_workspace');
-  if (fs.existsSync(path.join(rojoWorkspaceDir, 'default.project.json'))) {
-    return rojoWorkspaceDir;
+  const candidates = [
+    path.resolve(process.cwd(), 'rojo_workspace'),
+    process.cwd(),
+    path.resolve(process.cwd(), '../rojo_workspace'),
+    path.resolve(process.cwd(), '../'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'default.project.json'))) {
+      return dir;
+    }
   }
-  return parentDir;
+  return path.resolve(process.cwd(), '../');
 }
 
 test('Fase 4 & 7 — Seguridad de Rutas Relativas, Bloqueo de Path Traversal y Contrato de Mensajes', () => {
