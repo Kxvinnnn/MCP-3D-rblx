@@ -200,11 +200,31 @@ export const HomeView: React.FC = () => {
           <div className="flex items-center gap-2">
             <span
               className={`w-2 h-2 rounded-full ${
-                bridgeStatus.backendHealthy ? 'bg-emerald-400' : 'bg-red-400'
+                bridgeStatus.backend.status === 'connected'
+                  ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
+                  : bridgeStatus.backend.status === 'checking' || bridgeStatus.backend.status === 'unknown'
+                  ? 'bg-amber-400 animate-pulse'
+                  : 'bg-red-400'
               }`}
             />
             <span className="text-slate-300">Backend API:</span>
-            <span className="text-emerald-400 font-medium">Operativo</span>
+            <span
+              className={`font-medium ${
+                bridgeStatus.backend.status === 'connected'
+                  ? 'text-emerald-400'
+                  : bridgeStatus.backend.status === 'checking' || bridgeStatus.backend.status === 'unknown'
+                  ? 'text-amber-400'
+                  : 'text-red-400'
+              }`}
+            >
+              {bridgeStatus.backend.status === 'connected'
+                ? `Operativo (${bridgeStatus.backend.latencyMs ?? 15}ms)`
+                : bridgeStatus.backend.status === 'checking'
+                ? 'Comprobando...'
+                : bridgeStatus.backend.status === 'unknown'
+                ? 'Iniciando...'
+                : 'No disponible'}
+            </span>
           </div>
         </div>
       </div>

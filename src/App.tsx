@@ -45,6 +45,12 @@ function MainStudioContent() {
     notification,
     setNotification,
     pendingChanges,
+    activeAsset,
+    showUnsavedModal,
+    pendingSwitchTarget,
+    confirmSwitchDiscard,
+    confirmSwitchSaveAndProceed,
+    cancelSwitch,
   } = useForge();
 
   const [devMenuOpen, setDevMenuOpen] = useState(false);
@@ -53,6 +59,55 @@ function MainStudioContent() {
 
   return (
     <div className="min-h-screen bg-[#07090e] text-gray-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-white">
+      {/* Unsaved Changes Confirmation Modal */}
+      {showUnsavedModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-950/80 border border-amber-800/60 flex items-center justify-center text-amber-400 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-white text-base">
+                  Cambios pendientes sin guardar
+                </h3>
+                <p className="text-slate-400 text-xs">
+                  {activeAsset?.name || 'Modelo actual'}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-slate-300 text-xs leading-relaxed">
+              Has realizado modificaciones que aún no se han guardado en disco ni sincronizado con Roblox. ¿Deseas guardarlas antes de abrir <span className="font-semibold text-white font-mono">{pendingSwitchTarget?.name}</span>?
+            </p>
+
+            <div className="flex flex-col sm:flex-row items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={cancelSwitch}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={confirmSwitchDiscard}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-red-950/60 hover:bg-red-900/80 text-red-300 border border-red-800/60 text-xs font-semibold cursor-pointer transition"
+              >
+                Descartar cambios
+              </button>
+              <button
+                type="button"
+                onClick={confirmSwitchSaveAndProceed}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer transition shadow-md shadow-cyan-900/30"
+              >
+                Guardar y abrir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {notification && (
         <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-4 duration-200">

@@ -29,6 +29,7 @@ export const StudioSyncView: React.FC = () => {
     refreshBridgeStatus,
     pushToStudio,
     pullFromStudio,
+    currentSyncStatus,
     syncHistory,
     setNotification,
     uiMode,
@@ -39,11 +40,13 @@ export const StudioSyncView: React.FC = () => {
   const [isPulling, setIsPulling] = useState<boolean>(false);
   const [showAdvancedTools, setShowAdvancedTools] = useState<boolean>(uiMode === 'advanced');
   const [copiedScript, setCopiedScript] = useState<boolean>(false);
+  const [showDestructiveModal, setShowDestructiveModal] = useState<boolean>(false);
 
   const isConnected = bridgeStatus.robloxStudio.connected;
   const isBridgeActive = bridgeStatus.bridgeConnected;
 
-  const handlePush = async () => {
+  const executePushConfirmed = async () => {
+    setShowDestructiveModal(false);
     if (!activeAsset) {
       setNotification({ type: 'warning', message: 'No hay un modelo activo para enviar.' });
       return;
@@ -51,6 +54,19 @@ export const StudioSyncView: React.FC = () => {
     setIsPushing(true);
     await pushToStudio(activeAsset);
     setIsPushing(false);
+  };
+
+  const handlePush = async () => {
+    if (!activeAsset) {
+      setNotification({ type: 'warning', message: 'No hay un modelo activo para enviar.' });
+      return;
+    }
+    // If conflictPolicy is keep_forge, prompt confirmation to avoid accidental Studio overwrite
+    if (conflictPolicy === 'keep_forge') {
+      setShowDestructiveModal(true);
+      return;
+    }
+    executePushConfirmed();
   };
 
   const handlePull = async () => {
@@ -233,6 +249,84 @@ print("[Forge Plugin v2.2.0] Conectando con Forge Local Bridge en 127.0.0.1:4872
           </div>
         )}
       </div>
+
+      {/* Destructive Operation Confirmation Modal */}
+      {showDestructiveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-950/80 border border-amber-800/60 flex items-center justify-center text-amber-400 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-white text-base">
+                  Confirmación de Operación en Studio
+                </h3>
+                <p className="text-slate-400 text-xs">
+                  Estrategia: Conservar Forge AI Studio
+                </p>
+              </div>
+            </div>
+
+            <p className="text-slate-300 text-xs leading-relaxed">
+              Has seleccionado sobrescribir completamente las partes de Roblox Studio con el modelo de Forge. Si alguien ha movido o editado piezas en Studio, esos cambios serán reemplazados. ¿Deseas continuar?
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowDestructiveModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={executePushConfirmed}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer transition shadow-md shadow-amber-950/40"
+              >
+                Confirmar y Sobrescribir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live Sync Operation Status Banner */}
+      {currentSyncStatus.state !== 'idle' && (
+        <div
+          className={`p-4 rounded-xl border flex items-center justify-between gap-4 text-xs ${
+            currentSyncStatus.state === 'applied_successfully'
+              ? 'bg-emerald-950/40 border-emerald-800/80 text-emerald-200'
+              : currentSyncStatus.state === 'awaiting_studio' || currentSyncStatus.state === 'queued'
+              ? 'bg-cyan-950/40 border-cyan-800/80 text-cyan-200'
+              : currentSyncStatus.state === 'error'
+              ? 'bg-red-950/40 border-red-800/80 text-red-200'
+              : 'bg-slate-900 border-slate-800 text-slate-200'
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <span
+              className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                currentSyncStatus.state === 'applied_successfully'
+                  ? 'bg-emerald-400'
+                  : currentSyncStatus.state === 'error'
+                  ? 'bg-red-400'
+                  : 'bg-cyan-400 animate-pulse'
+              }`}
+            />
+            <div>
+              <span className="font-semibold block">{currentSyncStatus.message}</span>
+              {currentSyncStatus.details && (
+                <span className="text-[11px] opacity-80 block">{currentSyncStatus.details}</span>
+              )}
+            </div>
+          </div>
+          <span className="text-[11px] opacity-60 font-mono shrink-0">
+            {currentSyncStatus.timestamp}
+          </span>
+        </div>
+      )}
 
       {/* 2 Main Synchronization Action Buttons */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

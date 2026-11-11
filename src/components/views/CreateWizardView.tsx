@@ -127,63 +127,127 @@ export const CreateWizardView: React.FC = () => {
     reader.readAsDataURL(file);
   };
 
-  // Step 4: Execute Generation
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleCancelGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsGenerating(false);
+    setProgressStatus('Generación cancelada');
+    setActivityLogs((prev) => [...prev, 'Operación cancelada por el usuario.']);
+    setCurrentStep(3);
+    setNotification({ type: 'info', message: 'Generación 3D cancelada.' });
+  };
+
+  // Step 4: Execute Generation via real SSE stream
   const handleStartGeneration = async () => {
     setCurrentStep(4);
     setIsGenerating(true);
-    setProgressPercent(10);
-    setProgressStatus('Inicializando generador 3D...');
-    setActivityLogs(['Iniciando pipeline de generación...', `Categoría seleccionada: ${category}`, `Presupuesto: ${polyBudgets[detailLevel].tris} tris`]);
+    setProgressPercent(15);
+    setProgressStatus('Iniciando pipeline de generación 3D...');
+    setActivityLogs([
+      `Iniciando generación para '${category}'...`,
+      `Presupuesto: ${polyBudgets[detailLevel].tris} triángulos`,
+      `Fidelidad de colisión: ${collisionFidelity}`,
+    ]);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
-      // Simulate/Trigger generation via API
-      setProgressPercent(25);
-      setProgressStatus('Sintetizando mallas poligonales y piezas...');
-      setActivityLogs((prev) => [...prev, 'Enviando petición a Gemini API / Motor 3D...', 'Generando mallas MeshPart...']);
-
-      const response = await fetch('/api/v1/generate-3d', {
+      const response = await fetch('/api/v1/generate-3d-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
-          prompt: inputMethod === 'text' ? prompt : `Asset de tipo ${category} generado con imagen/relieve`,
+          prompt: inputMethod === 'text' ? prompt : `Asset de tipo ${category} generado con referencia/relieve`,
+          asset_type: 'Model3D',
           category,
           target_poly_budget: polyBudgets[detailLevel].tris,
           collision_fidelity: collisionFidelity,
           save_to_rojo: saveToRojo,
           save_to_library: true,
           reference_image_base64: referenceImage ? referenceImage.split(',')[1] : undefined,
-          reference_image_mime: 'image/png',
+          reference_image_mime_type: 'image/png',
         }),
       });
 
-      setProgressPercent(70);
-      setProgressStatus('Calculando normales, UVs y materiales PBR...');
-      setActivityLogs((prev) => [...prev, 'Respuesta recibida del motor 3D', 'Asignando perfiles PBR SurfaceAppearance...', 'Validando integridad geométrica...']);
-
-      if (!response.ok) {
-        throw new Error(`Error en el servidor: ${response.statusText}`);
+      if (!response.ok || !response.body) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.detail || errJson.error || `Error del servidor HTTP ${response.status}`);
       }
 
-      const data = await response.json();
-      if (!data.asset) {
-        throw new Error(data.error || 'No se pudo generar el modelo 3D.');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+      let assetCompleted: Forge3DAsset | null = null;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const events = sseBuffer.split('\n\n');
+        sseBuffer = events.pop() || '';
+
+        for (const evt of events) {
+          const line = evt.trim();
+          if (!line.startsWith('data:')) continue;
+          const jsonStr = line.replace(/^data:\s*/, '');
+          try {
+            const payload = JSON.parse(jsonStr);
+
+            if (payload.type === 'stage') {
+              setProgressStatus(payload.message || 'Procesando...');
+              if (payload.stage === 'init') setProgressPercent(20);
+              else if (payload.stage === 'geometry' || payload.stage === 'synthesis') setProgressPercent(50);
+              else if (payload.stage === 'materials' || payload.stage === 'pbr') setProgressPercent(75);
+              else if (payload.stage === 'validation') setProgressPercent(90);
+              setActivityLogs((prev) => [...prev, payload.message]);
+            } else if (payload.type === 'log') {
+              setActivityLogs((prev) => [...prev, payload.message]);
+            } else if (payload.type === 'rojo_write') {
+              setActivityLogs((prev) => [
+                ...prev,
+                payload.saved
+                  ? `Guardado en disco Rojo: ${payload.path}`
+                  : `Rojo: ${payload.message}`,
+              ]);
+            } else if (payload.type === 'done' || payload.type === 'complete') {
+              const res = payload.data || payload.result;
+              if (res) {
+                assetCompleted = res;
+                setProgressPercent(100);
+                setProgressStatus(`Modelo '${res.name}' construido con éxito.`);
+              }
+            }
+          } catch {
+            // Transient SSE chunk formatting
+          }
+        }
       }
 
-      setProgressPercent(95);
-      setProgressStatus('Finalizando y guardando en biblioteca...');
-      setActivityLogs((prev) => [...prev, `Modelo '${data.asset.name}' compilado exitosamente.`, 'Todo listo para inspección 3D.']);
-
-      setGeneratedAsset(data.asset);
-      applyAssetChange(data.asset, `Generado con IA: ${data.asset.name}`, 'add_part');
-      setActiveAsset(data.asset);
-      fetchAssetLibrary();
-
-      setTimeout(() => {
+      if (assetCompleted) {
+        setGeneratedAsset(assetCompleted);
+        applyAssetChange(assetCompleted, `Generado con IA: ${assetCompleted.name}`, 'add_part');
+        setActiveAsset(assetCompleted);
+        fetchAssetLibrary();
         setIsGenerating(false);
-        setProgressPercent(100);
         setCurrentStep(5);
-      }, 500);
+        setNotification({
+          type: 'success',
+          message: `Modelo '${assetCompleted.name}' creado con ${assetCompleted.parts.length} piezas.`,
+        });
+      } else {
+        throw new Error('La respuesta del motor 3D no devolvió un modelo válido.');
+      }
     } catch (err: any) {
+      if (err.name === 'AbortError') {
+        // Handled cleanly by cancel button
+        return;
+      }
       setIsGenerating(false);
       setProgressStatus(`Error: ${err.message || 'Error desconocido'}`);
       setActivityLogs((prev) => [...prev, `[ERROR]: ${err.message}`]);
@@ -191,6 +255,8 @@ export const CreateWizardView: React.FC = () => {
         type: 'error',
         message: `Error al generar modelo: ${err.message}`,
       });
+    } finally {
+      abortControllerRef.current = null;
     }
   };
 
@@ -664,6 +730,19 @@ export const CreateWizardView: React.FC = () => {
                   <span>{progressPercent}%</span>
                 </div>
               </div>
+
+              {/* Cancel Button */}
+              {isGenerating && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={handleCancelGeneration}
+                    className="py-1.5 px-4 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white text-xs font-medium cursor-pointer transition border border-slate-700/60"
+                  >
+                    Cancelar generación
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Collapsible Activity Log */}
