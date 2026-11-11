@@ -987,7 +987,7 @@ app.post('/api/v1/assets/process-meshpart', (req, res) => {
 });
 
 // Bidirectional Roblox Studio Package Exporter (.rbxmx, .gltf, .obj + .mtl, .luau) -> Rojo & Library
-app.post('/api/v1/assets/export-roblox-package', (req, res) => {
+app.post('/api/v1/assets/export-roblox-package', async (req, res) => {
   try {
     const {
       asset,

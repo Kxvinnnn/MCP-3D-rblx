@@ -21,29 +21,62 @@ El archivo `rojo_workspace/default.project.json` mapea automáticamente las carp
 
 ---
 
-## 2. Instalación del Plugin `ForgeAIStudioPlugin.server.luau` v2.0
+## 2. Instalación y Uso del Servicio `Forge Local Bridge` (127.0.0.1:48720)
 
-1. Abre la pestaña **Código Motores (FastAPI)** en la interfaz web de Forge AI Studio y selecciona `roblox_plugin/ForgeAIStudioPlugin.server.luau` (o encuéntralo en `backend/roblox_plugin/ForgeAIStudioPlugin.server.luau`).
-2. Copia o descarga el archivo en la carpeta de Plugins de Roblox Studio de tu sistema operativo:
-   - **Windows**: `%LocalAppData%\Roblox\Plugins\ForgeAIStudioPlugin.server.luau`
-   - **macOS**: `~/Library/Application Support/Roblox/Plugins/ForgeAIStudioPlugin.server.luau`
-3. En Roblox Studio, abre **Game Settings → Security** y habilita **Allow HTTP Requests**.
-4. Aparecerá el botón **Forge AI v2.0** en la barra de herramientas de Plugins.
+El puente local (`forge-bridge/`) permite a la nube de Forge AI Studio comunicarse con Rojo y Roblox Studio sin abrir puertos inbound en Windows.
+
+### 2.1 Configuración de Variables (`forge-bridge/.env`)
+```bash
+FORGE_BRIDGE_PORT=48720
+FORGE_BRIDGE_HOST=127.0.0.1
+FORGE_CLOUD_URL=https://ais-dev-gqb23lmn6df25du4b3bz2n-751544883802.us-west2.run.app
+FORGE_BRIDGE_SHARED_SECRET="forge-local-dev-token-2026"
+FORGE_PLUGIN_LOCAL_TOKEN="forge-local-dev-token-2026"
+ROJO_PROJECT_PATH="../rojo_workspace"
+ROJO_PORT=34872
+```
+
+### 2.2 Inicio y Parada en Windows
+- **Iniciar**: Ejecutar `./scripts/start-bridge.ps1` o `npm run start` dentro de `forge-bridge/`.
+- **Detener**: Ejecutar `./scripts/stop-bridge.ps1`.
+- **Verificar Estado**: `GET http://127.0.0.1:48720/local/status`.
 
 ---
 
-## 3. Capacidades del Plugin de Roblox Studio v2.0
+## 3. Instalación del Plugin `ForgeAIStudioPlugin.server.luau` v2.2.0
 
-El plugin `ForgeAIStudioPlugin.server.luau` resuelve todas las limitaciones de la primera versión e incluye 4 herramientas integradas en su `DockWidgetPluginGui`:
+1. Copia `backend/roblox_plugin/ForgeAIStudioPlugin.server.luau` en la carpeta de Plugins de Roblox Studio:
+   - **Windows**: `%LocalAppData%\Roblox\Plugins\ForgeAIStudioPlugin.server.luau`
+   - **macOS**: `~/Library/Application Support/Roblox/Plugins/ForgeAIStudioPlugin.server.luau`
+2. En Roblox Studio, abre **Game Settings → Security** y habilita **Allow HTTP Requests**.
+3. En el DockWidget de **Forge AI v2.2**:
+   - Configura **Local Bridge URL** (por defecto `http://127.0.0.1:48720`).
+   - Configura **Security Token** (el mismo token definido en `FORGE_PLUGIN_LOCAL_TOKEN`).
+   - El plugin guardará la configuración automáticamente con `plugin:SetSetting`.
 
-### 3.1 Selector Dinámico de Tipo de Script (`Server | Client | Module`)
-- Permite alternar con un clic entre `Server` (`ServerScriptService`), `Client` (`StarterPlayerScripts`) y `Module` (`ReplicatedStorage`) antes de generar un script, además de elegir el tier de modelo (`fast` o `pro`).
+---
 
-### 3.2 Generador e Importador de Modelos 3D en `Workspace`
-- Invoca `POST /api/v1/generate-3d` y reconstruye inmediatamente en `Workspace` un objeto `Model` con todas sus sub-partes (`Part`, `WedgePart`, `CornerWedgePart`), aplicando `Size`, `CFrame`, `Color3`, `Enum.Material`, `Transparency`, `PrimaryPart` y atributos PBR (`Roughness`, `Metalness`, `CollisionFidelity`), registrando un waypoint en `ChangeHistoryService` para permitir `Ctrl+Z` (*Undo*).
+## 4. Capacidades del Plugin de Roblox Studio v2.2.0
 
-### 3.3 Optimizador de Geometría y Colisiones sobre `Selection:Get()`
-- Al seleccionar cualquier `Model` o `BasePart` en el visor de Roblox Studio y pulsar **Optimizar Selección**, el plugin recorre la jerarquía seleccionada, habilita `Anchored`, ajusta materiales, aplica atributos de `CollisionFidelity` y reporta el conteo de partes optimizadas.
+### 4.1 Modificación Real del DataModel (`studio.apply_modifications`)
+- Recibe especificaciones completas de modelos o selecciones parciales desde Forge.
+- Si el modelo existe en `Workspace`, ejecuta una **actualización incremental in-place** (`applyIncrementalModelUpdateInStudio`):
+  - Actualiza `CFrame` relativo al pivote del modelo (`ForgeSyncOriginCFrame`).
+  - Actualiza `Color3`, `Material`, `Transparency` y `Reflectance`.
+  - Reconstruye `EditableMesh` únicamente en piezas cuya geometría cambió.
+  - Asigna `SurfaceAppearance` si existen `rbxassetid://` publicados.
+  - Conserva scripts hijos, welds y accesorios personalizados.
 
-### 3.4 Verificador de Sincronización Rojo con SHA-256
-- Consulta `GET /api/v1/rojo/sync-manifest` y comprueba en tiempo real dentro del `DataModel` de Roblox Studio (`ServerScriptService`, `StarterPlayerScripts`, `StarterGui`, `ReplicatedStorage`) que cada módulo `.luau` listado en el manifiesto del servidor haya sido sincronizado correctamente por Rojo.
+### 4.2 Cola de Confirmaciones Destructivas (Regla de Seguridad)
+- **NUNCA** se eliminan piezas automáticamente sin interacción del usuario.
+- Si una sincronización implica eliminar piezas ausentes, el plugin las añade a una cola protegida y muestra un banner en el DockWidget:
+  `⚠️ Confirmar eliminación de N piezas en 'Modelo' [Confirmar] [Cancelar]`.
+
+### 4.3 Inspección y Serialización del DataModel (`studio.get_selection` / `studio.serialize_parts`)
+- Serializa la selección activa en espacio de coordenadas del modelo (`originCFrame:ToObjectSpace(part.CFrame)`).
+- Calcula los 5 hashes canónicos FNV-1a de 32 bits (`geometryHash`, `materialHash`, `transformHash`, `hierarchyHash`, `combinedHash`) idénticos a Python y TypeScript.
+- Identifica `MeshPart.MeshId` reales y mapas de `SurfaceAppearance`.
+
+### 4.4 Verificador de Sincronización Rojo y Autoverificación
+- Consulta el manifiesto de Rojo y compara el hash FNV32 del código Luau en memoria y en disco.
+- Ejecuta autochequeos unitarios en Luau (`runForgePluginSelfVerification`) validando la sensibilidad de hashes ante mutaciones de vértices intermedios y renombrado de piezas.
