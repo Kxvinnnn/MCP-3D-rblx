@@ -589,3 +589,164 @@ test('11. computeIncrementalDiff: Detección quirúrgica de piezas añadidas, el
   );
 });
 
+test('12. Fase 4 — Cobertura de los 12 escenarios obligatorios de identidad persistente y sincronización incremental', () => {
+  const baseAsset = createBaseTestAsset('IdentitySuiteModel');
+
+  // Escenario 1: ensurePersistentPartIdsForParts conserva intacto cualquier partId existente
+  const withExisting = ensurePersistentPartIdsForParts(baseAsset.parts, baseAsset.name);
+  assert.equal(withExisting[0].partId, 'part_head');
+  assert.equal(withExisting[1].partId, 'part_torso');
+
+  // Escenario 2: Piezas sin partId reciben un partId determinista basado en geometría, jerarquía, material y transformación
+  const rawWithoutIds = baseAsset.parts.map((p) => ({ ...p, partId: undefined }));
+  const assignedOnce = ensurePersistentPartIdsForParts(rawWithoutIds, baseAsset.name);
+  const assignedTwice = ensurePersistentPartIdsForParts(rawWithoutIds, baseAsset.name);
+  assert.ok(assignedOnce[0].partId?.startsWith('pid_'));
+  assert.equal(assignedOnce[0].partId, assignedTwice[0].partId);
+  assert.equal(assignedOnce[1].partId, assignedTwice[1].partId);
+
+  // Escenario 3: Reordenar la lista de piezas no cambia ni intercambia sus partIds
+  const reversedWithoutIds = [rawWithoutIds[1], rawWithoutIds[0]];
+  const assignedReversed = ensurePersistentPartIdsForParts(reversedWithoutIds, baseAsset.name);
+  assert.equal(assignedReversed[0].partId, assignedOnce[1].partId);
+  assert.equal(assignedReversed[1].partId, assignedOnce[0].partId);
+
+  // Escenario 4: Dos piezas con el mismo nombre en distinta jerarquía reciben partIds distintos
+  const sameNameDiffHierarchy = ensurePersistentPartIdsForParts(
+    [
+      { ...rawWithoutIds[0], name: 'Wheel', hierarchyPath: 'Workspace/Car/Front/Wheel' },
+      { ...rawWithoutIds[0], name: 'Wheel', hierarchyPath: 'Workspace/Car/Rear/Wheel' },
+    ],
+    'Car'
+  );
+  assert.notEqual(sameNameDiffHierarchy[0].partId, sameNameDiffHierarchy[1].partId);
+
+  // Escenario 5: Dos piezas con el mismo nombre y jerarquía pero distinta geometría o posición reciben partIds distintos
+  const sameNameDiffGeo = ensurePersistentPartIdsForParts(
+    [
+      { ...rawWithoutIds[0], name: 'Panel', hierarchyPath: 'Workspace/Ship/Panel', size: [2, 2, 1] },
+      { ...rawWithoutIds[0], name: 'Panel', hierarchyPath: 'Workspace/Ship/Panel', size: [4, 2, 1] },
+    ],
+    'Ship'
+  );
+  assert.notEqual(sameNameDiffGeo[0].partId, sameNameDiffGeo[1].partId);
+
+  // Escenario 6: Dos clones 100% indistinguibles sin partId -> política explícita de rechazo o desambiguación determinista
+  const exactCloneSpec = { ...rawWithoutIds[0], name: 'IdenticalBolt', hierarchyPath: 'Workspace/Ship/IdenticalBolt' };
+  assert.throws(
+    () =>
+      ensurePersistentPartIdsForParts([exactCloneSpec, { ...exactCloneSpec }], 'Ship', {
+        rejectIndistinguishableClones: true,
+      }),
+    /100% indistinguibles/
+  );
+  const disambiguatedClones = ensurePersistentPartIdsForParts([exactCloneSpec, { ...exactCloneSpec }], 'Ship');
+  assert.notEqual(disambiguatedClones[0].partId, disambiguatedClones[1].partId);
+  assert.ok(disambiguatedClones[1].partId?.endsWith('_2'));
+
+  // Escenario 7: Dos piezas con el mismo partId explícito lanzan error inmediatamente en ensurePersistentPartIdsForParts
+  assert.throws(
+    () =>
+      ensurePersistentPartIdsForParts(
+        [
+          { ...baseAsset.parts[0], partId: 'dup_id_99' },
+          { ...baseAsset.parts[1], partId: 'dup_id_99' },
+        ],
+        'DupModel'
+      ),
+    /El partId explícito 'dup_id_99' está duplicado/
+  );
+
+  // Escenario 8: Renombrar una pieza que ya posee partId conserva su identidad y se reporta como modificada (NO eliminada + añadida)
+  const renamedAsset: Forge3DAsset = {
+    ...baseAsset,
+    parts: [
+      {
+        ...baseAsset.parts[0],
+        name: 'HelmetHeadRenamed',
+        hierarchyPath: 'Workspace/IdentitySuiteModel/HelmetHeadRenamed',
+      },
+      baseAsset.parts[1],
+    ],
+  };
+  const renameDiff = computeIncrementalDiff(baseAsset, renamedAsset);
+  assert.equal(renameDiff.removed.length, 0, 'Renombrar una pieza con partId NO debe marcarla como eliminada');
+  assert.equal(renameDiff.added.length, 0, 'Renombrar una pieza con partId NO debe marcarla como añadida');
+  assert.equal(renameDiff.modified.length, 1, 'Renombrar una pieza con partId debe marcarla como modificada');
+  assert.equal(renameDiff.modified[0].partId, 'part_head');
+  assert.equal(renameDiff.modified[0].hierarchyChanged, true);
+
+  // Escenario 9: Modificar geometría (meshData) de una pieza con partId activa geometryChanged sin perder identidad
+  const geoEditedAsset: Forge3DAsset = {
+    ...baseAsset,
+    parts: [
+      {
+        ...baseAsset.parts[0],
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: [[0, 1, 2]],
+        },
+      },
+      baseAsset.parts[1],
+    ],
+  };
+  const geoDiff = computeIncrementalDiff(baseAsset, geoEditedAsset);
+  assert.equal(geoDiff.modified.length, 1);
+  assert.equal(geoDiff.modified[0].partId, 'part_head');
+  assert.equal(geoDiff.modified[0].geometryChanged, true);
+  assert.equal(geoDiff.modified[0].appearanceChanged, false);
+
+  // Escenario 10: Modificar material/color activa únicamente appearanceChanged
+  const matEditedAsset: Forge3DAsset = {
+    ...baseAsset,
+    parts: [
+      {
+        ...baseAsset.parts[0],
+        material: 'Neon',
+        color: [0, 255, 255],
+      },
+      baseAsset.parts[1],
+    ],
+  };
+  const matDiff = computeIncrementalDiff(baseAsset, matEditedAsset);
+  assert.equal(matDiff.modified.length, 1);
+  assert.equal(matDiff.modified[0].appearanceChanged, true);
+  assert.equal(matDiff.modified[0].geometryChanged, false);
+  assert.equal(matDiff.modified[0].propertiesChanged, false);
+
+  // Escenario 11: Modificar posición/rotación activa únicamente propertiesChanged
+  const posEditedAsset: Forge3DAsset = {
+    ...baseAsset,
+    parts: [
+      {
+        ...baseAsset.parts[0],
+        position: [12, 8, -4],
+        rotation: [15, 30, 45],
+      },
+      baseAsset.parts[1],
+    ],
+  };
+  const posDiff = computeIncrementalDiff(baseAsset, posEditedAsset);
+  assert.equal(posDiff.modified.length, 1);
+  assert.equal(posDiff.modified[0].propertiesChanged, true);
+  assert.equal(posDiff.modified[0].geometryChanged, false);
+  assert.equal(posDiff.modified[0].appearanceChanged, false);
+
+  // Escenario 12: Reordenar la lista de piezas sin cambios de contenido produce in_sync (0 añadidas, 0 eliminadas, 0 modificadas, 2 intactas)
+  const reorderedOnlyAsset: Forge3DAsset = {
+    ...baseAsset,
+    parts: [baseAsset.parts[1], baseAsset.parts[0]],
+  };
+  const reorderDiff = computeIncrementalDiff(baseAsset, reorderedOnlyAsset);
+  assert.equal(reorderDiff.added.length, 0);
+  assert.equal(reorderDiff.removed.length, 0);
+  assert.equal(reorderDiff.modified.length, 0);
+  assert.equal(reorderDiff.unchanged.length, 2);
+  assert.equal(reorderDiff.hasGeometryChanges, false);
+});
+
+

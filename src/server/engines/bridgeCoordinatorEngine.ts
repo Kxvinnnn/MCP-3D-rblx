@@ -33,7 +33,16 @@ export interface RemoteBridgeTaskResult {
   taskId: string;
   sessionId: string;
   correlationId: string;
-  status: 'queued' | 'running' | 'awaiting_studio_confirmation' | 'completed' | 'failed' | 'rejected_duplicate' | 'timeout';
+  status:
+    | 'queued'
+    | 'running'
+    | 'awaiting_studio_confirmation'
+    | 'awaiting_confirmation'
+    | 'partially_applied'
+    | 'completed'
+    | 'failed'
+    | 'rejected_duplicate'
+    | 'timeout';
   result: any;
   error: string | null;
   executionTime: number;
@@ -111,7 +120,7 @@ export class CloudBridgeCoordinator {
     const signature = String(body.signature || '').trim();
 
     if (secret) {
-      const canonical = `${bridgeVersion}|${protocolVersion}|${timestamp}|${nonce}`;
+      const canonical = `${bridgeVersion}|${protocolVersion}|${timestamp}|nonce=${nonce}`.replace('|nonce=', '|');
       const expectedSig = crypto.createHmac('sha256', secret).update(canonical, 'utf-8').digest('hex');
       const sigMatches =
         signature.length === expectedSig.length &&
@@ -230,9 +239,24 @@ export class CloudBridgeCoordinator {
       }
     }
 
-    this.recentResults.push(result);
-    if (this.recentResults.length > 50) {
-      this.recentResults.shift();
+    const existingIdx = this.recentResults.findIndex((r) => r.taskId === result.taskId);
+    let updatedExistingAwaiting = false;
+    if (existingIdx >= 0) {
+      const prev = this.recentResults[existingIdx];
+      if (
+        prev.status === 'awaiting_studio_confirmation' ||
+        prev.status === 'awaiting_confirmation'
+      ) {
+        this.recentResults[existingIdx] = result;
+        updatedExistingAwaiting = true;
+      }
+    }
+
+    if (!updatedExistingAwaiting) {
+      this.recentResults.push(result);
+      if (this.recentResults.length > 50) {
+        this.recentResults.shift();
+      }
     }
 
     if (result.status === 'failed' || result.status === 'timeout') {
@@ -247,7 +271,16 @@ export class CloudBridgeCoordinator {
       }
     }
 
-    return Boolean(item);
+    return Boolean(item) || updatedExistingAwaiting;
+  }
+
+  public getTaskResult(taskId: string): RemoteBridgeTaskResult | null {
+    for (let i = this.recentResults.length - 1; i >= 0; i--) {
+      if (this.recentResults[i].taskId === taskId) {
+        return this.recentResults[i];
+      }
+    }
+    return null;
   }
 
   public isBridgeConnected(): boolean {

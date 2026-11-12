@@ -230,6 +230,55 @@ export function triangulatePolygonFace3D(face: number[], vertices: number[][]): 
     return (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
   };
 
+  // Explicit 2D non-adjacent edge intersection check for self-intersecting polygons (symmetric or asymmetric)
+  const segIntersectEps = bboxDiagSq * 1e-10;
+  const doSegmentsStrictlyOrCollinearlyIntersect2D = (
+    a1: [number, number],
+    a2: [number, number],
+    b1: [number, number],
+    b2: [number, number]
+  ): boolean => {
+    const d1 = area2D(b1, b2, a1);
+    const d2 = area2D(b1, b2, a2);
+    const d3 = area2D(a1, a2, b1);
+    const d4 = area2D(a1, a2, b2);
+
+    if (
+      ((d1 > segIntersectEps && d2 < -segIntersectEps) || (d1 < -segIntersectEps && d2 > segIntersectEps)) &&
+      ((d3 > segIntersectEps && d4 < -segIntersectEps) || (d3 < -segIntersectEps && d4 > segIntersectEps))
+    ) {
+      return true;
+    }
+
+    const onSegment = (p: [number, number], q: [number, number], r: [number, number]) => {
+      return (
+        q[0] <= Math.max(p[0], r[0]) + 1e-9 &&
+        q[0] >= Math.min(p[0], r[0]) - 1e-9 &&
+        q[1] <= Math.max(p[1], r[1]) + 1e-9 &&
+        q[1] >= Math.min(p[1], r[1]) - 1e-9
+      );
+    };
+
+    if (Math.abs(d1) <= segIntersectEps && onSegment(b1, a1, b2)) return true;
+    if (Math.abs(d2) <= segIntersectEps && onSegment(b1, a2, b2)) return true;
+    if (Math.abs(d3) <= segIntersectEps && onSegment(a1, b1, a2)) return true;
+    if (Math.abs(d4) <= segIntersectEps && onSegment(a1, b2, a2)) return true;
+
+    return false;
+  };
+
+  const polyLen = poly2D.length;
+  for (let i = 0; i < polyLen; i++) {
+    const iNext = (i + 1) % polyLen;
+    for (let j = i + 2; j < polyLen; j++) {
+      const jNext = (j + 1) % polyLen;
+      if (i === jNext) continue; // adjacent edges sharing vertex 0
+      if (doSegmentsStrictlyOrCollinearlyIntersect2D(poly2D[i], poly2D[iNext], poly2D[j], poly2D[jNext])) {
+        return { valid: false, triangles: [], reason: 'self_intersecting_or_non_triangulable' };
+      }
+    }
+  }
+
   let signedAreaSum = 0;
   for (let i = 0; i < poly2D.length; i++) {
     const p0 = poly2D[i];
@@ -471,6 +520,9 @@ function validateMeshBufferStructure(
     if (!triResult.valid) {
       report.isValid = false;
       report.hasDegenerateFaces = true;
+      if (triResult.reason === 'self_intersecting_or_non_triangulable') {
+        report.hasMalformedFaces = true;
+      }
       report.errors.push(
         `${partLabel} (${fieldName}): Cara #${fIdx} (${face.length} vértices) es geométricamente degenerada o auto-intersectante (${triResult.reason}).`
       );

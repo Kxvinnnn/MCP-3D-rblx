@@ -294,6 +294,50 @@ export function verifyPersistedAssetContent(
   const reqParts = Array.isArray(requested.parts) ? requested.parts : [];
   const persParts = Array.isArray(persisted.parts) ? persisted.parts : [];
 
+  if (
+    requested.id &&
+    persisted.id &&
+    String(requested.id).trim() !== String(persisted.id).trim()
+  ) {
+    return {
+      valid: false,
+      reason: `El identificador (id) devuelto por el servidor ('${persisted.id}') no coincide con el enviado ('${requested.id}').`,
+    };
+  }
+
+  if (
+    requested.asset_id &&
+    persisted.asset_id &&
+    String(requested.asset_id).trim() !== String(persisted.asset_id).trim()
+  ) {
+    return {
+      valid: false,
+      reason: `El asset_id devuelto por el servidor ('${persisted.asset_id}') no coincide con el enviado ('${requested.asset_id}').`,
+    };
+  }
+
+  if (
+    requested.asset_type &&
+    persisted.asset_type &&
+    requested.asset_type !== persisted.asset_type
+  ) {
+    return {
+      valid: false,
+      reason: `El tipo de recurso (asset_type='${persisted.asset_type}') devuelto por el servidor no coincide con '${requested.asset_type}'.`,
+    };
+  }
+
+  if (
+    requested.category &&
+    persisted.category &&
+    requested.category !== persisted.category
+  ) {
+    return {
+      valid: false,
+      reason: `La categoría ('${persisted.category}') devuelta por el servidor no coincide con '${requested.category}'.`,
+    };
+  }
+
   if (reqParts.length > 0 && persParts.length === 0) {
     return { valid: false, reason: 'El servidor devolvió un modelo inconsistente o sin piezas.' };
   }
@@ -371,6 +415,50 @@ export function verifyPersistedAssetContent(
       matchedPersistedIndices.add(directIdx);
       const persPart = persParts[directIdx];
 
+      if (
+        reqPart.partId &&
+        persPart.partId &&
+        reqPart.partId.trim() !== persPart.partId.trim()
+      ) {
+        return {
+          valid: false,
+          reason: `El partId de la pieza '${reqPart.name}' fue alterado ('${reqPart.partId}' -> '${persPart.partId}').`,
+        };
+      }
+
+      if (
+        reqPart.hierarchyPath &&
+        persPart.hierarchyPath &&
+        reqPart.hierarchyPath !== persPart.hierarchyPath
+      ) {
+        return {
+          valid: false,
+          reason: `La ruta jerárquica (hierarchyPath) de la pieza '${reqPart.name}' fue alterada ('${reqPart.hierarchyPath}' -> '${persPart.hierarchyPath}').`,
+        };
+      }
+
+      if (
+        reqPart.parentId &&
+        persPart.parentId &&
+        reqPart.parentId !== persPart.parentId
+      ) {
+        return {
+          valid: false,
+          reason: `El parentId de la pieza '${reqPart.name}' fue alterado ('${reqPart.parentId}' -> '${persPart.parentId}').`,
+        };
+      }
+
+      if (
+        reqPart.parentName &&
+        persPart.parentName &&
+        reqPart.parentName !== persPart.parentName
+      ) {
+        return {
+          valid: false,
+          reason: `El parentName de la pieza '${reqPart.name}' fue alterado ('${reqPart.parentName}' -> '${persPart.parentName}').`,
+        };
+      }
+
       if (partAppearanceHash(reqPart) !== partAppearanceHash(persPart)) {
         return {
           valid: false,
@@ -396,7 +484,13 @@ export function verifyPersistedAssetContent(
         if (
           !persPart.meshData ||
           toCanonicalJsonValue(reqPart.meshData.vertices) !== toCanonicalJsonValue(persPart.meshData.vertices) ||
-          toCanonicalJsonValue(reqPart.meshData.faces) !== toCanonicalJsonValue(persPart.meshData.faces)
+          toCanonicalJsonValue(reqPart.meshData.faces) !== toCanonicalJsonValue(persPart.meshData.faces) ||
+          (Array.isArray(reqPart.meshData.normals) &&
+            reqPart.meshData.normals.length > 0 &&
+            toCanonicalJsonValue(reqPart.meshData.normals) !== toCanonicalJsonValue(persPart.meshData.normals)) ||
+          (Array.isArray(reqPart.meshData.uvs) &&
+            reqPart.meshData.uvs.length > 0 &&
+            toCanonicalJsonValue(reqPart.meshData.uvs) !== toCanonicalJsonValue(persPart.meshData.uvs))
         ) {
           return {
             valid: false,
@@ -409,7 +503,13 @@ export function verifyPersistedAssetContent(
         if (
           !persPart.baseMeshData ||
           toCanonicalJsonValue(reqPart.baseMeshData.vertices) !== toCanonicalJsonValue(persPart.baseMeshData.vertices) ||
-          toCanonicalJsonValue(reqPart.baseMeshData.faces) !== toCanonicalJsonValue(persPart.baseMeshData.faces)
+          toCanonicalJsonValue(reqPart.baseMeshData.faces) !== toCanonicalJsonValue(persPart.baseMeshData.faces) ||
+          (Array.isArray(reqPart.baseMeshData.normals) &&
+            reqPart.baseMeshData.normals.length > 0 &&
+            toCanonicalJsonValue(reqPart.baseMeshData.normals) !== toCanonicalJsonValue(persPart.baseMeshData.normals)) ||
+          (Array.isArray(reqPart.baseMeshData.uvs) &&
+            reqPart.baseMeshData.uvs.length > 0 &&
+            toCanonicalJsonValue(reqPart.baseMeshData.uvs) !== toCanonicalJsonValue(persPart.baseMeshData.uvs))
         ) {
           return {
             valid: false,
@@ -419,8 +519,10 @@ export function verifyPersistedAssetContent(
       }
     } else {
       // Check if reqPart was legitimately split into _Sub1, _Sub2, ...
-      const reqVertCount = reqPart.meshData?.vertices?.length || 0;
-      const reqFaceCount = reqPart.meshData?.faces?.length || 0;
+      const reqVerts = reqPart.meshData?.vertices || [];
+      const reqFaces = reqPart.meshData?.faces || [];
+      const reqVertCount = reqVerts.length;
+      const reqFaceCount = reqFaces.length;
       const isOversizedEligible =
         reqVertCount > OVERSIZED_SPLIT_VERTEX_THRESHOLD || reqFaceCount > OVERSIZED_SPLIT_FACE_THRESHOLD;
 
@@ -439,10 +541,41 @@ export function verifyPersistedAssetContent(
         };
       }
 
+      const formatTriCoordSig = (v0: number[], v1: number[], v2: number[]): string => {
+        const fPt = (v: number[]) =>
+          `${Number(v[0] || 0).toFixed(4)},${Number(v[1] || 0).toFixed(4)},${Number(v[2] || 0).toFixed(4)}`;
+        return `${fPt(v0)}|${fPt(v1)}|${fPt(v2)}`;
+      };
+
+      const expectedTriSignatures = new Map<string, number>();
+      for (const rf of reqFaces) {
+        if (Array.isArray(rf) && rf.length >= 3) {
+          const v0 = reqVerts[rf[0]];
+          const v1 = reqVerts[rf[1]];
+          const v2 = reqVerts[rf[2]];
+          if (v0 && v1 && v2) {
+            const sig = formatTriCoordSig(v0, v1, v2);
+            expectedTriSignatures.set(sig, (expectedTriSignatures.get(sig) || 0) + 1);
+          }
+        }
+      }
+
       let totalSubFaces = 0;
+      const seenSubPartIds = new Set<string>();
+      const actualTriSignatures = new Map<string, number>();
+
       for (const sIdx of subIndices) {
         matchedPersistedIndices.add(sIdx);
         const subPart = persParts[sIdx];
+
+        const subPid = typeof subPart.partId === 'string' ? subPart.partId.trim() : '';
+        if (!subPid || seenSubPartIds.has(subPid) || (!subPid.includes('_Sub') && !subPart.name.includes('_Sub'))) {
+          return {
+            valid: false,
+            reason: `La sub-pieza '${subPart.name}' carece de un partId trazable y único derivado de '${reqPart.name}'.`,
+          };
+        }
+        seenSubPartIds.add(subPid);
 
         if (
           partAppearanceHash(reqPart) !== partAppearanceHash(subPart) ||
@@ -455,7 +588,48 @@ export function verifyPersistedAssetContent(
           };
         }
 
-        totalSubFaces += subPart.meshData?.faces?.length || 0;
+        const subVerts = subPart.meshData?.vertices || [];
+        const subFaces = subPart.meshData?.faces || [];
+        if (subVerts.length < 3 || subFaces.length < 1) {
+          return {
+            valid: false,
+            reason: `La sub-pieza '${subPart.name}' carece de geometría válida tras la división.`,
+          };
+        }
+
+        for (let fIdx = 0; fIdx < subFaces.length; fIdx++) {
+          const sf = subFaces[fIdx];
+          if (!Array.isArray(sf) || sf.length < 3) {
+            return {
+              valid: false,
+              reason: `La sub-pieza '${subPart.name}' contiene una cara mal formada en índice ${fIdx}.`,
+            };
+          }
+          const [i0, i1, i2] = sf;
+          if (
+            !Number.isInteger(i0) ||
+            !Number.isInteger(i1) ||
+            !Number.isInteger(i2) ||
+            i0 < 0 ||
+            i0 >= subVerts.length ||
+            i1 < 0 ||
+            i1 >= subVerts.length ||
+            i2 < 0 ||
+            i2 >= subVerts.length ||
+            i0 === i1 ||
+            i1 === i2 ||
+            i0 === i2
+          ) {
+            return {
+              valid: false,
+              reason: `La sub-pieza '${subPart.name}' contiene índices locales inválidos o degenerados en cara ${fIdx} (${i0},${i1},${i2} vs ${subVerts.length} vértices).`,
+            };
+          }
+          const sig = formatTriCoordSig(subVerts[i0], subVerts[i1], subVerts[i2]);
+          actualTriSignatures.set(sig, (actualTriSignatures.get(sig) || 0) + 1);
+        }
+
+        totalSubFaces += subFaces.length;
       }
 
       if (totalSubFaces !== reqFaceCount) {
@@ -463,6 +637,15 @@ export function verifyPersistedAssetContent(
           valid: false,
           reason: `Las sub-piezas de '${reqPart.name}' suman ${totalSubFaces} caras en lugar de las ${reqFaceCount} caras originales.`,
         };
+      }
+
+      for (const [sig, expCount] of expectedTriSignatures.entries()) {
+        if ((actualTriSignatures.get(sig) || 0) !== expCount) {
+          return {
+            valid: false,
+            reason: `Las caras de las sub-piezas de '${reqPart.name}' presentan pérdida o duplicación geométrica respecto a la malla original.`,
+          };
+        }
       }
     }
   }
@@ -479,104 +662,279 @@ export function verifyPersistedAssetContent(
   return { valid: true };
 }
 
+export interface StudioApplicationReceipt {
+  operationId: string;
+  taskId: string;
+  status: 'completed' | 'awaiting_confirmation' | 'partially_applied' | 'failed';
+  verified: boolean;
+  modelName: string;
+  expectedModelHash: string;
+  appliedModelHash: string;
+  expectedPartCount: number;
+  actualPartCount: number;
+  addedPartIds: string[];
+  updatedPartIds: string[];
+  removedPartIds: string[];
+  pendingDeletionPartIds: string[];
+  failedPartIds: string[];
+  verifiedGeometryPartIds: string[];
+  warnings: string[];
+  errors: string[];
+}
+
 /**
- * Verifies that a completed task result from the Bridge/Studio contains a cryptographic and structural
+ * Verifies that a task result from the Bridge/Studio contains a cryptographic and structural
  * confirmation receipt proving that Roblox Studio actually reconstructed/applied the expected model:
- * - Non-empty operationId / taskId matching the dispatched task
- * - Explicit appliedPartCount / partCount matching `expectedAsset.parts.length`
- * - Explicit modelHash / appliedModelHash matching `expectedModelHash`
+ * - Rules A-H:
+ *   - Never marks completed or verified=true when pendingDeletionPartIds is non-empty (awaiting_confirmation)
+ *   - Never marks completed or verified=true when failedPartIds or errors is non-empty (partially_applied / failed)
+ *   - Verifies operationId/taskId, expectedPartCount === actualPartCount, expectedModelHash === appliedModelHash,
+ *     and per-part verifiedGeometryPartIds when present.
  */
 export function verifyStudioApplicationReceipt(
   taskResult: any,
   expectedTaskId: string | undefined,
   expectedAsset: Forge3DAsset,
   expectedModelHash: string
-): { valid: boolean; reason?: string } {
+): {
+  valid: boolean;
+  status: StudioApplicationReceipt['status'];
+  reason?: string;
+  receipt?: StudioApplicationReceipt;
+} {
   if (!taskResult || typeof taskResult !== 'object') {
-    return { valid: false, reason: 'Respuesta vacía o inválida del puente local.' };
-  }
-
-  if (taskResult.status !== 'completed') {
-    return { valid: false, reason: `Estado de tarea no completado (${String(taskResult.status)}).` };
-  }
-
-  const resObj = taskResult.result;
-  if (!resObj || typeof resObj !== 'object') {
     return {
       valid: false,
-      reason: 'El puente reportó completed pero Roblox Studio no devolvió un objeto de confirmación (result vacío).',
+      status: 'failed',
+      reason: 'Respuesta vacía o inválida del puente local.',
     };
   }
 
-  if (resObj.status === 'error' || resObj.verified === false) {
-    return {
-      valid: false,
-      reason: resObj.error || 'El plugin de Roblox Studio reportó un fallo de verificación al aplicar el modelo.',
-    };
-  }
+  const resObj = taskResult.result && typeof taskResult.result === 'object' ? taskResult.result : {};
+  const toStrArray = (arr: any): string[] =>
+    Array.isArray(arr) ? arr.map((x) => String(x || '').trim()).filter(Boolean) : [];
 
-  // 1. Verify operation identifier
+  const pendingDeletionPartIds = toStrArray(resObj.pendingDeletionPartIds);
+  const failedPartIds = toStrArray(resObj.failedPartIds);
+  const verifiedGeometryPartIds = toStrArray(resObj.verifiedGeometryPartIds);
+  const addedPartIds = toStrArray(resObj.addedPartIds);
+  const updatedPartIds = toStrArray(resObj.updatedPartIds);
+  const removedPartIds = toStrArray(resObj.removedPartIds);
+  const warnings = toStrArray(resObj.warnings);
+  const errors = toStrArray(resObj.errors);
+
   const confirmedOpId = String(resObj.operationId || resObj.taskId || taskResult.taskId || '').trim();
-  if (!confirmedOpId) {
-    return {
-      valid: false,
-      reason: 'La respuesta de Studio carece de identificador de operación verificable (operationId / taskId).',
-    };
-  }
-  if (expectedTaskId && resObj.operationId && String(resObj.operationId) !== String(expectedTaskId)) {
-    return {
-      valid: false,
-      reason: `El operationId confirmado por Studio ('${resObj.operationId}') no coincide con la tarea enviada ('${expectedTaskId}').`,
-    };
-  }
-
-  // 2. Verify applied part count
-  const rawAppliedCount =
-    typeof resObj.appliedPartCount === 'number'
+  const rawActualCount =
+    typeof resObj.actualPartCount === 'number'
+      ? resObj.actualPartCount
+      : typeof resObj.appliedPartCount === 'number'
       ? resObj.appliedPartCount
       : typeof resObj.partCount === 'number'
       ? resObj.partCount
       : undefined;
 
-  if (typeof rawAppliedCount !== 'number' || !Number.isInteger(rawAppliedCount)) {
+  const confirmedHash = String(resObj.appliedModelHash || resObj.modelHash || '').trim();
+
+  const normalizedReceipt: StudioApplicationReceipt = {
+    operationId: confirmedOpId,
+    taskId: String(taskResult.taskId || resObj.taskId || confirmedOpId),
+    status: 'failed',
+    verified: Boolean(resObj.verified),
+    modelName: String(resObj.modelName || expectedAsset.name),
+    expectedModelHash: String(resObj.expectedModelHash || expectedModelHash),
+    appliedModelHash: confirmedHash,
+    expectedPartCount:
+      typeof resObj.expectedPartCount === 'number' ? resObj.expectedPartCount : expectedAsset.parts.length,
+    actualPartCount: typeof rawActualCount === 'number' ? rawActualCount : 0,
+    addedPartIds,
+    updatedPartIds,
+    removedPartIds,
+    pendingDeletionPartIds,
+    failedPartIds,
+    verifiedGeometryPartIds,
+    warnings,
+    errors,
+  };
+
+  // Rule A: Pending destructive deletions must NEVER be marked completed or verified=true
+  if (
+    pendingDeletionPartIds.length > 0 ||
+    taskResult.status === 'awaiting_studio_confirmation' ||
+    taskResult.status === 'awaiting_confirmation' ||
+    resObj.status === 'awaiting_confirmation' ||
+    resObj.status === 'awaiting_studio_confirmation' ||
+    (typeof resObj.pendingDestructiveConfirmations === 'number' && resObj.pendingDestructiveConfirmations > 0)
+  ) {
+    normalizedReceipt.status = 'awaiting_confirmation';
+    normalizedReceipt.verified = false;
+    const pendingList =
+      pendingDeletionPartIds.length > 0 ? ` (${pendingDeletionPartIds.join(', ')})` : '';
     return {
       valid: false,
-      reason: 'La respuesta de Studio no incluye la cantidad verificada de piezas aplicadas (appliedPartCount).',
+      status: 'awaiting_confirmation',
+      reason: `Operación pendiente de confirmación destructiva en Roblox Studio${pendingList}.`,
+      receipt: normalizedReceipt,
     };
   }
 
-  if (rawAppliedCount !== expectedAsset.parts.length) {
+  // Rule B & C: Failed parts or explicit partial application must NEVER be marked completed
+  if (
+    failedPartIds.length > 0 ||
+    errors.length > 0 ||
+    taskResult.status === 'partially_applied' ||
+    resObj.status === 'partially_applied'
+  ) {
+    const anyApplied =
+      verifiedGeometryPartIds.length > 0 ||
+      addedPartIds.length > 0 ||
+      updatedPartIds.length > 0 ||
+      taskResult.status === 'partially_applied' ||
+      resObj.status === 'partially_applied';
+    const derivedStatus: StudioApplicationReceipt['status'] = anyApplied ? 'partially_applied' : 'failed';
+    normalizedReceipt.status = derivedStatus;
+    normalizedReceipt.verified = false;
+    const detail =
+      errors.length > 0
+        ? errors.join('; ')
+        : `Fallaron ${failedPartIds.length} pieza(s): ${failedPartIds.join(', ')}`;
     return {
       valid: false,
-      reason: `Roblox Studio aplicó ${rawAppliedCount} pieza(s), pero el modelo enviado contiene ${expectedAsset.parts.length} pieza(s).`,
+      status: derivedStatus,
+      reason: `Aplicación incompleta o con fallos en Roblox Studio: ${detail}`,
+      receipt: normalizedReceipt,
     };
   }
 
-  // 3. Verify model hash
-  const confirmedHash = String(resObj.modelHash || resObj.appliedModelHash || '').trim();
+  if (taskResult.status !== 'completed') {
+    normalizedReceipt.status = 'failed';
+    normalizedReceipt.verified = false;
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `Estado de tarea no completado (${String(taskResult.status)}).`,
+      receipt: normalizedReceipt,
+    };
+  }
+
+  if (!taskResult.result || typeof taskResult.result !== 'object') {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El puente reportó completed pero Roblox Studio no devolvió un objeto de confirmación (result vacío).',
+      receipt: normalizedReceipt,
+    };
+  }
+
+  if (resObj.status === 'error' || resObj.status === 'failed' || resObj.verified === false) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: resObj.error || 'El plugin de Roblox Studio reportó un fallo de verificación al aplicar el modelo.',
+      receipt: normalizedReceipt,
+    };
+  }
+
+  // 1. Verify operation identifier
+  if (!confirmedOpId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'La respuesta de Studio carece de identificador de operación verificable (operationId / taskId).',
+      receipt: normalizedReceipt,
+    };
+  }
+  if (expectedTaskId && resObj.operationId && String(resObj.operationId) !== String(expectedTaskId)) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `El operationId confirmado por Studio ('${resObj.operationId}') no coincide con la tarea enviada ('${expectedTaskId}').`,
+      receipt: normalizedReceipt,
+    };
+  }
+
+  // 2. Verify applied part count
+  if (typeof rawActualCount !== 'number' || !Number.isInteger(rawActualCount)) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'La respuesta de Studio no incluye la cantidad verificada de piezas aplicadas (actualPartCount / appliedPartCount).',
+      receipt: normalizedReceipt,
+    };
+  }
+
+  if (rawActualCount !== expectedAsset.parts.length) {
+    const derivedStatus: StudioApplicationReceipt['status'] = rawActualCount > 0 ? 'partially_applied' : 'failed';
+    normalizedReceipt.status = derivedStatus;
+    normalizedReceipt.verified = false;
+    return {
+      valid: false,
+      status: derivedStatus,
+      reason: `Roblox Studio aplicó ${rawActualCount} pieza(s), pero el modelo enviado contiene ${expectedAsset.parts.length} pieza(s).`,
+      receipt: normalizedReceipt,
+    };
+  }
+
+  // 3. Verify per-part verifiedGeometryPartIds if provided in structured receipt
+  if (Array.isArray(resObj.verifiedGeometryPartIds)) {
+    if (verifiedGeometryPartIds.length !== expectedAsset.parts.length) {
+      const derivedStatus: StudioApplicationReceipt['status'] =
+        verifiedGeometryPartIds.length > 0 ? 'partially_applied' : 'failed';
+      normalizedReceipt.status = derivedStatus;
+      normalizedReceipt.verified = false;
+      return {
+        valid: false,
+        status: derivedStatus,
+        reason: `Solo ${verifiedGeometryPartIds.length} de ${expectedAsset.parts.length} pieza(s) tienen geometría EditableMesh verificada en Studio.`,
+        receipt: normalizedReceipt,
+      };
+    }
+    const verifiedSet = new Set(verifiedGeometryPartIds);
+    for (const p of expectedAsset.parts) {
+      if (p.partId && !verifiedSet.has(p.partId)) {
+        normalizedReceipt.status = 'partially_applied';
+        normalizedReceipt.verified = false;
+        return {
+          valid: false,
+          status: 'partially_applied',
+          reason: `La pieza '${p.name}' (${p.partId}) no figura en verifiedGeometryPartIds del recibo de Studio.`,
+          receipt: normalizedReceipt,
+        };
+      }
+    }
+  }
+
+  // 4. Verify model hash
   if (!confirmedHash) {
     return {
       valid: false,
-      reason: 'La respuesta de Studio no incluye el hash canónico del modelo aplicado (modelHash).',
+      status: 'failed',
+      reason: 'La respuesta de Studio no incluye el hash canónico del modelo aplicado (appliedModelHash / modelHash).',
+      receipt: normalizedReceipt,
     };
   }
 
   if (confirmedHash !== expectedModelHash) {
     return {
       valid: false,
+      status: 'failed',
       reason: `El hash del modelo aplicado en Studio (${confirmedHash.slice(0, 8)}) no coincide con el hash enviado (${expectedModelHash.slice(0, 8)}).`,
+      receipt: normalizedReceipt,
     };
   }
 
-  // 4. Verify model name if provided
+  // 5. Verify model name if provided
   if (resObj.modelName && String(resObj.modelName) !== expectedAsset.name) {
     return {
       valid: false,
+      status: 'failed',
       reason: `El nombre del modelo aplicado en Studio ('${resObj.modelName}') no coincide con '${expectedAsset.name}'.`,
+      receipt: normalizedReceipt,
     };
   }
 
-  return { valid: true };
+  normalizedReceipt.status = 'completed';
+  normalizedReceipt.verified = true;
+  return { valid: true, status: 'completed', receipt: normalizedReceipt };
 }
 
 interface ForgeContextType {
@@ -638,6 +996,7 @@ interface ForgeContextType {
   // Bidirectional Synchronization
   currentSyncStatus: SyncOperationStatus;
   pushToStudio: (targetAsset?: Forge3DAsset) => Promise<{ success: boolean; appliedInStudio: boolean; message: string; taskId?: string }>;
+  reconcileStudioTaskReceipt: (taskId: string) => Promise<{ success: boolean; status: StudioApplicationReceipt['status']; message: string }>;
   pullFromStudio: () => Promise<{ success: boolean; message: string; asset?: Forge3DAsset }>;
   syncHistory: SyncHistoryItem[];
 
@@ -715,6 +1074,14 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // Active Conflict state
   const [activeConflict, setActiveConflict] = useState<{ localAsset: Forge3DAsset; remoteAsset: Forge3DAsset } | null>(null);
+  const isMountedRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Check for recoverable draft on mount
   useEffect(() => {
@@ -1097,11 +1464,14 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // Fetch asset library from backend
   const fetchAssetLibrary = useCallback(async () => {
+    if (!isMountedRef.current) return;
     setLoadingLibrary(true);
     try {
       const res = await fetch('/api/v1/assets');
+      if (!isMountedRef.current) return;
       if (res.ok) {
         const data = await res.json();
+        if (!isMountedRef.current) return;
         if (Array.isArray(data.assets)) {
           setAssetLibrary(data.assets);
           if (!activeAsset && data.assets.length > 0) {
@@ -1112,7 +1482,9 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch (err) {
       console.warn('Error fetching asset library:', err);
     } finally {
-      setLoadingLibrary(false);
+      if (isMountedRef.current) {
+        setLoadingLibrary(false);
+      }
     }
   }, [activeAsset, applyActiveAssetDirectly]);
 
@@ -1286,6 +1658,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         updatedBridge = { ...bridgeData };
       }
 
+      if (!isMountedRef.current) return;
       setBridgeStatus((prev) => ({
         ...prev,
         ...updatedBridge,
@@ -1300,6 +1673,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         },
       }));
     } catch (err: any) {
+      if (!isMountedRef.current) return;
       setBridgeStatus((prev) => ({
         ...prev,
         backend: {
@@ -1316,13 +1690,19 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     refreshBridgeStatus();
     fetchAssetLibrary();
     const interval = setInterval(refreshBridgeStatus, 4000);
+    (interval as any)?.unref?.();
     return () => clearInterval(interval);
   }, [refreshBridgeStatus, fetchAssetLibrary]);
 
   // Auto-clear notification after 4 seconds
   useEffect(() => {
     if (notification) {
-      const timer = setTimeout(() => setNotification(null), 4000);
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) {
+          setNotification(null);
+        }
+      }, 4000);
+      (timer as any)?.unref?.();
       return () => clearTimeout(timer);
     }
   }, [notification]);
@@ -1708,7 +2088,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const taskId = taskResult.taskId;
         const taskStatus = taskResult.status;
 
-        if (taskStatus === 'awaiting_studio_confirmation' || taskStatus === 'queued') {
+        if (taskStatus === 'queued') {
           // Queued in Bridge: NOT applied yet in Studio -> do NOT mark synchronization as completed
           const queuedMsg = `Solicitud en cola en el puente local (ID: ${taskId || 'N/A'}). Pendiente de ejecución en Studio.`;
           setCurrentSyncStatus({
@@ -1735,40 +2115,77 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return { success: false, appliedInStudio: false, message: queuedMsg, taskId };
         }
 
-        if (taskStatus === 'completed') {
-          const receiptVerification = verifyStudioApplicationReceipt(
-            taskResult,
+        const receiptVerification = verifyStudioApplicationReceipt(
+          taskResult,
+          taskId,
+          assetToPush,
+          expectedModelHash
+        );
+
+        if (receiptVerification.status === 'awaiting_confirmation') {
+          const awaitingMsg =
+            receiptVerification.reason ||
+            `Operación pendiente de confirmación destructiva en Roblox Studio (ID: ${taskId || 'N/A'}).`;
+          setCurrentSyncStatus({
+            state: 'awaiting_studio',
+            operation: 'push',
             taskId,
-            assetToPush,
-            expectedModelHash
-          );
+            message: awaitingMsg,
+            details:
+              receiptVerification.receipt && receiptVerification.receipt.pendingDeletionPartIds.length > 0
+                ? `Piezas pendientes de eliminación: ${receiptVerification.receipt.pendingDeletionPartIds.join(', ')}`
+                : 'Confirma o cancela la eliminación destructiva en Roblox Studio.',
+            timestamp: new Date().toLocaleTimeString(),
+          });
 
-          if (!receiptVerification.valid) {
-            const errMsg = `Confirmación de Studio rechazada: ${receiptVerification.reason}`;
-            setCurrentSyncStatus({
-              state: 'error',
-              operation: 'push',
-              taskId,
-              message: errMsg,
-              timestamp: new Date().toLocaleTimeString(),
-            });
+          const awaitingItem: SyncHistoryItem = {
+            id: `sync-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'push',
+            modelName: assetToPush.name,
+            partCount: assetToPush.parts.length,
+            status: 'awaiting_studio',
+            details: awaitingMsg,
+            taskId,
+          };
+          setSyncHistory((prev) => [awaitingItem, ...prev].slice(0, 20));
+          setNotification({ type: 'warning', message: awaitingMsg });
+          return { success: false, appliedInStudio: false, message: awaitingMsg, taskId };
+        }
 
-            const errorItem: SyncHistoryItem = {
-              id: `sync-${Date.now()}`,
-              timestamp: new Date().toLocaleTimeString(),
-              type: 'push',
-              modelName: assetToPush.name,
-              partCount: assetToPush.parts.length,
-              status: 'error',
-              details: errMsg,
-              taskId,
-            };
-            setSyncHistory((prev) => [errorItem, ...prev].slice(0, 20));
-            setNotification({ type: 'error', message: errMsg });
-            return { success: false, appliedInStudio: false, message: errMsg, taskId };
-          }
+        if (receiptVerification.status === 'partially_applied') {
+          const partialMsg =
+            receiptVerification.reason ||
+            `Aplicación parcial en Roblox Studio (ID: ${taskId || 'N/A'}).`;
+          setCurrentSyncStatus({
+            state: 'applied_partially',
+            operation: 'push',
+            taskId,
+            message: partialMsg,
+            details:
+              receiptVerification.receipt && receiptVerification.receipt.failedPartIds.length > 0
+                ? `Piezas fallidas: ${receiptVerification.receipt.failedPartIds.join(', ')}`
+                : undefined,
+            timestamp: new Date().toLocaleTimeString(),
+          });
 
-          // Receipt verified: Studio confirmed exact part count, operationId, and modelHash
+          const partialItem: SyncHistoryItem = {
+            id: `sync-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'push',
+            modelName: assetToPush.name,
+            partCount: assetToPush.parts.length,
+            status: 'applied_partially',
+            details: partialMsg,
+            taskId,
+          };
+          setSyncHistory((prev) => [partialItem, ...prev].slice(0, 20));
+          setNotification({ type: 'warning', message: partialMsg });
+          return { success: false, appliedInStudio: false, message: partialMsg, taskId };
+        }
+
+        if (receiptVerification.valid && receiptVerification.status === 'completed') {
+          // Receipt verified: Studio confirmed exact part count, operationId, verifiedGeometryPartIds, and appliedModelHash
           setActiveAssetState(persistedRojoAsset);
           savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(persistedRojoAsset));
           savedAssetHashRef.current = computeAssetContentHash(persistedRojoAsset);
@@ -1785,7 +2202,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             operation: 'push',
             taskId,
             message: successMsg,
-            details: taskResult.result?.details || `Operación ${taskId} verificada por el plugin v2.2.0`,
+            details: taskResult.result?.details || `Operación ${taskId} verificada por el plugin v2.3.0`,
             timestamp: new Date().toLocaleTimeString(),
           });
 
@@ -1804,7 +2221,11 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return { success: true, appliedInStudio: true, message: successMsg, taskId };
         }
 
-        const errMsg = taskResult.error || taskResult.result?.error || 'Roblox Studio no pudo aplicar el modelo';
+        const errMsg =
+          receiptVerification.reason ||
+          taskResult.error ||
+          taskResult.result?.error ||
+          'Roblox Studio no pudo aplicar el modelo';
         setCurrentSyncStatus({
           state: 'error',
           operation: 'push',
@@ -1849,6 +2270,104 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setSyncHistory((prev) => [fallbackItem, ...prev].slice(0, 20));
         setNotification({ type: 'warning', message: bridgeMsg });
         return { success: false, appliedInStudio: false, message: bridgeMsg };
+      }
+    },
+    [activeAsset]
+  );
+
+  /**
+   * Reconciles a Studio task receipt after an asynchronous action in Roblox Studio
+   * (such as confirming or cancelling a pending destructive deletion).
+   */
+  const reconcileStudioTaskReceipt = useCallback(
+    async (
+      taskId: string
+    ): Promise<{ success: boolean; status: StudioApplicationReceipt['status']; message: string }> => {
+      if (!activeAsset || !taskId) {
+        return {
+          success: false,
+          status: 'failed',
+          message: 'No hay modelo activo o taskId para reconciliar con Roblox Studio.',
+        };
+      }
+
+      const stabilizedActive: Forge3DAsset = {
+        ...activeAsset,
+        parts: ensureStablePartIds(activeAsset.parts || [], activeAsset.name),
+      };
+      const expectedModelHash = computeAssetContentHash(stabilizedActive);
+
+      try {
+        const res = await fetch(`/api/v1/bridge/task/${encodeURIComponent(taskId)}`);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const taskResult = await res.json();
+        const verification = verifyStudioApplicationReceipt(
+          taskResult,
+          taskId,
+          stabilizedActive,
+          expectedModelHash
+        );
+
+        if (verification.valid && verification.status === 'completed') {
+          savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(stabilizedActive));
+          savedAssetHashRef.current = expectedModelHash;
+          setPendingChanges(false);
+          try {
+            localStorage.removeItem('forge_active_draft');
+          } catch {}
+          setHasRecoverableDraft(false);
+          setDraftTimestamp(null);
+
+          const msg = `Eliminación destructiva confirmada y verificada en Roblox Studio (${stabilizedActive.parts.length} piezas).`;
+          setCurrentSyncStatus({
+            state: 'applied_successfully',
+            operation: 'push',
+            taskId,
+            message: msg,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+          setNotification({ type: 'success', message: msg });
+          return { success: true, status: 'completed', message: msg };
+        }
+
+        if (verification.status === 'partially_applied') {
+          const msg =
+            verification.reason ||
+            'La operación destructiva fue cancelada o aplicada parcialmente en Roblox Studio. Persisten diferencias locales.';
+          setPendingChanges(true);
+          setCurrentSyncStatus({
+            state: 'applied_partially',
+            operation: 'push',
+            taskId,
+            message: msg,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+          setNotification({ type: 'warning', message: msg });
+          return { success: false, status: 'partially_applied', message: msg };
+        }
+
+        if (verification.status === 'awaiting_confirmation') {
+          const msg =
+            verification.reason ||
+            'La operación sigue esperando confirmación destructiva en Roblox Studio.';
+          setPendingChanges(true);
+          return { success: false, status: 'awaiting_confirmation', message: msg };
+        }
+
+        const errMsg = verification.reason || 'Fallo al verificar el recibo final de Roblox Studio.';
+        setCurrentSyncStatus({
+          state: 'error',
+          operation: 'push',
+          taskId,
+          message: errMsg,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        return { success: false, status: 'failed', message: errMsg };
+      } catch (err: any) {
+        const errMsg = `No se pudo consultar el estado de la tarea ${taskId}: ${err?.message || 'Error de red'}`;
+        return { success: false, status: 'failed', message: errMsg };
       }
     },
     [activeAsset]
@@ -2009,6 +2528,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         refreshBridgeStatus,
         currentSyncStatus,
         pushToStudio,
+        reconcileStudioTaskReceipt,
         pullFromStudio,
         syncHistory,
         notification,

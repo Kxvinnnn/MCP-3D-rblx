@@ -1123,3 +1123,332 @@ test('9. Ciclo E2E completo: Crear modelo -> Asignar IDs persistentes -> Editar 
   });
 });
 
+test('10. Fase 2, 3 & 5 — Recibo estructurado StudioApplicationReceipt: aplicación parcial, contenedor fallback no verificado y ciclo de confirmación/cancelación destructiva', async () => {
+  const { verifyStudioApplicationReceipt } = await import('../src/context/ForgeContext.tsx');
+  const asset = createSampleAsset('StructuredReceiptModel');
+  const expectedHash = computeAssetContentHash(asset);
+
+  // 10A. Regla B/C: Si failedPartIds contiene una pieza o verifiedGeometryPartIds no incluye todas las piezas (ej. fallback container), el recibo NUNCA es completed
+  const fallbackReceiptCheck = verifyStudioApplicationReceipt(
+    {
+      taskId: 'task-fallback-1',
+      status: 'completed',
+      result: {
+        operationId: 'task-fallback-1',
+        taskId: 'task-fallback-1',
+        status: 'completed',
+        verified: true,
+        modelName: asset.name,
+        expectedModelHash: expectedHash,
+        appliedModelHash: expectedHash,
+        expectedPartCount: 2,
+        actualPartCount: 2,
+        verifiedGeometryPartIds: ['part_base_fixed'], // Falta 'part_cannon_fixed' (quedó como UnverifiedFallbackContainer)
+        failedPartIds: [],
+        pendingDeletionPartIds: [],
+      },
+    },
+    'task-fallback-1',
+    asset,
+    expectedHash
+  );
+  assert.equal(fallbackReceiptCheck.valid, false);
+  assert.equal(
+    fallbackReceiptCheck.status,
+    'partially_applied',
+    'Un contenedor fallback sin geometría verificada debe clasificarse como partially_applied y jamás como completed'
+  );
+
+  // 10B. Ciclo completo en ForgeContext: awaiting_confirmation -> cancelación (partially_applied) -> confirmación (completed)
+  let contextValue: any = null;
+  function DestructiveSyncInspector() {
+    contextValue = useForge();
+    return React.createElement('div', null, contextValue.activeAsset?.name);
+  }
+
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(React.createElement(ForgeProvider, null, React.createElement(DestructiveSyncInspector)));
+  });
+
+  await act(async () => {
+    contextValue.setActiveAsset(asset);
+  });
+
+  // Eliminar una pieza localmente ('part_cannon_fixed')
+  const assetAfterDelete: Forge3DAsset = {
+    ...contextValue.activeAsset,
+    parts: [contextValue.activeAsset.parts[0]],
+  };
+  await act(async () => {
+    contextValue.applyAssetChange(assetAfterDelete, 'Eliminar cañón');
+  });
+  assert.equal(contextValue.pendingChanges, true);
+
+  const origFetch = globalThis.fetch;
+  let mockTaskEndpointResponse: any = null;
+
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const sent = JSON.parse(init.body).asset;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: sent }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/enqueue')) {
+      const body = JSON.parse(init.body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          taskId: 'task-destructive-del-99',
+          status: 'awaiting_studio_confirmation',
+          result: {
+            operationId: 'task-destructive-del-99',
+            taskId: 'task-destructive-del-99',
+            status: 'awaiting_confirmation',
+            verified: false,
+            modelName: body.payload.name,
+            expectedModelHash: body.payload.model_hash,
+            appliedModelHash: 'pending_readback_hash',
+            expectedPartCount: 1,
+            actualPartCount: 2,
+            addedPartIds: [],
+            updatedPartIds: [],
+            removedPartIds: [],
+            pendingDeletionPartIds: ['part_cannon_fixed'],
+            failedPartIds: [],
+            verifiedGeometryPartIds: ['part_base_fixed'],
+            warnings: ['Eliminación destructiva pendiente de confirmación en Roblox Studio'],
+            errors: [],
+          },
+        }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/task/task-destructive-del-99')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => mockTaskEndpointResponse,
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  // Paso 1: pushToStudio recibe awaiting_confirmation -> estado awaiting_studio y pendingChanges permanece true
+  await act(async () => {
+    const pushRes = await contextValue.pushToStudio();
+    assert.equal(pushRes.success, false);
+    assert.equal(pushRes.appliedInStudio, false);
+    assert.equal(pushRes.taskId, 'task-destructive-del-99');
+  });
+  assert.equal(contextValue.currentSyncStatus.state, 'awaiting_studio');
+  assert.equal(
+    contextValue.pendingChanges,
+    true,
+    'Mientras haya eliminaciones destructivas pendientes en Studio, pendingChanges NO debe limpiarse'
+  );
+
+  // Paso 2: Usuario CANCELA la eliminación en Roblox Studio -> el recibo pasa a partially_applied
+  mockTaskEndpointResponse = {
+    taskId: 'task-destructive-del-99',
+    status: 'partially_applied',
+    result: {
+      operationId: 'task-destructive-del-99',
+      taskId: 'task-destructive-del-99',
+      status: 'partially_applied',
+      verified: false,
+      modelName: assetAfterDelete.name,
+      expectedModelHash: computeAssetContentHash(assetAfterDelete),
+      appliedModelHash: expectedHash, // En Studio siguen las 2 piezas originales
+      expectedPartCount: 1,
+      actualPartCount: 2,
+      addedPartIds: [],
+      updatedPartIds: [],
+      removedPartIds: [],
+      pendingDeletionPartIds: [],
+      failedPartIds: ['part_cannon_fixed'],
+      verifiedGeometryPartIds: ['part_base_fixed', 'part_cannon_fixed'],
+      warnings: [],
+      errors: ['Eliminación destructiva cancelada por el usuario en Roblox Studio.'],
+    },
+  };
+
+  await act(async () => {
+    const recCancel = await contextValue.reconcileStudioTaskReceipt('task-destructive-del-99');
+    assert.equal(recCancel.success, false);
+    assert.equal(recCancel.status, 'partially_applied');
+  });
+  assert.equal(contextValue.currentSyncStatus.state, 'applied_partially');
+  assert.equal(
+    contextValue.pendingChanges,
+    true,
+    'Si el usuario cancela la eliminación en Studio, pendingChanges debe seguir en true reflejando la divergencia'
+  );
+
+  // Paso 3: Usuario CONFIRMA la eliminación en Roblox Studio -> el recibo pasa a completed con appliedModelHash verificado
+  const finalHashAfterDelete = computeAssetContentHash(contextValue.activeAsset);
+  mockTaskEndpointResponse = {
+    taskId: 'task-destructive-del-99',
+    status: 'completed',
+    result: {
+      operationId: 'task-destructive-del-99',
+      taskId: 'task-destructive-del-99',
+      status: 'completed',
+      verified: true,
+      modelName: assetAfterDelete.name,
+      expectedModelHash: finalHashAfterDelete,
+      appliedModelHash: finalHashAfterDelete,
+      expectedPartCount: 1,
+      actualPartCount: 1,
+      addedPartIds: [],
+      updatedPartIds: [],
+      removedPartIds: ['part_cannon_fixed'],
+      pendingDeletionPartIds: [],
+      failedPartIds: [],
+      verifiedGeometryPartIds: ['part_base_fixed'],
+      warnings: [],
+      errors: [],
+    },
+  };
+
+  await act(async () => {
+    const recConfirm = await contextValue.reconcileStudioTaskReceipt('task-destructive-del-99');
+    assert.equal(recConfirm.success, true);
+    assert.equal(recConfirm.status, 'completed');
+  });
+  assert.equal(contextValue.currentSyncStatus.state, 'applied_successfully');
+  assert.equal(
+    contextValue.pendingChanges,
+    false,
+    'Tras confirmar y verificar la eliminación en Studio, pendingChanges se limpia a false'
+  );
+
+  globalThis.fetch = origFetch;
+  await act(async () => {
+    root.unmount();
+  });
+});
+
+test('11. Fase 7 — Verificación exhaustiva de persistencia (verifyPersistedAssetContent): identidad, jerarquía, normales/UVs y preservación exacta de triángulos 3D en subdivisiones _SubN', async () => {
+  const { verifyPersistedAssetContent } = await import('../src/context/ForgeContext.tsx');
+
+  const baseReq: Forge3DAsset = {
+    ...createSampleAsset('PersistenceAuditAsset'),
+    id: 'asset_uid_100',
+    asset_id: 'rblx_asset_900',
+    parts: [
+      {
+        ...createSampleAsset().parts[0],
+        partId: 'part_hull_main',
+        parentId: 'root_group',
+        parentName: 'MainGroup',
+        hierarchyPath: 'Workspace/PersistenceAuditAsset/MainGroup/Base',
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: [[0, 1, 2]],
+          normals: [
+            [0, 0, 1],
+            [0, 0, 1],
+            [0, 0, 1],
+          ],
+          uvs: [
+            [0, 0],
+            [1, 0],
+            [0, 1],
+          ],
+        },
+      },
+    ],
+  };
+
+  // 11A. Alterar id o asset_id debe fallar
+  const badIdPersisted: Forge3DAsset = JSON.parse(JSON.stringify(baseReq));
+  badIdPersisted.id = 'corrupted_uid_999';
+  assert.equal(verifyPersistedAssetContent(baseReq, badIdPersisted).valid, false);
+
+  // 11B. Alterar hierarchyPath o parentId debe fallar
+  const badHierarchyPersisted: Forge3DAsset = JSON.parse(JSON.stringify(baseReq));
+  badHierarchyPersisted.parts[0].parentId = 'wrong_parent';
+  assert.equal(verifyPersistedAssetContent(baseReq, badHierarchyPersisted).valid, false);
+
+  // 11C. Alterar normales o UVs debe fallar
+  const badNormalsPersisted: Forge3DAsset = JSON.parse(JSON.stringify(baseReq));
+  badNormalsPersisted.parts[0].meshData!.normals![0] = [0, 1, 0];
+  assert.equal(verifyPersistedAssetContent(baseReq, badNormalsPersisted).valid, false);
+
+  const badUvsPersisted: Forge3DAsset = JSON.parse(JSON.stringify(baseReq));
+  badUvsPersisted.parts[0].meshData!.uvs![1] = [0.25, 0.75];
+  assert.equal(verifyPersistedAssetContent(baseReq, badUvsPersisted).valid, false);
+
+  // 11D. Subdivisión _SubN con igual número de caras pero coordenadas de triángulo alteradas DEBE fallar
+  const manyFaces: number[][] = [];
+  for (let i = 0; i < 9505; i++) {
+    manyFaces.push([0, 1, 2]);
+  }
+  const oversizedOrig: Forge3DAsset = {
+    ...baseReq,
+    parts: [
+      {
+        ...baseReq.parts[0],
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: manyFaces,
+        },
+      },
+    ],
+  };
+
+  const corruptedSplitGeometry: Forge3DAsset = {
+    ...oversizedOrig,
+    parts: [
+      {
+        ...oversizedOrig.parts[0],
+        partId: 'part_hull_main_Sub1',
+        name: 'Base_Sub1',
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: manyFaces.slice(0, 5000),
+        },
+      },
+      {
+        ...oversizedOrig.parts[0],
+        partId: 'part_hull_main_Sub2',
+        name: 'Base_Sub2',
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [99, 0, 0], // Coordenada de vértice corrompida en Sub2 aunque la cantidad de caras coincida
+            [0, 2, 0],
+          ],
+          faces: manyFaces.slice(5000),
+        },
+      },
+    ],
+  };
+
+  const corruptedSplitResult = verifyPersistedAssetContent(oversizedOrig, corruptedSplitGeometry);
+  assert.equal(
+    corruptedSplitResult.valid,
+    false,
+    'verifyPersistedAssetContent debe rechazar una subdivisión _SubN si se alteran las coordenadas 3D de un triángulo aunque coincida el total de caras'
+  );
+});
+
+

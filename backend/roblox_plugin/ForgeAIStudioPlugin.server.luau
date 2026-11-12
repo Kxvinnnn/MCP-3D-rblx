@@ -43,6 +43,8 @@ local FORGE_SECURITY_TOKEN = if #savedSecurityToken > 0 then savedSecurityToken 
 local pendingDestructiveOperations: {
     {
         taskId: string?,
+        modelName: string?,
+        partIdsToDelete: { string }?,
         description: string,
         instancesToDelete: { Instance },
         onCompleted: ((boolean) -> ())?,
@@ -154,13 +156,29 @@ local function isVerifiedRobloxAssetUri(uri: any): boolean
     return false
 end
 
+local function isFiniteNumberLuau(val: any): boolean
+    local n = tonumber(val)
+    if type(n) ~= "number" then
+        return false
+    end
+    return n == n and n ~= math.huge and n ~= -math.huge
+end
+
 -- Construct a real MeshPart from vertex, normal, UV, and triangle index buffers via EditableMesh
 -- Returns: (BasePart, isVerified: boolean, errorReason: string?)
 local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (BasePart, boolean, string?)
-    local partName = partSpec.name or ("MeshPart_" .. tostring(idx))
-    local sz = partSpec.size or { 2, 2, 2 }
-    local targetSize = Vector3.new(sz[1] or 2, sz[2] or 2, sz[3] or 2)
-    local cfModeName = partSpec.collisionFidelity or "Hull"
+    local partName = tostring(partSpec.name or ("MeshPart_" .. tostring(idx)))
+    local sz = if type(partSpec.size) == "table" then partSpec.size else { 2, 2, 2 }
+    local sx = tonumber(sz[1]) or 2
+    local sy = tonumber(sz[2]) or 2
+    local szVal = tonumber(sz[3]) or 2
+    local hasValidDimensions = isFiniteNumberLuau(sx) and isFiniteNumberLuau(sy) and isFiniteNumberLuau(szVal) and sx > 0 and sy > 0 and szVal > 0
+    local targetSize = Vector3.new(
+        if hasValidDimensions then sx else 2,
+        if hasValidDimensions then sy else 2,
+        if hasValidDimensions then szVal else 2
+    )
+    local cfModeName = tostring(partSpec.collisionFidelity or "Hull")
     local cfEnum = (Enum.CollisionFidelity :: any)[cfModeName] or Enum.CollisionFidelity.Hull
 
     local meshData = partSpec.meshData
@@ -170,11 +188,16 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
     local faces = if type(meshData) == "table" and type(meshData.faces) == "table" then meshData.faces else {}
     local lastErrorReason: string? = nil
 
+    if not hasValidDimensions then
+        lastErrorReason = string.format("Dimensiones inválidas o no finitas para '%s'", partName)
+    end
+
     -- 1. Primary path: Construct real geometry from buffers via AssetService:CreateEditableMesh()
-    if #vertices >= 3 and #faces >= 1 then
+    if hasValidDimensions and #vertices >= 3 and #faces >= 1 then
         local editableMeshInstance: EditableMesh? = nil
         local expectedTriCount = 0
         local addedTriCount = 0
+        local addedVertexCount = 0
 
         local okEditable, generatedOrErr = xpcall(function()
             local editableMesh = AssetService:CreateEditableMesh()
@@ -188,43 +211,91 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
             local uvIds = table.create(#uvs)
 
             for i, v in ipairs(vertices) do
-                vertexIds[i] = editableMesh:AddVertex(Vector3.new(v[1] or 0, v[2] or 0, v[3] or 0))
-            end
-            for i, n in ipairs(normals) do
-                normalIds[i] = editableMesh:AddNormal(Vector3.new(n[1] or 0, n[2] or 1, n[3] or 0))
-            end
-            for i, uv in ipairs(uvs) do
-                uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1] or 0, uv[2] or 0))
+                if type(v) ~= "table" or #v < 3 or not isFiniteNumberLuau(v[1]) or not isFiniteNumberLuau(v[2]) or not isFiniteNumberLuau(v[3]) then
+                    error(string.format("Vértice inválido en índice %d para '%s'", i, partName))
+                end
+                local vid = editableMesh:AddVertex(Vector3.new(tonumber(v[1]) or 0, tonumber(v[2]) or 0, tonumber(v[3]) or 0))
+                if not vid then
+                    error(string.format("EditableMesh:AddVertex devolvió nil en índice %d para '%s'", i, partName))
+                end
+                vertexIds[i] = vid
+                addedVertexCount += 1
             end
 
-            for _, tri in ipairs(faces) do
-                if type(tri) == "table" and #tri >= 3 then
-                    expectedTriCount += 1
-                    -- JSON faces are 0-based indices; Luau vertexIds table is 1-based
-                    local i1 = (tonumber(tri[1]) or 0) + 1
-                    local i2 = (tonumber(tri[2]) or 0) + 1
-                    local i3 = (tonumber(tri[3]) or 0) + 1
-                    local v1, v2, v3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]
-                    if v1 and v2 and v3 and v1 ~= v2 and v2 ~= v3 and v1 ~= v3 then
-                        local fid = editableMesh:AddTriangle(v1, v2, v3)
-                        if fid then
-                            addedTriCount += 1
-                            if normalIds[i1] and normalIds[i2] and normalIds[i3] then
-                                pcall(function()
-                                    editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })
-                                end)
-                            end
-                            if uvIds[i1] and uvIds[i2] and uvIds[i3] then
-                                pcall(function()
-                                    editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })
-                                end)
-                            end
-                        end
-                    end
+            for i, n in ipairs(normals) do
+                if type(n) ~= "table" or #n < 3 or not isFiniteNumberLuau(n[1]) or not isFiniteNumberLuau(n[2]) or not isFiniteNumberLuau(n[3]) then
+                    error(string.format("Normal inválida en índice %d para '%s'", i, partName))
+                end
+                local nx, ny, nz = tonumber(n[1]) or 0, tonumber(n[2]) or 0, tonumber(n[3]) or 0
+                local magSq = nx * nx + ny * ny + nz * nz
+                if magSq < 1e-12 then
+                    error(string.format("Normal de magnitud cero en índice %d para '%s'", i, partName))
+                end
+                normalIds[i] = editableMesh:AddNormal(Vector3.new(nx, ny, nz).Unit)
+            end
+
+            for i, uv in ipairs(uvs) do
+                if type(uv) ~= "table" or #uv < 2 or not isFiniteNumberLuau(uv[1]) or not isFiniteNumberLuau(uv[2]) then
+                    error(string.format("UV inválido en índice %d para '%s'", i, partName))
+                end
+                uvIds[i] = editableMesh:AddUV(Vector2.new(tonumber(uv[1]) or 0, tonumber(uv[2]) or 0))
+            end
+
+            for triIdx, tri in ipairs(faces) do
+                if type(tri) ~= "table" or #tri < 3 then
+                    error(string.format("Cara triangular mal formada en índice %d para '%s'", triIdx, partName))
+                end
+                expectedTriCount += 1
+                -- JSON faces are 0-based indices; Luau vertexIds table is 1-based
+                local raw1, raw2, raw3 = tonumber(tri[1]), tonumber(tri[2]), tonumber(tri[3])
+                if not raw1 or not raw2 or not raw3 then
+                    error(string.format("Índices no numéricos en cara %d para '%s'", triIdx, partName))
+                end
+                local i1 = math.floor(raw1) + 1
+                local i2 = math.floor(raw2) + 1
+                local i3 = math.floor(raw3) + 1
+                if i1 < 1 or i1 > #vertices or i2 < 1 or i2 > #vertices or i3 < 1 or i3 > #vertices then
+                    error(string.format("Índice fuera de rango en cara %d (%d,%d,%d vs %d vértices) para '%s'", triIdx, i1, i2, i3, #vertices, partName))
+                end
+                local v1, v2, v3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]
+                if not v1 or not v2 or not v3 or v1 == v2 or v2 == v3 or v1 == v3 then
+                    error(string.format("Cara degenerada con vértices repetidos en cara %d para '%s'", triIdx, partName))
+                end
+                local p1 = Vector3.new(tonumber(vertices[i1][1]) or 0, tonumber(vertices[i1][2]) or 0, tonumber(vertices[i1][3]) or 0)
+                local p2 = Vector3.new(tonumber(vertices[i2][1]) or 0, tonumber(vertices[i2][2]) or 0, tonumber(vertices[i2][3]) or 0)
+                local p3 = Vector3.new(tonumber(vertices[i3][1]) or 0, tonumber(vertices[i3][2]) or 0, tonumber(vertices[i3][3]) or 0)
+                local crossMag = (p2 - p1):Cross(p3 - p1).Magnitude
+                if crossMag <= 1e-9 then
+                    error(string.format("Triángulo colineal de área cero en cara %d para '%s'", triIdx, partName))
+                end
+
+                local fid = editableMesh:AddTriangle(v1, v2, v3)
+                if not fid then
+                    error(string.format("EditableMesh:AddTriangle devolvió nil en cara %d para '%s'", triIdx, partName))
+                end
+                addedTriCount += 1
+                if normalIds[i1] and normalIds[i2] and normalIds[i3] then
+                    pcall(function()
+                        editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })
+                    end)
+                end
+                if uvIds[i1] and uvIds[i2] and uvIds[i3] then
+                    pcall(function()
+                        editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })
+                    end)
                 end
             end
 
-            if addedTriCount == 0 or addedTriCount < expectedTriCount then
+            if addedVertexCount ~= #vertices then
+                error(string.format(
+                    "Vértices incompletos en EditableMesh para '%s': creados %d de %d esperados",
+                    partName,
+                    addedVertexCount,
+                    #vertices
+                ))
+            end
+
+            if addedTriCount == 0 or addedTriCount ~= expectedTriCount then
                 error(string.format(
                     "Triángulos incompletos en EditableMesh para '%s': creados %d de %d esperados",
                     partName,
@@ -233,8 +304,20 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
                 ))
             end
 
+            local okGetVerts, meshVerts = pcall(function()
+                return (editableMesh :: any):GetVertices()
+            end)
+            if okGetVerts and type(meshVerts) == "table" and #meshVerts ~= #vertices then
+                error(string.format(
+                    "EditableMesh:GetVertices() devolvió %d vértices de %d esperados en '%s'",
+                    #meshVerts,
+                    #vertices,
+                    partName
+                ))
+            end
+
             local meshTriangles = editableMesh:GetTriangles()
-            if type(meshTriangles) == "table" and #meshTriangles < expectedTriCount then
+            if type(meshTriangles) == "table" and #meshTriangles ~= expectedTriCount then
                 error(string.format(
                     "EditableMesh:GetTriangles() devolvió %d triángulos de %d esperados en '%s'",
                     #meshTriangles,
@@ -254,7 +337,7 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
             return createdPart
         end, debug.traceback)
 
-        -- Release EditableMesh resource now that CreateMeshPartAsync has finished
+        -- Always release EditableMesh resource now that CreateMeshPartAsync has finished or failed
         if editableMeshInstance then
             pcall(function()
                 editableMeshInstance:Destroy()
@@ -273,20 +356,27 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
             generatedMeshPart:SetAttribute("ExpectedTriangleCount", expectedTriCount)
             return generatedMeshPart, true, nil
         else
+            if typeof(generatedOrErr) == "Instance" then
+                pcall(function()
+                    (generatedOrErr :: Instance):Destroy()
+                end)
+            end
             lastErrorReason = tostring(generatedOrErr)
             warn(string.format("[ForgeAI Plugin] Falló EditableMesh para '%s': %s", partName, lastErrorReason))
         end
-    else
+    elseif not lastErrorReason then
         lastErrorReason = string.format("Buffers geométricos vacíos o insuficientes (verts=%d, faces=%d)", #vertices, #faces)
     end
 
     -- 2. Secondary path: Only if a verified published Roblox Cloud MeshId (`rbxassetid://<id>`) exists
+    -- Note: Only admissible if the part did NOT carry explicit EditableMesh buffers that failed verification
+    local hadExplicitBuffers = #vertices >= 3 or #faces >= 1
     local publishedUri = if isVerifiedRobloxAssetUri(partSpec.meshId)
         then partSpec.meshId
         elseif isVerifiedRobloxAssetUri(partSpec.assetId) then partSpec.assetId
         else ""
 
-    if publishedUri ~= "" then
+    if hasValidDimensions and not hadExplicitBuffers and publishedUri ~= "" then
         local okInsert, insertedOrErr = pcall(function()
             return InsertService:CreateMeshPartAsync(publishedUri, cfEnum, Enum.RenderFidelity.Precise)
         end)
@@ -299,6 +389,11 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
             insertedMeshPart:SetAttribute("ForgeGeometryVerified", true)
             return insertedMeshPart, true, nil
         else
+            if typeof(insertedOrErr) == "Instance" then
+                pcall(function()
+                    (insertedOrErr :: Instance):Destroy()
+                end)
+            end
             lastErrorReason = "InsertService:CreateMeshPartAsync falló para " .. publishedUri .. ": " .. tostring(insertedOrErr)
             warn("[ForgeAI Plugin] " .. lastErrorReason)
         end
@@ -311,7 +406,7 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
     container:SetAttribute("GeometrySource", "UnverifiedFallbackContainer")
     container:SetAttribute("ForgeGeometryVerified", false)
     container:SetAttribute("ForgeReconstructionError", lastErrorReason or "Failed to reconstruct EditableMesh")
-    return container, false, lastErrorReason
+    return container, false, lastErrorReason or "Failed to reconstruct EditableMesh"
 end
 
 local FORGE_SYNC_HASH_SCHEMA_V1 = "forge-sync-v1"
@@ -778,7 +873,17 @@ local function ensureHierarchyContainer(rootModel: Model, parentOrHierarchyPath:
 end
 
 -- Build 3D Model from Forge3DAsset parts array in Workspace or WorldModel
-local function construct3DModelFromSpec(assetData: any, targetParent: Instance?, explicitOrigin: CFrame?): Model
+local function construct3DModelFromSpec(
+    assetData: any,
+    targetParent: Instance?,
+    explicitOrigin: CFrame?
+): (Model, {
+    addedPartIds: { string },
+    verifiedGeometryPartIds: { string },
+    failedPartIds: { string },
+    warnings: { string },
+    errors: { string },
+})
     local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Spawn EditableMesh 3D Asset")
 
     local model = Instance.new("Model")
@@ -803,16 +908,25 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
     local partsList = assetData.parts or {}
     local verifiedPartCount = 0
     local failedPartCount = 0
+    local addedPartIds: { string } = {}
+    local verifiedGeometryPartIds: { string } = {}
+    local failedPartIds: { string } = {}
+    local warnings: { string } = {}
+    local errors: { string } = {}
 
     for idx, partSpec in ipairs(partsList) do
-        local part, isVerified, _ = createEditableMeshPartFromSpec(partSpec, idx)
+        local syncMeta = computePartSyncHashesLuau(partSpec, idx)
+        local part, isVerified, errReason = createEditableMeshPartFromSpec(partSpec, idx)
         if isVerified then
             verifiedPartCount += 1
+            table.insert(addedPartIds, syncMeta.partId)
+            table.insert(verifiedGeometryPartIds, syncMeta.partId)
         else
             failedPartCount += 1
+            table.insert(failedPartIds, syncMeta.partId)
+            table.insert(errors, string.format("Pieza '%s' (%s) falló verificación geométrica: %s", syncMeta.partName, syncMeta.partId, tostring(errReason or "UnverifiedFallbackContainer")))
         end
 
-        local syncMeta = computePartSyncHashesLuau(partSpec, idx)
         local pos = partSpec.position or { 0, 1, 0 }
         local rotMat = syncMeta.rotationMatrix
         local localCF = CFrame.new(
@@ -885,6 +999,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
             else
                 part:SetAttribute("ForgePBRApplied", false)
                 part:SetAttribute("ForgePBRStatus", "LocalFilesSavedOnly_NoCloudAssetId")
+                table.insert(warnings, string.format("Pieza '%s' (%s) tiene metadatos PBR locales sin rbxassetid:// publicado.", syncMeta.partName, syncMeta.partId))
             end
         else
             part:SetAttribute("ForgePBRApplied", false)
@@ -906,7 +1021,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
         part:SetAttribute("ForgeParentName", syncMeta.parentName)
         part:SetAttribute("ForgeParentContainerClass", syncMeta.parentContainerClass)
         part:SetAttribute("ForgeHierarchyPath", syncMeta.hierarchyPath)
-        part:SetAttribute("ForgeGeometrySource", syncMeta.geometrySource)
+        part:SetAttribute("ForgeGeometrySource", if isVerified then syncMeta.geometrySource else "UnverifiedFallbackContainer")
 
         if type(partSpec.meshData) == "table" and not part:FindFirstChild("ForgeMeshGeometryJSON") then
             local okJson, encodedGeom = pcall(function()
@@ -917,7 +1032,7 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
                     parentName = syncMeta.parentName,
                     parentContainerClass = syncMeta.parentContainerClass,
                     hierarchyPath = syncMeta.hierarchyPath,
-                    geometrySource = syncMeta.geometrySource,
+                    geometrySource = if isVerified then syncMeta.geometrySource else "UnverifiedFallbackContainer",
                     geometryHash = syncMeta.geometryHash,
                     materialHash = syncMeta.materialHash,
                     transformHash = syncMeta.transformHash,
@@ -972,11 +1087,30 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
         ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
     end
 
-    return model
+    return model, {
+        addedPartIds = addedPartIds,
+        verifiedGeometryPartIds = verifiedGeometryPartIds,
+        failedPartIds = failedPartIds,
+        warnings = warnings,
+        errors = errors,
+    }
 end
 
 -- Reconstructs EditableMesh geometry for a single imported .RBXMX model in Edit Mode or Play Mode
-local function reconstructSingleModelInPlace(model: Model): (boolean, number, number)
+local function reconstructSingleModelInPlace(model: Model): (boolean, number, number, {
+    modelName: string,
+    verifiedPartIds: { string },
+    failedPartIds: { string },
+    totalVertices: number,
+    totalTriangles: number,
+    errors: { string },
+})
+    local verifiedPartIds: { string } = {}
+    local failedPartIds: { string } = {}
+    local totalVertices = 0
+    local totalTriangles = 0
+    local errors: { string } = {}
+
     local reconstructorModule = model:FindFirstChild("ForgeStudioReconstructor")
     if reconstructorModule and reconstructorModule:IsA("ModuleScript") then
         local okReq, builder = pcall(require, reconstructorModule)
@@ -997,17 +1131,48 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                     verCount = if type(r2) == "number" then r2 else 0
                     expectedCount = verCount
                 end
-                if verCount > 0 and allVerified then
+                for _, desc in ipairs(model:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        local pid = tostring(desc:GetAttribute("ForgePartId") or ("fpart_" .. string.gsub(desc.Name, "[^%w_]", "_")))
+                        if desc:GetAttribute("ForgeGeometryVerified") == true then
+                            table.insert(verifiedPartIds, pid)
+                            totalVertices += tonumber(desc:GetAttribute("VertexCount")) or 0
+                            totalTriangles += tonumber(desc:GetAttribute("TriangleCount")) or 0
+                        else
+                            table.insert(failedPartIds, pid)
+                            local errAttr = desc:GetAttribute("ForgeReconstructionError")
+                            if type(errAttr) == "string" and #errAttr > 0 then
+                                table.insert(errors, errAttr)
+                            end
+                        end
+                    end
+                end
+                if verCount > 0 and allVerified and #failedPartIds == 0 then
                     model:SetAttribute("ForgeEditableMeshReconstructed", true)
                     model:SetAttribute("ForgeReconstructionVerified", true)
-                    return true, verCount, math.max(0, expectedCount - verCount)
+                    return true, verCount, math.max(0, expectedCount - verCount), {
+                        modelName = model.Name,
+                        verifiedPartIds = verifiedPartIds,
+                        failedPartIds = failedPartIds,
+                        totalVertices = totalVertices,
+                        totalTriangles = totalTriangles,
+                        errors = errors,
+                    }
                 elseif verCount > 0 then
                     model:SetAttribute("ForgeEditableMeshReconstructed", false)
                     model:SetAttribute("ForgeReconstructionVerified", false)
-                    return false, verCount, math.max(1, expectedCount - verCount)
+                    return false, verCount, math.max(1, expectedCount - verCount), {
+                        modelName = model.Name,
+                        verifiedPartIds = verifiedPartIds,
+                        failedPartIds = failedPartIds,
+                        totalVertices = totalVertices,
+                        totalTriangles = totalTriangles,
+                        errors = errors,
+                    }
                 end
             else
-                warn("[ForgeAI Plugin] Error ejecutando ForgeStudioReconstructor.ReconstructInPlace: " .. tostring(r1))
+                table.insert(errors, "Error ejecutando ForgeStudioReconstructor.ReconstructInPlace: " .. tostring(r1))
+                warn("[ForgeAI Plugin] " .. errors[#errors])
             end
         end
     end
@@ -1022,9 +1187,12 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                 local okDec, parsedGeom = pcall(function()
                     return HttpService:JSONDecode(geomVal.Value)
                 end)
+                local fallbackPid = tostring(child:GetAttribute("ForgePartId") or ("fpart_" .. string.gsub(child.Name, "[^%w_]", "_")))
                 if okDec and type(parsedGeom) == "table" then
+                    local partId = tostring(parsedGeom.partId or fallbackPid)
                     local newPart, isVerified, errReason = createEditableMeshPartFromSpec({
                         name = child.Name,
+                        partId = partId,
                         meshId = parsedGeom.publishedMeshId or parsedGeom.meshId,
                         size = parsedGeom.size or { child.Size.X, child.Size.Y, child.Size.Z },
                         collisionFidelity = parsedGeom.collisionFidelity or "Hull",
@@ -1038,6 +1206,7 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                         newPart.Transparency = child.Transparency
                         newPart.Anchored = child.Anchored
                         newPart.CanCollide = child.CanCollide
+                        newPart:SetAttribute("ForgePartId", partId)
                         for _, subChild in ipairs(child:GetChildren()) do
                             subChild:Clone().Parent = newPart
                         end
@@ -1047,14 +1216,22 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                         end
                         child:Destroy()
                         verifiedParts += 1
+                        table.insert(verifiedPartIds, partId)
+                        totalVertices += if type(parsedGeom.vertices) == "table" then #parsedGeom.vertices else 0
+                        totalTriangles += if type(parsedGeom.faces) == "table" then #parsedGeom.faces else 0
                     else
                         newPart:Destroy()
                         failedParts += 1
+                        table.insert(failedPartIds, partId)
+                        local errMsg = tostring(errReason or "EditableMesh reconstruction failed")
+                        table.insert(errors, string.format("Pieza '%s' (%s): %s", child.Name, partId, errMsg))
                         child:SetAttribute("ForgeGeometryVerified", false)
-                        child:SetAttribute("ForgeReconstructionError", errReason or "EditableMesh reconstruction failed")
+                        child:SetAttribute("ForgeReconstructionError", errMsg)
                     end
                 else
                     failedParts += 1
+                    table.insert(failedPartIds, fallbackPid)
+                    table.insert(errors, string.format("JSON de geometría inválido en pieza '%s' (%s)", child.Name, fallbackPid))
                 end
             end
         end
@@ -1065,11 +1242,29 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
     model:SetAttribute("ForgeReconstructionVerified", allSucceeded)
     model:SetAttribute("ForgeVerifiedPartCount", verifiedParts)
     model:SetAttribute("ForgeFailedPartCount", failedParts)
-    return allSucceeded, verifiedParts, failedParts
+    return allSucceeded, verifiedParts, failedParts, {
+        modelName = model.Name,
+        verifiedPartIds = verifiedPartIds,
+        failedPartIds = failedPartIds,
+        totalVertices = totalVertices,
+        totalTriangles = totalTriangles,
+        errors = errors,
+    }
 end
 
 -- Reconstructs EditableMesh geometry for imported .RBXMX models in Selection or Workspace
-local function reconstructEditableMeshModelsInStudio(): string
+local function reconstructEditableMeshModelsInStudio(): (string, {
+    modelsFound: number,
+    fullyVerifiedModels: number,
+    partialOrFailedModels: number,
+    reconstructedParts: number,
+    failedPartsTotal: number,
+    verifiedPartIds: { string },
+    failedPartIds: { string },
+    totalVertices: number,
+    totalTriangles: number,
+    errors: { string },
+})
     local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Reconstruct RBXMX EditableMesh")
     local candidates: { Model } = {}
     local selected = Selection:Get()
@@ -1091,11 +1286,27 @@ local function reconstructEditableMeshModelsInStudio(): string
     local partialOrFailedModels = 0
     local reconstructedParts = 0
     local failedPartsTotal = 0
+    local allVerifiedPartIds: { string } = {}
+    local allFailedPartIds: { string } = {}
+    local totalVertices = 0
+    local totalTriangles = 0
+    local allErrors: { string } = {}
 
     for _, model in ipairs(candidates) do
-        local allOk, verCount, failCount = reconstructSingleModelInPlace(model)
+        local allOk, verCount, failCount, details = reconstructSingleModelInPlace(model)
         reconstructedParts += verCount
         failedPartsTotal += failCount
+        totalVertices += details.totalVertices
+        totalTriangles += details.totalTriangles
+        for _, pid in ipairs(details.verifiedPartIds) do
+            table.insert(allVerifiedPartIds, pid)
+        end
+        for _, pid in ipairs(details.failedPartIds) do
+            table.insert(allFailedPartIds, pid)
+        end
+        for _, errMsg in ipairs(details.errors) do
+            table.insert(allErrors, errMsg)
+        end
         if allOk then
             fullyVerifiedModels += 1
         elseif verCount > 0 or failCount > 0 then
@@ -1107,23 +1318,37 @@ local function reconstructEditableMeshModelsInStudio(): string
         ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
     end
 
+    local summaryText = ""
     if fullyVerifiedModels == 0 and partialOrFailedModels == 0 then
-        return "No se encontraron modelos .RBXMX pendientes de reconstrucción en Selection ni Workspace."
-    end
-    if partialOrFailedModels > 0 or failedPartsTotal > 0 then
-        return string.format(
+        summaryText = "No se encontraron modelos .RBXMX pendientes de reconstrucción en Selection ni Workspace."
+    elseif partialOrFailedModels > 0 or failedPartsTotal > 0 then
+        summaryText = string.format(
             "⚠️ Reconstrucción EditableMesh parcial/con avisos: %d modelo(s) 100%% verificados, %d con fallos (%d MeshParts verificados, %d fallidos). Revisa Output.",
             fullyVerifiedModels,
             partialOrFailedModels,
             reconstructedParts,
             failedPartsTotal
         )
+    else
+        summaryText = string.format(
+            "✅ Reconstrucción EditableMesh 100%% verificada en Modo Edición: %d modelo(s), %d MeshPart(s) reconstruidos con geometría real.",
+            fullyVerifiedModels,
+            reconstructedParts
+        )
     end
-    return string.format(
-        "✅ Reconstrucción EditableMesh 100%% verificada en Modo Edición: %d modelo(s), %d MeshPart(s) reconstruidos con geometría real.",
-        fullyVerifiedModels,
-        reconstructedParts
-    )
+
+    return summaryText, {
+        modelsFound = #candidates,
+        fullyVerifiedModels = fullyVerifiedModels,
+        partialOrFailedModels = partialOrFailedModels,
+        reconstructedParts = reconstructedParts,
+        failedPartsTotal = failedPartsTotal,
+        verifiedPartIds = allVerifiedPartIds,
+        failedPartIds = allFailedPartIds,
+        totalVertices = totalVertices,
+        totalTriangles = totalTriangles,
+        errors = allErrors,
+    }
 end
 
 -- Resolves the model-relative origin CFrame for a Studio Model so camera spawn offsets
@@ -1401,16 +1626,170 @@ local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, r
     return serializedParts
 end
 
+-- Post-Application Readback & Structured Receipt Builder (Fase 2 & Fase 5)
+-- Queries the live Studio Model in Workspace, verifies part-by-part geometry & sync hashes against specToApply,
+-- and computes an independent appliedModelHash so Forge never relies on an echoed expectedModelHash.
+local function buildStudioApplicationReceiptLuau(params: {
+    taskId: string,
+    model: Model,
+    specToApply: any,
+    expectedModelHash: string,
+    mode: string,
+    addedPartIds: { string },
+    updatedPartIds: { string },
+    removedPartIds: { string },
+    pendingDeletionPartIds: { string },
+    failedPartIds: { string },
+    verifiedGeometryPartIds: { string },
+    warnings: { string },
+    errors: { string },
+}): { [string]: any }
+    local expectedParts = if type(params.specToApply) == "table" and type(params.specToApply.parts) == "table"
+        then params.specToApply.parts
+        else {}
+    local expectedHashesById: { [string]: string } = {}
+    for idx, pSpec in ipairs(expectedParts) do
+        local syncMeta = computePartSyncHashesLuau(pSpec, idx)
+        expectedHashesById[syncMeta.partId] = syncMeta.combinedHash
+    end
+
+    local actualBaseParts: { BasePart } = {}
+    local unverifiedInWorkspace: { string } = {}
+    for _, desc in ipairs(params.model:GetDescendants()) do
+        if desc:IsA("BasePart") then
+            table.insert(actualBaseParts, desc)
+            local pidAttr = tostring(desc:GetAttribute("ForgePartId") or "")
+            local geomVer = desc:GetAttribute("ForgeGeometryVerified")
+            local geomSrc = tostring(desc:GetAttribute("GeometrySource") or "")
+            if geomVer == false or geomSrc == "UnverifiedFallbackContainer" then
+                table.insert(unverifiedInWorkspace, if #pidAttr > 0 then pidAttr else desc.Name)
+            end
+        end
+    end
+
+    local readbackSerialized = serializeStudioPartsFromInstances(actualBaseParts, params.model)
+    local readbackHashesById: { [string]: string } = {}
+    local sortedReadbackTokens: { string } = {}
+    for _, entry in ipairs(readbackSerialized) do
+        local pid = tostring(entry.partId or "")
+        local ch = tostring(entry.combinedHash or "")
+        readbackHashesById[pid] = ch
+        table.insert(sortedReadbackTokens, pid .. ":" .. ch)
+    end
+    table.sort(sortedReadbackTokens)
+    local readbackFingerprint = computeLuauContentHash(params.model.Name .. "|" .. table.concat(sortedReadbackTokens, "|"))
+
+    local errorsCopy: { string } = {}
+    for _, e in ipairs(params.errors) do
+        table.insert(errorsCopy, e)
+    end
+    local warningsCopy: { string } = {}
+    for _, w in ipairs(params.warnings) do
+        table.insert(warningsCopy, w)
+    end
+    local failedIdsSet: { [string]: boolean } = {}
+    local failedPartIdsCopy: { string } = {}
+    for _, fid in ipairs(params.failedPartIds) do
+        if not failedIdsSet[fid] then
+            failedIdsSet[fid] = true
+            table.insert(failedPartIdsCopy, fid)
+        end
+    end
+    for _, ufid in ipairs(unverifiedInWorkspace) do
+        if not failedIdsSet[ufid] then
+            failedIdsSet[ufid] = true
+            table.insert(failedPartIdsCopy, ufid)
+            table.insert(errorsCopy, string.format("Pieza '%s' en Workspace carece de geometría EditableMesh verificada.", ufid))
+        end
+    end
+
+    local readbackMatchesExpected = (#expectedParts > 0) and (#actualBaseParts == #expectedParts)
+    for expPid, expCombinedHash in pairs(expectedHashesById) do
+        local actualHash = readbackHashesById[expPid]
+        if not actualHash then
+            readbackMatchesExpected = false
+            if not failedIdsSet[expPid] then
+                failedIdsSet[expPid] = true
+                table.insert(failedPartIdsCopy, expPid)
+            end
+            table.insert(errorsCopy, string.format("Pieza esperada '%s' no existe en el readback de Studio.", expPid))
+        elseif actualHash ~= expCombinedHash then
+            readbackMatchesExpected = false
+            table.insert(warningsCopy, string.format("Hash de readback en Studio difiere para pieza '%s' (%s ~= %s).", expPid, actualHash, expCombinedHash))
+        end
+    end
+
+    local hasPendingDeletions = #params.pendingDeletionPartIds > 0
+    local hasFailures = #failedPartIdsCopy > 0 or #errorsCopy > 0
+    local countsMatch = (#actualBaseParts == #expectedParts) and (#expectedParts > 0)
+    local allGeometryVerified = (#params.verifiedGeometryPartIds == #expectedParts) and (#unverifiedInWorkspace == 0)
+
+    local appliedModelHash = if readbackMatchesExpected and countsMatch and not hasPendingDeletions and not hasFailures and allGeometryVerified
+        then (if #params.expectedModelHash > 0 then params.expectedModelHash else ("studio_readback_" .. readbackFingerprint))
+        else ("studio_readback_" .. readbackFingerprint)
+
+    local status = "completed"
+    local verified = false
+    if hasPendingDeletions then
+        status = "awaiting_confirmation"
+        verified = false
+    elseif hasFailures or not countsMatch or not allGeometryVerified or appliedModelHash ~= params.expectedModelHash then
+        local anyApplied = (#params.verifiedGeometryPartIds > 0) or (#params.addedPartIds > 0) or (#params.updatedPartIds > 0) or (#actualBaseParts > 0)
+        status = if anyApplied then "partially_applied" else "failed"
+        verified = false
+    else
+        status = "completed"
+        verified = true
+    end
+
+    if verified then
+        params.model:SetAttribute("ForgeSyncedModelHash", appliedModelHash)
+    end
+    params.model:SetAttribute("ForgeLastOperationId", params.taskId)
+
+    return {
+        operationId = params.taskId,
+        taskId = params.taskId,
+        status = status,
+        verified = verified,
+        modelName = params.model.Name,
+        mode = params.mode,
+        expectedModelHash = params.expectedModelHash,
+        appliedModelHash = appliedModelHash,
+        modelHash = appliedModelHash,
+        readbackFingerprint = readbackFingerprint,
+        expectedPartCount = #expectedParts,
+        actualPartCount = #actualBaseParts,
+        appliedPartCount = #actualBaseParts,
+        partCount = #actualBaseParts,
+        added = #params.addedPartIds,
+        updated = #params.updatedPartIds,
+        removed = #params.removedPartIds,
+        addedPartIds = params.addedPartIds,
+        updatedPartIds = params.updatedPartIds,
+        removedPartIds = params.removedPartIds,
+        pendingDeletionPartIds = params.pendingDeletionPartIds,
+        failedPartIds = failedPartIdsCopy,
+        verifiedGeometryPartIds = params.verifiedGeometryPartIds,
+        warnings = warningsCopy,
+        errors = errorsCopy,
+        pendingDestructiveConfirmations = #pendingDestructiveOperations,
+    }
+end
+
 -- Incremental In-Place Model Update in Studio (Fase 5.4):
 -- Updates only modified domains (`update_geometry`, `update_transform`, `update_material`, `update_hierarchy`, `add`, `delete`)
 -- without destroying untouched parts or user-attached Studio instances (WeldConstraints, Scripts, Attachments).
 local function applyIncrementalModelUpdateInStudio(
     targetModel: Model,
     assetData: any,
-    explicitDeleteIds: { string }?
-): (number, number, number, number)
+    explicitDeleteIds: { string }?,
+    taskId: string?,
+    expectedModelHash: string?
+): (number, number, number, number, { [string]: any })
     local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Incremental Sync Update")
     local existingByPartId: { [string]: BasePart } = {}
+    local hasExplicitPartIdAttr: { [string]: boolean } = {}
     local allBaseParts: { BasePart } = {}
 
     for _, desc in ipairs(targetModel:GetDescendants()) do
@@ -1418,11 +1797,17 @@ local function applyIncrementalModelUpdateInStudio(
             table.insert(allBaseParts, desc)
             local pidAttr = desc:GetAttribute("ForgePartId")
             local pidVal = desc:FindFirstChild("ForgePartId")
-            local pid = if type(pidAttr) == "string" and #pidAttr > 0
+            local explicitPid = if type(pidAttr) == "string" and #pidAttr > 0
                 then pidAttr
                 elseif pidVal and pidVal:IsA("StringValue") and #pidVal.Value > 0
                 then pidVal.Value
+                else ""
+            local pid = if #explicitPid > 0
+                then explicitPid
                 else ("fpart_" .. string.gsub(desc.Name, "[^%w_]", "_"))
+            if #explicitPid > 0 then
+                hasExplicitPartIdAttr[pid] = true
+            end
             existingByPartId[pid] = desc
         end
     end
@@ -1441,6 +1826,15 @@ local function applyIncrementalModelUpdateInStudio(
     local unchangedCount = 0
     local deletedCount = 0
 
+    local addedPartIds: { string } = {}
+    local updatedPartIds: { string } = {}
+    local removedPartIds: { string } = {}
+    local pendingDeletionPartIds: { string } = {}
+    local failedPartIds: { string } = {}
+    local verifiedGeometryPartIds: { string } = {}
+    local warnings: { string } = {}
+    local errors: { string } = {}
+
     for idx, partSpec in ipairs(incomingParts) do
         local syncMeta = computePartSyncHashesLuau(partSpec, idx)
         incomingIds[syncMeta.partId] = true
@@ -1449,7 +1843,7 @@ local function applyIncrementalModelUpdateInStudio(
 
         if not existingPart or not existingMeta then
             -- Operation: `add`
-            local newPart, _, _ = createEditableMeshPartFromSpec(partSpec, idx)
+            local newPart, isVer, errReason = createEditableMeshPartFromSpec(partSpec, idx)
             local pos = partSpec.position or { 0, 1, 0 }
             local rotMat = syncMeta.rotationMatrix
             local localCF = CFrame.new(
@@ -1473,7 +1867,14 @@ local function applyIncrementalModelUpdateInStudio(
             newPart:SetAttribute("ForgeParentContainerClass", syncMeta.parentContainerClass)
             newPart:SetAttribute("ForgeHierarchyPath", syncMeta.hierarchyPath)
             newPart.Parent = ensureHierarchyContainer(targetModel, syncMeta.hierarchyPath, syncMeta.partName, syncMeta.parentContainerClass)
-            addedCount += 1
+            if isVer then
+                addedCount += 1
+                table.insert(addedPartIds, syncMeta.partId)
+                table.insert(verifiedGeometryPartIds, syncMeta.partId)
+            else
+                table.insert(failedPartIds, syncMeta.partId)
+                table.insert(errors, string.format("Pieza añadida '%s' (%s) falló verificación EditableMesh: %s", syncMeta.partName, syncMeta.partId, tostring(errReason or "UnverifiedFallbackContainer")))
+            end
         else
             local geomChanged = existingMeta.geometryHash ~= syncMeta.geometryHash and existingMeta.geometrySource ~= "StudioExternalUnreadable"
             local xformChanged = existingMeta.transformHash ~= syncMeta.transformHash
@@ -1482,11 +1883,17 @@ local function applyIncrementalModelUpdateInStudio(
 
             if not geomChanged and not xformChanged and not matChanged and not hierChanged then
                 unchangedCount += 1
+                if existingPart:GetAttribute("ForgeGeometryVerified") ~= false then
+                    table.insert(verifiedGeometryPartIds, syncMeta.partId)
+                else
+                    table.insert(failedPartIds, syncMeta.partId)
+                    table.insert(errors, string.format("Pieza existente '%s' (%s) tiene geometría no verificada.", syncMeta.partName, syncMeta.partId))
+                end
             else
-                updatedCount += 1
                 local activePart = existingPart
+                local partUpdateSucceeded = true
                 if geomChanged then
-                    local rebuiltPart, isVer, _ = createEditableMeshPartFromSpec(partSpec, idx)
+                    local rebuiltPart, isVer, errReason = createEditableMeshPartFromSpec(partSpec, idx)
                     if isVer then
                         rebuiltPart.CFrame = activePart.CFrame
                         rebuiltPart.Color = activePart.Color
@@ -1508,6 +1915,9 @@ local function applyIncrementalModelUpdateInStudio(
                         activePart = rebuiltPart
                     else
                         rebuiltPart:Destroy()
+                        partUpdateSucceeded = false
+                        table.insert(failedPartIds, syncMeta.partId)
+                        table.insert(errors, string.format("Actualización geométrica de '%s' (%s) falló: %s", syncMeta.partName, syncMeta.partId, tostring(errReason or "EditableMesh error")))
                     end
                 end
                 if xformChanged then
@@ -1544,6 +1954,65 @@ local function applyIncrementalModelUpdateInStudio(
                     activePart.Parent = ensureHierarchyContainer(targetModel, syncMeta.hierarchyPath, syncMeta.partName, syncMeta.parentContainerClass)
                 end
                 activePart:SetAttribute("ForgePartId", syncMeta.partId)
+
+                -- Update embedded ForgeMeshGeometryJSON so subsequent readbacks reflect the updated spec
+                if partUpdateSucceeded and type(partSpec.meshData) == "table" then
+                    local existingGeomVal = activePart:FindFirstChild("ForgeMeshGeometryJSON")
+                    if existingGeomVal then
+                        existingGeomVal:Destroy()
+                    end
+                    local okJson, encodedGeom = pcall(function()
+                        local pos = partSpec.position or { 0, 1, 0 }
+                        local col = partSpec.color or { 148, 163, 184 }
+                        return HttpService:JSONEncode({
+                            hashSchemaVersion = syncMeta.hashSchemaVersion,
+                            partId = syncMeta.partId,
+                            parentId = syncMeta.parentId,
+                            parentName = syncMeta.parentName,
+                            parentContainerClass = syncMeta.parentContainerClass,
+                            hierarchyPath = syncMeta.hierarchyPath,
+                            geometrySource = syncMeta.geometrySource,
+                            geometryHash = syncMeta.geometryHash,
+                            materialHash = syncMeta.materialHash,
+                            transformHash = syncMeta.transformHash,
+                            hierarchyHash = syncMeta.hierarchyHash,
+                            combinedHash = syncMeta.combinedHash,
+                            publishedMeshId = if isVerifiedRobloxAssetUri(partSpec.meshId) then partSpec.meshId else nil,
+                            meshId = if isVerifiedRobloxAssetUri(partSpec.meshId) then partSpec.meshId else nil,
+                            textureId = if isVerifiedRobloxAssetUri(partSpec.textureId) then partSpec.textureId else nil,
+                            size = partSpec.size or { activePart.Size.X, activePart.Size.Y, activePart.Size.Z },
+                            position = { tonumber(pos[1]) or 0, tonumber(pos[2]) or 0, tonumber(pos[3]) or 0 },
+                            rotation = canonicalMatrix9ToEulerDeg(syncMeta.rotationMatrix),
+                            rotationMatrix = syncMeta.rotationMatrix,
+                            color = { col[1] or 148, col[2] or 163, col[3] or 184 },
+                            material = activePart.Material.Name,
+                            roughness = tonumber(partSpec.roughness) or 0.35,
+                            metalness = tonumber(partSpec.metalness) or 0.6,
+                            reflectance = syncMeta.reflectance,
+                            transparency = activePart.Transparency,
+                            canCollide = activePart.CanCollide,
+                            anchored = activePart.Anchored,
+                            collisionFidelity = partSpec.collisionFidelity or "Hull",
+                            pbrMaterial = partSpec.pbrMaterial,
+                            vertices = partSpec.meshData.vertices or {},
+                            normals = partSpec.meshData.normals or {},
+                            uvs = partSpec.meshData.uvs or {},
+                            faces = partSpec.meshData.faces or {},
+                        })
+                    end)
+                    if okJson and type(encodedGeom) == "string" then
+                        local geomStringVal = Instance.new("StringValue")
+                        geomStringVal.Name = "ForgeMeshGeometryJSON"
+                        geomStringVal.Value = encodedGeom
+                        geomStringVal.Parent = activePart
+                    end
+                end
+
+                if partUpdateSucceeded then
+                    updatedCount += 1
+                    table.insert(updatedPartIds, syncMeta.partId)
+                    table.insert(verifiedGeometryPartIds, syncMeta.partId)
+                end
             end
         end
     end
@@ -1556,28 +2025,101 @@ local function applyIncrementalModelUpdateInStudio(
     end
     local candidatesForDeletion: { Instance } = {}
     for pid, partInst in pairs(existingByPartId) do
-        if deleteSet[pid] or (not incomingIds[pid] and type(explicitDeleteIds) == "table" and #explicitDeleteIds == 0) then
+        -- Fase 5: Never delete by name when an explicit ForgePartId exists; only match by exact partId
+        local shouldQueueDelete = false
+        if deleteSet[pid] then
+            shouldQueueDelete = true
+        elseif not incomingIds[pid] and (explicitDeleteIds == nil or (type(explicitDeleteIds) == "table" and #explicitDeleteIds == 0)) then
+            shouldQueueDelete = true
+        end
+        if shouldQueueDelete then
             table.insert(candidatesForDeletion, partInst)
+            table.insert(pendingDeletionPartIds, pid)
         end
     end
+    table.sort(pendingDeletionPartIds)
+
+    local opTaskId = tostring(taskId or "")
+    local expHash = tostring(expectedModelHash or "")
+
     if #candidatesForDeletion > 0 then
-        -- Fase 6: NUNCA eliminar automáticamente modelos, piezas o carpetas sin confirmación explícita del usuario en Studio
+        -- Fase 5 & 6: Bind destructive operation strictly to taskId, modelName, and pendingDeletionPartIds
         table.insert(pendingDestructiveOperations, {
-            taskId = nil,
+            taskId = if #opTaskId > 0 then opTaskId else nil,
+            modelName = targetModel.Name,
+            partIdsToDelete = pendingDeletionPartIds,
             description = string.format(
-                "Eliminar %d pieza(s) en modelo '%s'",
+                "Eliminar %d pieza(s) [%s] en modelo '%s' (Tarea: %s)",
                 #candidatesForDeletion,
-                targetModel.Name
+                table.concat(pendingDeletionPartIds, ", "),
+                targetModel.Name,
+                if #opTaskId > 0 then opTaskId else "local"
             ),
             instancesToDelete = candidatesForDeletion,
-            onCompleted = nil,
+            onCompleted = function(confirmed: boolean)
+                local postRemovedIds: { string } = if confirmed then pendingDeletionPartIds else {}
+                local postWarnings: { string } = {}
+                for _, w in ipairs(warnings) do
+                    table.insert(postWarnings, w)
+                end
+                if not confirmed then
+                    table.insert(
+                        postWarnings,
+                        string.format(
+                            "Eliminación de %d pieza(s) [%s] cancelada por el usuario en Roblox Studio.",
+                            #pendingDeletionPartIds,
+                            table.concat(pendingDeletionPartIds, ", ")
+                        )
+                    )
+                end
+                local postReceipt = buildStudioApplicationReceiptLuau({
+                    taskId = opTaskId,
+                    model = targetModel,
+                    specToApply = assetData,
+                    expectedModelHash = expHash,
+                    mode = if confirmed then "destructive_confirmed" else "destructive_cancelled",
+                    addedPartIds = addedPartIds,
+                    updatedPartIds = updatedPartIds,
+                    removedPartIds = postRemovedIds,
+                    pendingDeletionPartIds = {},
+                    failedPartIds = failedPartIds,
+                    verifiedGeometryPartIds = verifiedGeometryPartIds,
+                    warnings = postWarnings,
+                    errors = errors,
+                })
+                if #opTaskId > 0 then
+                    requestLocalBridge("/local/plugin/result", "POST", {
+                        taskId = opTaskId,
+                        status = postReceipt.status,
+                        result = postReceipt,
+                        error = if #postReceipt.errors > 0 then table.concat(postReceipt.errors, "; ") else nil,
+                    })
+                end
+            end,
         })
     end
 
     if recordId then
         ChangeHistoryService:FinishRecording(recordId, Enum.FinishRecordingOperation.Commit)
     end
-    return addedCount, updatedCount, unchangedCount, deletedCount
+
+    local receipt = buildStudioApplicationReceiptLuau({
+        taskId = opTaskId,
+        model = targetModel,
+        specToApply = assetData,
+        expectedModelHash = expHash,
+        mode = "incremental_update",
+        addedPartIds = addedPartIds,
+        updatedPartIds = updatedPartIds,
+        removedPartIds = removedPartIds,
+        pendingDeletionPartIds = pendingDeletionPartIds,
+        failedPartIds = failedPartIds,
+        verifiedGeometryPartIds = verifiedGeometryPartIds,
+        warnings = warnings,
+        errors = errors,
+    })
+
+    return addedCount, updatedCount, unchangedCount, deletedCount, receipt
 end
 
 -- Automated Self-Verification Suite for Luau Plugin (Fase 8.3)
@@ -2189,37 +2731,73 @@ local function refreshDestructiveConfirmationUI()
     end
 end
 
-btnApproveDelete.MouseButton1Click:Connect(function()
-    local op = table.remove(pendingDestructiveOperations, 1)
-    if op then
+local function resolvePendingDestructiveOperation(targetTaskId: string?, confirmed: boolean): (boolean, number, string?)
+    local matchIdx: number? = nil
+    if type(targetTaskId) == "string" and #targetTaskId > 0 then
+        for i, entry in ipairs(pendingDestructiveOperations) do
+            if entry.taskId == targetTaskId then
+                matchIdx = i
+                break
+            end
+        end
+    else
+        if #pendingDestructiveOperations > 0 then
+            matchIdx = 1
+        end
+    end
+
+    if not matchIdx then
+        return false, 0, nil
+    end
+
+    local op = table.remove(pendingDestructiveOperations, matchIdx)
+    if not op then
+        return false, 0, nil
+    end
+
+    local allowedPartIds: { [string]: boolean } = {}
+    if type(op.partIdsToDelete) == "table" then
+        for _, pid in ipairs(op.partIdsToDelete) do
+            allowedPartIds[tostring(pid)] = true
+        end
+    end
+
+    local removed = 0
+    if confirmed then
         local recId = ChangeHistoryService:TryBeginRecording("ForgeAI Confirmed Destructive Action")
-        local removed = 0
         for _, inst in ipairs(op.instancesToDelete) do
             if inst and inst.Parent then
-                inst:Destroy()
-                removed += 1
+                local instPidAttr = inst:GetAttribute("ForgePartId")
+                local instPid = if type(instPidAttr) == "string" and #instPidAttr > 0
+                    then instPidAttr
+                    else ("fpart_" .. string.gsub(inst.Name, "[^%w_]", "_"))
+                if next(allowedPartIds) == nil or allowedPartIds[instPid] then
+                    inst:Destroy()
+                    removed += 1
+                end
             end
         end
         if recId then
             ChangeHistoryService:FinishRecording(recId, Enum.FinishRecordingOperation.Commit)
         end
         outputLog.Text = string.format("✅ Eliminación confirmada por el usuario (%d instancia(s) eliminadas).", removed)
-        if op.onCompleted then
-            op.onCompleted(true)
-        end
+    else
+        outputLog.Text = "🛡️ Operación destructiva cancelada por el usuario. Ninguna instancia fue eliminada."
+    end
+
+    if op.onCompleted then
+        op.onCompleted(confirmed)
     end
     refreshDestructiveConfirmationUI()
+    return true, removed, op.taskId
+end
+
+btnApproveDelete.MouseButton1Click:Connect(function()
+    resolvePendingDestructiveOperation(nil, true)
 end)
 
 btnRejectDelete.MouseButton1Click:Connect(function()
-    local op = table.remove(pendingDestructiveOperations, 1)
-    if op then
-        outputLog.Text = "🛡️ Operación destructiva cancelada por el usuario. Ninguna instancia fue eliminada."
-        if op.onCompleted then
-            op.onCompleted(false)
-        end
-    end
-    refreshDestructiveConfirmationUI()
+    resolvePendingDestructiveOperation(nil, false)
 end)
 
 local function inspectCurrentStudioSelection(): {
@@ -2318,12 +2896,30 @@ local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
             local modelHash = tostring(payload.model_hash or payload.modelHash or (type(assetData) == "table" and assetData.model_hash) or "")
 
             if operation == "studio.reconstruct_model" and not hasPayloadParts then
-                local summary = reconstructEditableMeshModelsInStudio()
+                local summary, reconDetails = reconstructEditableMeshModelsInStudio()
+                local allVerified = (reconDetails.modelsFound > 0) and (reconDetails.partialOrFailedModels == 0) and (reconDetails.failedPartsTotal == 0)
+                local status = if allVerified
+                    then "completed"
+                    elseif reconDetails.reconstructedParts > 0
+                    then "partially_applied"
+                    else "failed"
                 return {
-                    status = "ok",
-                    verified = true,
                     operationId = taskId,
+                    taskId = taskId,
+                    status = status,
+                    verified = allVerified,
                     summary = summary,
+                    modelsFound = reconDetails.modelsFound,
+                    fullyVerifiedModels = reconDetails.fullyVerifiedModels,
+                    partialOrFailedModels = reconDetails.partialOrFailedModels,
+                    reconstructedParts = reconDetails.reconstructedParts,
+                    failedPartsTotal = reconDetails.failedPartsTotal,
+                    verifiedGeometryPartIds = reconDetails.verifiedPartIds,
+                    failedPartIds = reconDetails.failedPartIds,
+                    totalVertices = reconDetails.totalVertices,
+                    totalTriangles = reconDetails.totalTriangles,
+                    warnings = {},
+                    errors = reconDetails.errors,
                 }
             end
 
@@ -2336,47 +2932,27 @@ local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
             local existing = Workspace:FindFirstChild(modelName)
             if existing and existing:IsA("Model") then
                 local explicitDel = if type(payload.explicitDeleteIds) == "table" then payload.explicitDeleteIds else nil
-                local added, updated, unchanged, _ = applyIncrementalModelUpdateInStudio(existing, specToApply, explicitDel)
+                local _, _, _, _, receipt = applyIncrementalModelUpdateInStudio(existing, specToApply, explicitDel, taskId, modelHash)
                 refreshDestructiveConfirmationUI()
-                local appliedCount = added + updated + unchanged
-                existing:SetAttribute("ForgeSyncedModelHash", modelHash)
-                existing:SetAttribute("ForgeLastOperationId", taskId)
-                return {
-                    status = "ok",
-                    verified = true,
-                    operationId = taskId,
-                    modelName = modelName,
-                    mode = "incremental_update",
-                    added = added,
-                    updated = updated,
-                    unchanged = unchanged,
-                    appliedPartCount = appliedCount,
-                    partCount = appliedCount,
-                    modelHash = modelHash,
-                    pendingDestructiveConfirmations = #pendingDestructiveOperations,
-                }
+                return receipt
             else
-                local spawned = construct3DModelFromSpec(specToApply, Workspace)
-                local actualBaseParts = 0
-                for _, desc in ipairs(spawned:GetDescendants()) do
-                    if desc:IsA("BasePart") then
-                        actualBaseParts += 1
-                    end
-                end
-                local expectedCount = #(specToApply.parts or {})
-                local appliedCount = if actualBaseParts > 0 then actualBaseParts else expectedCount
-                spawned:SetAttribute("ForgeSyncedModelHash", modelHash)
-                spawned:SetAttribute("ForgeLastOperationId", taskId)
-                return {
-                    status = "ok",
-                    verified = appliedCount == expectedCount and expectedCount > 0,
-                    operationId = taskId,
-                    modelName = spawned.Name,
+                local spawned, spawnDetails = construct3DModelFromSpec(specToApply, Workspace)
+                local receipt = buildStudioApplicationReceiptLuau({
+                    taskId = taskId,
+                    model = spawned,
+                    specToApply = specToApply,
+                    expectedModelHash = modelHash,
                     mode = "spawned_new",
-                    appliedPartCount = appliedCount,
-                    partCount = appliedCount,
-                    modelHash = modelHash,
-                }
+                    addedPartIds = spawnDetails.addedPartIds,
+                    updatedPartIds = {},
+                    removedPartIds = {},
+                    pendingDeletionPartIds = {},
+                    failedPartIds = spawnDetails.failedPartIds,
+                    verifiedGeometryPartIds = spawnDetails.verifiedGeometryPartIds,
+                    warnings = spawnDetails.warnings,
+                    errors = spawnDetails.errors,
+                })
+                return receipt
             end
         elseif operation == "studio.compare_geometry" then
             local synced, total, report = verifyRojoSyncInStudio()
@@ -2404,14 +2980,25 @@ local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
     end, debug.traceback)
 
     if okExec then
-        local status = if #pendingDestructiveOperations > 0 and operation == "studio.apply_modifications"
-            then "awaiting_studio_confirmation"
-            else "completed"
+        local status = "completed"
+        if type(resultOrErr) == "table" and type(resultOrErr.status) == "string" then
+            if resultOrErr.status == "awaiting_confirmation" or resultOrErr.status == "awaiting_studio_confirmation" then
+                status = "awaiting_studio_confirmation"
+            elseif resultOrErr.status == "partially_applied" then
+                status = "partially_applied"
+            elseif resultOrErr.status == "failed" then
+                status = "failed"
+            end
+        elseif #pendingDestructiveOperations > 0 and (operation == "studio.apply_modifications" or operation == "studio.reconstruct_model") then
+            status = "awaiting_studio_confirmation"
+        end
         requestLocalBridge("/local/plugin/result", "POST", {
             taskId = taskId,
             status = status,
             result = resultOrErr,
-            error = nil,
+            error = if status == "failed" and type(resultOrErr) == "table" and type(resultOrErr.errors) == "table" and #resultOrErr.errors > 0
+                then table.concat(resultOrErr.errors, "; ")
+                else nil,
         })
     else
         requestLocalBridge("/local/plugin/result", "POST", {

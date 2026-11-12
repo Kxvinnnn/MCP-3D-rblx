@@ -106,6 +106,7 @@ export interface OperationHistoryEntry {
 
 export interface Forge3DAsset {
   id?: string;
+  asset_id?: string;
   name: string;
   category: string;
   asset_type: 'Model3D' | 'Scene3D' | 'PBRMaterial';

@@ -204,13 +204,42 @@ export class TaskExecutionCoordinator {
           });
       });
 
+      const derivedStatus: BridgeTaskStatus = (() => {
+        if (result && typeof result === 'object') {
+          const rStatus = (result as Record<string, unknown>).status;
+          if (
+            rStatus === 'awaiting_studio_confirmation' ||
+            rStatus === 'awaiting_confirmation' ||
+            rStatus === 'partially_applied' ||
+            rStatus === 'failed'
+          ) {
+            return rStatus;
+          }
+        }
+        return 'completed';
+      })();
+
+      const derivedError: string | null = (() => {
+        if (derivedStatus === 'failed' && result && typeof result === 'object') {
+          const errs = (result as Record<string, unknown>).errors;
+          if (Array.isArray(errs) && errs.length > 0) {
+            return errs.map((e) => String(e)).join('; ');
+          }
+          const errStr = (result as Record<string, unknown>).error;
+          if (typeof errStr === 'string' && errStr.trim().length > 0) {
+            return errStr.trim();
+          }
+        }
+        return null;
+      })();
+
       const response = buildBridgeResponseEnvelope({
         taskId: envelope.taskId,
         sessionId: envelope.sessionId,
         correlationId: envelope.correlationId,
-        status: 'completed',
+        status: derivedStatus,
         result,
-        error: null,
+        error: derivedError,
         executionTime: Date.now() - startMs,
         sharedSecret,
       });
@@ -303,33 +332,66 @@ export class TaskExecutionCoordinator {
   }
 
   /**
-   * Llamado por el Plugin de Roblox Studio (`POST /local/plugin/result`) cuando completa o pide confirmación de una tarea.
+   * Llamado por el Plugin de Roblox Studio (`POST /local/plugin/result`) cuando completa o pide confirmación de una tarea,
+   * o cuando el usuario confirma/cancela una operación destructiva que estaba en `awaiting_studio_confirmation`.
    */
   public submitStudioPluginResult(
     params: {
       taskId: string;
-      status: 'completed' | 'failed' | 'awaiting_studio_confirmation';
+      status:
+        | 'completed'
+        | 'failed'
+        | 'awaiting_studio_confirmation'
+        | 'awaiting_confirmation'
+        | 'partially_applied';
       result?: unknown;
       error?: string | null;
     },
     sharedSecret?: string
   ): boolean {
     const pending = this.studioPendingQueue.get(params.taskId);
-    if (!pending) return false;
+    if (pending) {
+      this.studioPendingQueue.delete(params.taskId);
+      const resp = buildBridgeResponseEnvelope({
+        taskId: pending.envelope.taskId,
+        sessionId: pending.envelope.sessionId,
+        correlationId: pending.envelope.correlationId,
+        status: params.status,
+        result: params.result ?? null,
+        error: params.error ?? null,
+        executionTime: Date.now() - pending.enqueuedAt,
+        sharedSecret,
+      });
+      pending.resolve(resp);
+      return true;
+    }
 
-    this.studioPendingQueue.delete(params.taskId);
-    const resp = buildBridgeResponseEnvelope({
-      taskId: pending.envelope.taskId,
-      sessionId: pending.envelope.sessionId,
-      correlationId: pending.envelope.correlationId,
-      status: params.status,
-      result: params.result ?? null,
-      error: params.error ?? null,
-      executionTime: Date.now() - pending.enqueuedAt,
-      sharedSecret,
-    });
-    pending.resolve(resp);
-    return true;
+    // Permitir actualización post-confirmación o post-cancelación únicamente para tareas que estaban en espera de confirmación
+    const existing = this.completedTaskCache.get(params.taskId);
+    if (
+      existing &&
+      (existing.status === 'awaiting_studio_confirmation' ||
+        existing.status === 'awaiting_confirmation')
+    ) {
+      const updated = buildBridgeResponseEnvelope({
+        taskId: existing.taskId,
+        sessionId: existing.sessionId,
+        correlationId: existing.correlationId,
+        status: params.status,
+        result: params.result ?? null,
+        error: params.error ?? null,
+        executionTime: existing.executionTime,
+        sharedSecret,
+      });
+      this.rememberCompletedTask(params.taskId, updated);
+      return true;
+    }
+
+    return false;
+  }
+
+  public getCompletedTaskResult(taskId: string): BridgeResponseEnvelope | null {
+    return this.completedTaskCache.get(taskId) ?? null;
   }
 
   public shutdown(): void {

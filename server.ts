@@ -575,6 +575,14 @@ app.get('/api/v1/bridge/status', (_req, res) => {
   res.json(cloudBridgeCoordinator.getPublicBridgeStatus());
 });
 
+app.get('/api/v1/bridge/task/:taskId', (req, res) => {
+  const result = cloudBridgeCoordinator.getTaskResult(String(req.params.taskId || ''));
+  if (!result) {
+    return res.status(404).json({ error: 'Tarea no encontrada o aún en ejecución.' });
+  }
+  return res.json(result);
+});
+
 app.post('/api/v1/bridge/reconnect', (_req, res) => {
   cloudBridgeCoordinator.requestReconnect();
   res.json({

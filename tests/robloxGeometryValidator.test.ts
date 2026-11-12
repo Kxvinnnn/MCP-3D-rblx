@@ -300,3 +300,44 @@ test('9. Tolerancias geométricas relativas a la escala: soporte de micro-escala
   );
 });
 
+test('10. Detección y rechazo estricto de polígonos auto-intersectantes (bowtie simétrico y asimétrico)', () => {
+  // 10A. Polígono bowtie (reloj de arena / figura en 8) simétrico en el plano XY:
+  // Las aristas (0->1) de (0,0)->(2,2) y (2->3) de (2,0)->(0,2) se cruzan en (1,1)
+  const symmetricBowtieVertices = [
+    [0, 0, 0],
+    [2, 2, 0],
+    [2, 0, 0],
+    [0, 2, 0],
+  ];
+  const bowtieTri = triangulatePolygonFace3D([0, 1, 2, 3], symmetricBowtieVertices);
+  assert.equal(bowtieTri.valid, false, 'Un polígono bowtie simétrico auto-intersectante debe ser rechazado');
+  assert.equal(bowtieTri.triangles.length, 0);
+  assert.equal(countValidTrianglesInFace([0, 1, 2, 3], symmetricBowtieVertices), 0);
+
+  // 10B. Polígono auto-intersectante asimétrico de 5 vértices (donde la normal de Newell no se anula pero dos aristas no adyacentes se cruzan)
+  const asymmetricSelfIntersectingVertices = [
+    [0, 0, 0],
+    [4, 0, 0],
+    [1, 3, 0],
+    [4, 4, 0],
+    [0, 1, 0], // La arista (2->3: (1,3)->(4,4)) o (3->4: (4,4)->(0,1)) cruza la arista (1->2: (4,0)->(1,3))
+  ];
+  const asymTri = triangulatePolygonFace3D([0, 1, 2, 3, 4], asymmetricSelfIntersectingVertices);
+  assert.equal(
+    asymTri.valid,
+    false,
+    'Un polígono auto-intersectante asimétrico (con área neta no nula) debe ser rechazado por intersección de aristas'
+  );
+
+  // 10C. Integración en validateRobloxGeometry: pieza con cara auto-intersectante debe marcar hasMalformedFaces = true e isValid = false
+  const assetSelfIntersecting = createMockAsset('SelfIntersectingAsset');
+  assetSelfIntersecting.parts[0].meshData = {
+    vertices: asymmetricSelfIntersectingVertices,
+    faces: [[0, 1, 2, 3, 4]],
+  };
+  const report = validateRobloxGeometry(assetSelfIntersecting);
+  assert.equal(report.isValid, false, 'validateRobloxGeometry debe invalidar modelos con caras auto-intersectantes');
+  assert.equal(report.hasMalformedFaces, true);
+});
+
+

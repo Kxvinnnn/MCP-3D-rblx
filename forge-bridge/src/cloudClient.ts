@@ -462,7 +462,36 @@ export class ForgeCloudOutboundClient {
           this.sharedSecret
         );
         if (studioResp.status === 'failed' || studioResp.status === 'timeout') {
+          if (
+            studioResp.status === 'failed' &&
+            studioResp.result &&
+            typeof studioResp.result === 'object'
+          ) {
+            return {
+              ...(studioResp.result as Record<string, unknown>),
+              status: 'failed',
+            };
+          }
           throw new Error(studioResp.error || `Error en operación ${op}`);
+        }
+        if (
+          (studioResp.status === 'awaiting_studio_confirmation' ||
+            studioResp.status === 'awaiting_confirmation' ||
+            studioResp.status === 'partially_applied') &&
+          studioResp.result &&
+          typeof studioResp.result === 'object'
+        ) {
+          const resObj = studioResp.result as Record<string, unknown>;
+          return {
+            ...resObj,
+            status:
+              typeof resObj.status === 'string' &&
+              (resObj.status === 'awaiting_confirmation' ||
+                resObj.status === 'awaiting_studio_confirmation' ||
+                resObj.status === 'partially_applied')
+                ? resObj.status
+                : studioResp.status,
+          };
         }
         return studioResp.result;
       }
@@ -493,6 +522,10 @@ export class ForgeCloudOutboundClient {
     } catch {
       // ACK es informativo; la entrega final tiene reintentos garantizados
     }
+  }
+
+  public async reportFollowUpTaskResult(response: BridgeResponseEnvelope): Promise<void> {
+    await this.reportTaskResultWithRetry(response);
   }
 
   private async reportTaskResultWithRetry(response: BridgeResponseEnvelope): Promise<void> {

@@ -381,6 +381,10 @@ test('Fase 10 — Recorrido Completo de Validación End-to-End (Cloud <-> Bridge
 });
 
 test('Fase 3 & 8 — Integración Real entre CloudBridgeCoordinator (Backend) y ForgeLocalBridge', async () => {
+  const rootCoordinatorCandidate = path.resolve(
+    process.cwd(),
+    'src/server/engines/bridgeCoordinatorEngine.ts'
+  );
   const localCoordinatorCandidate = path.resolve(
     process.cwd(),
     '../src/server/engines/bridgeCoordinatorEngine.ts'
@@ -389,7 +393,9 @@ test('Fase 3 & 8 — Integración Real entre CloudBridgeCoordinator (Backend) y 
     process.cwd(),
     '../../MCP-3D-rblx/src/server/engines/bridgeCoordinatorEngine.ts'
   );
-  const coordinatorPath = fs.existsSync(localCoordinatorCandidate)
+  const coordinatorPath = fs.existsSync(rootCoordinatorCandidate)
+    ? rootCoordinatorCandidate
+    : fs.existsSync(localCoordinatorCandidate)
     ? localCoordinatorCandidate
     : siblingCoordinatorCandidate;
   if (!fs.existsSync(coordinatorPath)) {
@@ -508,14 +514,20 @@ test('Fase 3 & 8 — Integración Real entre CloudBridgeCoordinator (Backend) y 
 });
 
 test('Fase 4 & 5 — Prueba Integral Motores 3D: Forge → Cloud → Bridge → Rojo → Studio → Bridge → Cloud → Forge', async () => {
-  const enginesPath = path.resolve(
+  const rootEnginesCandidate = path.resolve(
     process.cwd(),
-    '../src/server/engines/worldAndModelEditorEngine.ts'
+    'src/server/engines/worldAndModelEditorEngine.ts'
   );
-  const coordinatorPath = path.resolve(
+  const rootCoordinatorCandidate = path.resolve(
     process.cwd(),
-    '../src/server/engines/bridgeCoordinatorEngine.ts'
+    'src/server/engines/bridgeCoordinatorEngine.ts'
   );
+  const enginesPath = fs.existsSync(rootEnginesCandidate)
+    ? rootEnginesCandidate
+    : path.resolve(process.cwd(), '../src/server/engines/worldAndModelEditorEngine.ts');
+  const coordinatorPath = fs.existsSync(rootCoordinatorCandidate)
+    ? rootCoordinatorCandidate
+    : path.resolve(process.cwd(), '../src/server/engines/bridgeCoordinatorEngine.ts');
   if (!fs.existsSync(enginesPath) || !fs.existsSync(coordinatorPath)) {
     return;
   }
@@ -929,3 +941,179 @@ test('Fase 4 & 5 — Prueba Integral Motores 3D: Forge → Cloud → Bridge → 
     await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
   }
 });
+
+test('Fase 2 & 5 — Propagación E2E de estados awaiting_studio_confirmation, partially_applied y confirmación destructiva diferida (Plugin -> Bridge -> Cloud)', async () => {
+  const rootCoordinatorCandidate = path.resolve(
+    process.cwd(),
+    'src/server/engines/bridgeCoordinatorEngine.ts'
+  );
+  const coordinatorPath = fs.existsSync(rootCoordinatorCandidate)
+    ? rootCoordinatorCandidate
+    : path.resolve(process.cwd(), '../src/server/engines/bridgeCoordinatorEngine.ts');
+  if (!fs.existsSync(coordinatorPath)) {
+    return;
+  }
+
+  process.env.FORGE_BRIDGE_SHARED_SECRET = SHARED_SECRET;
+  const { CloudBridgeCoordinator } = await import('file:///' + coordinatorPath.replace(/\\/g, '/'));
+  const coordinator = new CloudBridgeCoordinator();
+
+  const cloudApp = express();
+  cloudApp.use(express.json());
+
+  cloudApp.post('/api/v1/bridge/auth/handshake', (req, res) => {
+    const token = String(req.headers['x-forge-token'] || '');
+    const out = coordinator.handleHandshake(req.body || {}, token);
+    if (!out.accepted) return res.status(401).json(out);
+    return res.json(out);
+  });
+
+  cloudApp.post('/api/v1/bridge/heartbeat', (req, res) => {
+    const auth = String(req.headers.authorization || '');
+    const sess = String(req.headers['x-bridge-session'] || '');
+    const tok = String(req.headers['x-forge-token'] || '');
+    if (!coordinator.verifySessionRequest(auth, sess, tok)) {
+      return res.status(401).json({ error: 'Sesión expirada' });
+    }
+    return res.json(coordinator.handleHeartbeat(req.body || {}));
+  });
+
+  cloudApp.post('/api/v1/bridge/task-ack', (req, res) => {
+    return res.json({ acked: coordinator.handleTaskAck(String(req.body?.taskId || '')) });
+  });
+
+  cloudApp.post('/api/v1/bridge/task-result', (req, res) => {
+    return res.json({ accepted: coordinator.handleTaskResult(req.body) });
+  });
+
+  cloudApp.get('/api/v1/bridge/task/:taskId', (req, res) => {
+    const found = coordinator.getTaskResult(req.params.taskId);
+    if (!found) return res.status(404).json({ error: 'Not found' });
+    return res.json(found);
+  });
+
+  const cloudServer = await new Promise<http.Server>((resolve) => {
+    const s = cloudApp.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const cloudPort = (cloudServer.address() as any).port;
+
+  const projectRoot = resolveTestRojoProjectRoot();
+  const bridgePort = 48728;
+  const bridge = createForgeLocalBridgeApp({
+    port: bridgePort,
+    rojoProjectPath: projectRoot,
+    cloudUrl: `http://127.0.0.1:${cloudPort}`,
+    sharedSecret: SHARED_SECRET,
+    pluginLocalToken: PLUGIN_TOKEN,
+    heartbeatIntervalMs: 400,
+    autoConnectCloud: true,
+  });
+
+  await bridge.start();
+  const bridgeBaseUrl = `http://127.0.0.1:${bridgePort}`;
+
+  try {
+    // 1. Encolar operación con eliminación destructiva hacia Studio
+    const enqueuePromise = coordinator.enqueueTask(
+      'studio.reconstruct_model',
+      {
+        name: 'DestructiveCheckModel',
+        expected_part_count: 1,
+        model_hash: 'hash_after_delete_111',
+      },
+      true,
+      5000
+    );
+
+    await bridge.cloudClient.sendHeartbeatAndPollTasks();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const pollRes = await fetch(`${bridgeBaseUrl}/local/plugin/poll`, {
+      headers: { 'X-Plugin-Token': PLUGIN_TOKEN },
+    });
+    const pollData = (await pollRes.json()) as any;
+    assert.equal(pollData.pendingTasks.length, 1);
+    const taskId = pollData.pendingTasks[0].taskId;
+
+    // 2. El plugin de Roblox Studio responde inicialmente awaiting_studio_confirmation (porque hay piezas pendientes de confirmación destructiva)
+    const initialPluginRes = await fetch(`${bridgeBaseUrl}/local/plugin/result`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Plugin-Token': PLUGIN_TOKEN,
+      },
+      body: JSON.stringify({
+        taskId,
+        status: 'awaiting_studio_confirmation',
+        result: {
+          operationId: taskId,
+          taskId,
+          status: 'awaiting_confirmation',
+          verified: false,
+          modelName: 'DestructiveCheckModel',
+          expectedModelHash: 'hash_after_delete_111',
+          appliedModelHash: 'hash_before_delete_222',
+          expectedPartCount: 1,
+          actualPartCount: 2,
+          pendingDeletionPartIds: ['part_to_delete_01'],
+          verifiedGeometryPartIds: ['part_kept_01'],
+        },
+      }),
+    });
+    assert.equal(initialPluginRes.status, 200);
+
+    const initialCoordinatorOut = await enqueuePromise;
+    assert.ok(
+      initialCoordinatorOut.status === 'awaiting_confirmation' ||
+        initialCoordinatorOut.status === 'awaiting_studio_confirmation',
+      'El puente y el coordinador deben preservar awaiting_confirmation / awaiting_studio_confirmation y NO convertirlo en completed'
+    );
+    assert.deepEqual(initialCoordinatorOut.result.pendingDeletionPartIds, ['part_to_delete_01']);
+
+    // 3. Posteriormente el usuario confirma la eliminación en Roblox Studio y el plugin envía el recibo final completed para el MISMO taskId
+    const followUpPluginRes = await fetch(`${bridgeBaseUrl}/local/plugin/result`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Plugin-Token': PLUGIN_TOKEN,
+      },
+      body: JSON.stringify({
+        taskId,
+        status: 'completed',
+        result: {
+          operationId: taskId,
+          taskId,
+          status: 'completed',
+          verified: true,
+          modelName: 'DestructiveCheckModel',
+          expectedModelHash: 'hash_after_delete_111',
+          appliedModelHash: 'hash_after_delete_111',
+          expectedPartCount: 1,
+          actualPartCount: 1,
+          removedPartIds: ['part_to_delete_01'],
+          pendingDeletionPartIds: [],
+          verifiedGeometryPartIds: ['part_kept_01'],
+        },
+      }),
+    });
+    assert.equal(followUpPluginRes.status, 200);
+    const followUpJson = (await followUpPluginRes.json()) as any;
+    assert.equal(followUpJson.accepted, true, 'El puente local debe aceptar la actualización post-confirmación del mismo taskId');
+
+    // Esperar propagación a Cloud
+    await new Promise((r) => setTimeout(r, 80));
+
+    // 4. Consultar GET /api/v1/bridge/task/:taskId en Cloud y comprobar que el recibo se actualizó a completed con verified=true
+    const taskQueryRes = await fetch(`http://127.0.0.1:${cloudPort}/api/v1/bridge/task/${encodeURIComponent(taskId)}`);
+    assert.equal(taskQueryRes.status, 200);
+    const updatedTaskRecord = (await taskQueryRes.json()) as any;
+    assert.equal(updatedTaskRecord.status, 'completed');
+    assert.equal(updatedTaskRecord.result.verified, true);
+    assert.equal(updatedTaskRecord.result.appliedModelHash, 'hash_after_delete_111');
+    assert.deepEqual(updatedTaskRecord.result.removedPartIds, ['part_to_delete_01']);
+  } finally {
+    await bridge.stop();
+    await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
+  }
+});
+

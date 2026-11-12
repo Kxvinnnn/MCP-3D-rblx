@@ -285,9 +285,17 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
     const validStatus =
       status === 'completed' ||
       status === 'failed' ||
-      status === 'awaiting_studio_confirmation'
+      status === 'awaiting_studio_confirmation' ||
+      status === 'awaiting_confirmation' ||
+      status === 'partially_applied'
         ? status
         : 'completed';
+
+    const priorCompleted = coordinator.getCompletedTaskResult(taskId);
+    const wasAwaitingConfirmation =
+      priorCompleted !== null &&
+      (priorCompleted.status === 'awaiting_studio_confirmation' ||
+        priorCompleted.status === 'awaiting_confirmation');
 
     const accepted = coordinator.submitStudioPluginResult(
       {
@@ -298,11 +306,27 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
       },
       sharedSecret || undefined
     );
+
+    if (accepted && wasAwaitingConfirmation) {
+      const updatedEnvelope = coordinator.getCompletedTaskResult(taskId);
+      if (updatedEnvelope) {
+        void cloudClient.reportFollowUpTaskResult(updatedEnvelope);
+      }
+    }
+
     logActivity(
       validStatus === 'failed' ? 'error' : 'info',
       `Plugin Studio reportó resultado para ${taskId}: ${validStatus}`
     );
     res.json({ accepted, taskId, status: validStatus });
+  });
+
+  app.get('/local/task/:taskId', requireLocalAuth, (req, res) => {
+    const taskRes = coordinator.getCompletedTaskResult(String(req.params.taskId || ''));
+    if (!taskRes) {
+      return res.status(404).json({ error: 'Tarea no encontrada o aún en ejecución.' });
+    }
+    return res.json(taskRes);
   });
 
   // 5. Endpoints de Sincronización 3D Bidireccional (Studio <-> Bridge Local <-> Cloud <-> Rojo)

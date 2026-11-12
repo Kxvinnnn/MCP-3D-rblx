@@ -44,6 +44,8 @@ export type BridgeTaskStatus =
   | 'queued'
   | 'running'
   | 'awaiting_studio_confirmation'
+  | 'awaiting_confirmation'
+  | 'partially_applied'
   | 'completed'
   | 'failed'
   | 'rejected_duplicate'

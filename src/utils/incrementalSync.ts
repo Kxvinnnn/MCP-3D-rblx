@@ -96,14 +96,21 @@ export function partPropertiesHash(p: MeshPart3DSpec): string {
  */
 export function ensurePersistentPartIdsForParts(
   parts: MeshPart3DSpec[],
-  assetName: string
+  assetName: string,
+  options?: { rejectIndistinguishableClones?: boolean }
 ): MeshPart3DSpec[] {
   if (!Array.isArray(parts) || parts.length === 0) return [];
 
   const usedIds = new Set<string>();
   for (const p of parts) {
     if (p.partId && typeof p.partId === 'string' && p.partId.trim().length > 0) {
-      usedIds.add(p.partId.trim());
+      const trimmed = p.partId.trim();
+      if (usedIds.has(trimmed)) {
+        throw new Error(
+          `Colisión de identidad en '${assetName}': El partId explícito '${trimmed}' está duplicado en múltiples piezas.`
+        );
+      }
+      usedIds.add(trimmed);
     }
   }
 
@@ -133,16 +140,28 @@ export function ensurePersistentPartIdsForParts(
         name: p.name,
         hierarchyPath: p.hierarchyPath || `Workspace/${assetName}/${p.name}`,
         parentId: p.parentId || '',
+        parentName: p.parentName || '',
         shape: p.shape,
         size: p.size,
         position: p.position,
         rotation: p.rotation,
+        rotationMatrix: p.rotationMatrix,
+        material: p.material,
+        color: p.color,
+        meshData: p.meshData,
+        baseMeshData: p.baseMeshData,
       })
     ).slice(0, 10);
 
     const baseCandidate = `pid_${safeName}_${contentDigest}`;
     const count = (prefixCounts.get(baseCandidate) || 0) + 1;
     prefixCounts.set(baseCandidate, count);
+
+    if (count > 1 && options?.rejectIndistinguishableClones) {
+      throw new Error(
+        `Colisión de identidad ambigua en '${assetName}': múltiples piezas sin partId son 100% indistinguibles ('${baseCandidate}').`
+      );
+    }
 
     let finalId = count === 1 ? baseCandidate : `${baseCandidate}_${count}`;
     while (usedIds.has(finalId)) {
