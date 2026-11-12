@@ -13,7 +13,6 @@ import {
 } from '../utils/roblox3DEngine.ts';
 import {
   computeCanonicalAssetHash,
-  computeGeometryHash,
   computeAppearanceHash,
   computePropertiesHash,
   getAssetIdentityKey,
@@ -21,9 +20,15 @@ import {
 } from '../utils/canonicalHash.ts';
 import {
   validateRobloxGeometry,
-  computeTriangleArea3D,
+  isTriangleNonDegenerate3D,
   countValidTrianglesInFace,
 } from '../utils/robloxGeometryValidator.ts';
+import {
+  computeIncrementalDiff,
+  ensurePersistentPartIdsForParts,
+  partAppearanceHash,
+  partPropertiesHash,
+} from '../utils/incrementalSync.ts';
 
 export type UIMode = 'simple' | 'advanced';
 
@@ -119,7 +124,7 @@ export interface GeometryMetrics {
 
 /**
  * Calculates geometry metrics, distinguishing between real mesh vertex/face data
- * (with geometric area and index validation via 3D Ear Clipping) and estimated primitive shapes.
+ * (with scale-relative geometric area and index validation via 3D Ear Clipping) and estimated primitive shapes.
  */
 export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
   let realVertices = 0;
@@ -131,10 +136,17 @@ export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
   const parts = Array.isArray(asset.parts) ? asset.parts : [];
 
   for (const part of parts) {
-    if (part.meshData && Array.isArray(part.meshData.vertices) && part.meshData.vertices.length > 0) {
-      realVertices += part.meshData.vertices.length;
-      const vertices = part.meshData.vertices;
-      const faces = part.meshData.faces;
+    const activeMesh =
+      part.meshData && Array.isArray(part.meshData.vertices) && part.meshData.vertices.length > 0
+        ? part.meshData
+        : part.baseMeshData && Array.isArray(part.baseMeshData.vertices) && part.baseMeshData.vertices.length > 0
+        ? part.baseMeshData
+        : null;
+
+    if (activeMesh) {
+      realVertices += activeMesh.vertices.length;
+      const vertices = activeMesh.vertices;
+      const faces = activeMesh.faces;
 
       if (Array.isArray(faces)) {
         if (faces.length > 0 && Array.isArray(faces[0])) {
@@ -158,8 +170,7 @@ export function calculateAssetMetrics(asset: Forge3DAsset): GeometryMetrics {
               i2 >= 0 && i2 < vertices.length &&
               i0 !== i1 && i0 !== i2 && i1 !== i2
             ) {
-              const area = computeTriangleArea3D(vertices[i0], vertices[i1], vertices[i2]);
-              if (area > 1e-7) {
+              if (isTriangleNonDegenerate3D(vertices[i0], vertices[i1], vertices[i2])) {
                 realTriangles++;
               }
             }
@@ -220,23 +231,12 @@ export function computeAssetContentHash(asset: Forge3DAsset | null): string {
 }
 
 /**
- * Ensures each part in the asset has a truly persistent, stable partId.
- * Preserves existing partIds across renames and reordering.
+ * Ensures each part in the asset has a truly persistent, deterministic, order-independent `partId`.
+ * Preserves existing `partId`s across renames and reordering, and deterministically derives missing IDs
+ * from canonical part content so stabilizing the same model twice yields identical IDs.
  */
 export function ensureStablePartIds(parts: MeshPart3DSpec[], assetName: string): MeshPart3DSpec[] {
-  return parts.map((part, index) => {
-    if (part.partId && typeof part.partId === 'string' && part.partId.trim().length > 0) {
-      return part;
-    }
-    // Generate an intrinsic persistent ID
-    const randomSuffix = Math.random().toString(36).slice(2, 8);
-    const safeName = (part.name || `Part_${index + 1}`).replace(/[^a-zA-Z0-9_]/g, '_');
-    return {
-      ...part,
-      partId: `pid_${safeName}_${Date.now().toString(36)}_${randomSuffix}`,
-      hierarchyPath: part.hierarchyPath || `Workspace/${assetName}/${part.name}`,
-    };
-  });
+  return ensurePersistentPartIdsForParts(parts, assetName);
 }
 
 /**
@@ -267,9 +267,14 @@ export function findMatchingPart(
   return null;
 }
 
+const OVERSIZED_SPLIT_VERTEX_THRESHOLD = 9000;
+const OVERSIZED_SPLIT_FACE_THRESHOLD = 9500;
+
 /**
  * Strictly verifies that a persisted asset returned by the backend matches the requested asset's
- * identity, appearance, physical properties, and geometry buffers before accepting it as saved.
+ * identity, appearance, physical properties, transforms, and geometry buffers before accepting it as saved.
+ * Also validates any additional parts when oversized mesh splitting (`>9000` vertices or `>9500` faces) occurred,
+ * rejecting any unexplained extra parts or altered properties.
  */
 export function verifyPersistedAssetContent(
   requested: Forge3DAsset,
@@ -300,37 +305,87 @@ export function verifyPersistedAssetContent(
     };
   }
 
-  // When part counts match (no oversized mesh splitting occurred), verify appearance, properties, and geometry
+  // Validate geometry of the persisted asset returned by the server
+  if (reqParts.length > 0) {
+    const persistedGeoReport = validateRobloxGeometry(persisted);
+    if (!persistedGeoReport.isValid) {
+      return {
+        valid: false,
+        reason: `El modelo devuelto por el servidor contiene geometría inválida: ${persistedGeoReport.errors.join('; ')}`,
+      };
+    }
+  }
+
+  // Verify root PBR profile and collision fidelity
+  if (toCanonicalJsonValue(requested.pbr_profile) !== toCanonicalJsonValue(persisted.pbr_profile)) {
+    return {
+      valid: false,
+      reason: 'El perfil PBR raíz (pbr_profile) devuelto por el servidor no coincide con el modelo enviado.',
+    };
+  }
+
+  if (
+    requested.collision_fidelity &&
+    persisted.collision_fidelity &&
+    requested.collision_fidelity !== persisted.collision_fidelity
+  ) {
+    return {
+      valid: false,
+      reason: 'La fidelidad de colisión (collision_fidelity) devuelta por el servidor no coincide con la enviada.',
+    };
+  }
+
+  // Fast path + comprehensive check when part counts match
   if (persParts.length === reqParts.length) {
-    const reqAppHash = computeAppearanceHash(requested);
-    const persAppHash = computeAppearanceHash(persisted);
-    if (reqAppHash !== persAppHash) {
+    if (computeAppearanceHash(requested) !== computeAppearanceHash(persisted)) {
       return {
         valid: false,
         reason: 'Las propiedades de apariencia o materiales devueltas por el servidor no coinciden con el modelo enviado.',
       };
     }
 
-    const reqPropHash = computePropertiesHash(requested);
-    const persPropHash = computePropertiesHash(persisted);
-    if (reqPropHash !== persPropHash) {
+    if (computePropertiesHash(requested) !== computePropertiesHash(persisted)) {
       return {
         valid: false,
         reason: 'Las propiedades físicas, jerarquía o transformaciones devueltas por el servidor no coinciden con el modelo enviado.',
       };
     }
+  }
 
-    for (let i = 0; i < reqParts.length; i++) {
-      const reqPart = reqParts[i];
-      const persPart = findMatchingPart(persParts, reqPart) || persParts[i];
-      if (!persPart) {
+  // Per-part verification (handles both 1:1 parts and legitimate oversized mesh splits)
+  const matchedPersistedIndices = new Set<number>();
+
+  for (let i = 0; i < reqParts.length; i++) {
+    const reqPart = reqParts[i];
+
+    // Look for direct 1:1 match in persisted parts
+    let directIdx = -1;
+    if (reqPart.partId) {
+      directIdx = persParts.findIndex((p, idx) => !matchedPersistedIndices.has(idx) && p.partId === reqPart.partId);
+    }
+    if (directIdx === -1) {
+      directIdx = persParts.findIndex((p, idx) => !matchedPersistedIndices.has(idx) && p.name === reqPart.name);
+    }
+
+    if (directIdx !== -1) {
+      matchedPersistedIndices.add(directIdx);
+      const persPart = persParts[directIdx];
+
+      if (partAppearanceHash(reqPart) !== partAppearanceHash(persPart)) {
         return {
           valid: false,
-          reason: `La pieza '${reqPart.name}' no se encontró en el modelo devuelto por el servidor.`,
+          reason: `La apariencia/material de la pieza '${reqPart.name}' fue alterada por el servidor.`,
         };
       }
 
-      if (toCanonicalJsonValue(reqPart.size, false) !== toCanonicalJsonValue(persPart.size, false)) {
+      if (partPropertiesHash(reqPart) !== partPropertiesHash(persPart)) {
+        return {
+          valid: false,
+          reason: `Las transformaciones o propiedades físicas de la pieza '${reqPart.name}' fueron alteradas por el servidor.`,
+        };
+      }
+
+      if (toCanonicalJsonValue(reqPart.size) !== toCanonicalJsonValue(persPart.size)) {
         return {
           valid: false,
           reason: `Las dimensiones (size) de la pieza '${reqPart.name}' devueltas por el servidor no coinciden.`,
@@ -340,18 +395,185 @@ export function verifyPersistedAssetContent(
       if (reqPart.meshData && Array.isArray(reqPart.meshData.vertices) && reqPart.meshData.vertices.length > 0) {
         if (
           !persPart.meshData ||
-          toCanonicalJsonValue(reqPart.meshData.vertices, false) !==
-            toCanonicalJsonValue(persPart.meshData.vertices, false) ||
-          toCanonicalJsonValue(reqPart.meshData.faces, false) !==
-            toCanonicalJsonValue(persPart.meshData.faces, false)
+          toCanonicalJsonValue(reqPart.meshData.vertices) !== toCanonicalJsonValue(persPart.meshData.vertices) ||
+          toCanonicalJsonValue(reqPart.meshData.faces) !== toCanonicalJsonValue(persPart.meshData.faces)
         ) {
           return {
             valid: false,
-            reason: `La geometría de malla (vértices/caras) de la pieza '${reqPart.name}' fue alterada o corrompida por el servidor.`,
+            reason: `La geometría de malla (meshData) de la pieza '${reqPart.name}' fue alterada o corrompida por el servidor.`,
           };
         }
       }
+
+      if (reqPart.baseMeshData && Array.isArray(reqPart.baseMeshData.vertices) && reqPart.baseMeshData.vertices.length > 0) {
+        if (
+          !persPart.baseMeshData ||
+          toCanonicalJsonValue(reqPart.baseMeshData.vertices) !== toCanonicalJsonValue(persPart.baseMeshData.vertices) ||
+          toCanonicalJsonValue(reqPart.baseMeshData.faces) !== toCanonicalJsonValue(persPart.baseMeshData.faces)
+        ) {
+          return {
+            valid: false,
+            reason: `La geometría base (baseMeshData) de la pieza '${reqPart.name}' fue alterada o corrompida por el servidor.`,
+          };
+        }
+      }
+    } else {
+      // Check if reqPart was legitimately split into _Sub1, _Sub2, ...
+      const reqVertCount = reqPart.meshData?.vertices?.length || 0;
+      const reqFaceCount = reqPart.meshData?.faces?.length || 0;
+      const isOversizedEligible =
+        reqVertCount > OVERSIZED_SPLIT_VERTEX_THRESHOLD || reqFaceCount > OVERSIZED_SPLIT_FACE_THRESHOLD;
+
+      const subIndices: number[] = [];
+      const expectedPrefix = `${reqPart.name}_Sub`;
+      persParts.forEach((p, idx) => {
+        if (!matchedPersistedIndices.has(idx) && typeof p.name === 'string' && p.name.startsWith(expectedPrefix)) {
+          subIndices.push(idx);
+        }
+      });
+
+      if (!isOversizedEligible || subIndices.length < 2) {
+        return {
+          valid: false,
+          reason: `La pieza '${reqPart.name}' no se encontró en el modelo devuelto o fue dividida sin superar los límites de malla densa.`,
+        };
+      }
+
+      let totalSubFaces = 0;
+      for (const sIdx of subIndices) {
+        matchedPersistedIndices.add(sIdx);
+        const subPart = persParts[sIdx];
+
+        if (
+          partAppearanceHash(reqPart) !== partAppearanceHash(subPart) ||
+          partPropertiesHash(reqPart) !== partPropertiesHash(subPart) ||
+          toCanonicalJsonValue(reqPart.size) !== toCanonicalJsonValue(subPart.size)
+        ) {
+          return {
+            valid: false,
+            reason: `La sub-pieza '${subPart.name}' no conserva las transformaciones, apariencia o propiedades de '${reqPart.name}'.`,
+          };
+        }
+
+        totalSubFaces += subPart.meshData?.faces?.length || 0;
+      }
+
+      if (totalSubFaces !== reqFaceCount) {
+        return {
+          valid: false,
+          reason: `Las sub-piezas de '${reqPart.name}' suman ${totalSubFaces} caras en lugar de las ${reqFaceCount} caras originales.`,
+        };
+      }
     }
+  }
+
+  // Reject if the server returned any unmatched/unexplained extra parts
+  if (matchedPersistedIndices.size !== persParts.length) {
+    const unmatchedCount = persParts.length - matchedPersistedIndices.size;
+    return {
+      valid: false,
+      reason: `El servidor devolvió ${unmatchedCount} pieza(s) adicional(es) no justificadas que no corresponden al modelo enviado.`,
+    };
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Verifies that a completed task result from the Bridge/Studio contains a cryptographic and structural
+ * confirmation receipt proving that Roblox Studio actually reconstructed/applied the expected model:
+ * - Non-empty operationId / taskId matching the dispatched task
+ * - Explicit appliedPartCount / partCount matching `expectedAsset.parts.length`
+ * - Explicit modelHash / appliedModelHash matching `expectedModelHash`
+ */
+export function verifyStudioApplicationReceipt(
+  taskResult: any,
+  expectedTaskId: string | undefined,
+  expectedAsset: Forge3DAsset,
+  expectedModelHash: string
+): { valid: boolean; reason?: string } {
+  if (!taskResult || typeof taskResult !== 'object') {
+    return { valid: false, reason: 'Respuesta vacía o inválida del puente local.' };
+  }
+
+  if (taskResult.status !== 'completed') {
+    return { valid: false, reason: `Estado de tarea no completado (${String(taskResult.status)}).` };
+  }
+
+  const resObj = taskResult.result;
+  if (!resObj || typeof resObj !== 'object') {
+    return {
+      valid: false,
+      reason: 'El puente reportó completed pero Roblox Studio no devolvió un objeto de confirmación (result vacío).',
+    };
+  }
+
+  if (resObj.status === 'error' || resObj.verified === false) {
+    return {
+      valid: false,
+      reason: resObj.error || 'El plugin de Roblox Studio reportó un fallo de verificación al aplicar el modelo.',
+    };
+  }
+
+  // 1. Verify operation identifier
+  const confirmedOpId = String(resObj.operationId || resObj.taskId || taskResult.taskId || '').trim();
+  if (!confirmedOpId) {
+    return {
+      valid: false,
+      reason: 'La respuesta de Studio carece de identificador de operación verificable (operationId / taskId).',
+    };
+  }
+  if (expectedTaskId && resObj.operationId && String(resObj.operationId) !== String(expectedTaskId)) {
+    return {
+      valid: false,
+      reason: `El operationId confirmado por Studio ('${resObj.operationId}') no coincide con la tarea enviada ('${expectedTaskId}').`,
+    };
+  }
+
+  // 2. Verify applied part count
+  const rawAppliedCount =
+    typeof resObj.appliedPartCount === 'number'
+      ? resObj.appliedPartCount
+      : typeof resObj.partCount === 'number'
+      ? resObj.partCount
+      : undefined;
+
+  if (typeof rawAppliedCount !== 'number' || !Number.isInteger(rawAppliedCount)) {
+    return {
+      valid: false,
+      reason: 'La respuesta de Studio no incluye la cantidad verificada de piezas aplicadas (appliedPartCount).',
+    };
+  }
+
+  if (rawAppliedCount !== expectedAsset.parts.length) {
+    return {
+      valid: false,
+      reason: `Roblox Studio aplicó ${rawAppliedCount} pieza(s), pero el modelo enviado contiene ${expectedAsset.parts.length} pieza(s).`,
+    };
+  }
+
+  // 3. Verify model hash
+  const confirmedHash = String(resObj.modelHash || resObj.appliedModelHash || '').trim();
+  if (!confirmedHash) {
+    return {
+      valid: false,
+      reason: 'La respuesta de Studio no incluye el hash canónico del modelo aplicado (modelHash).',
+    };
+  }
+
+  if (confirmedHash !== expectedModelHash) {
+    return {
+      valid: false,
+      reason: `El hash del modelo aplicado en Studio (${confirmedHash.slice(0, 8)}) no coincide con el hash enviado (${expectedModelHash.slice(0, 8)}).`,
+    };
+  }
+
+  // 4. Verify model name if provided
+  if (resObj.modelName && String(resObj.modelName) !== expectedAsset.name) {
+    return {
+      valid: false,
+      reason: `El nombre del modelo aplicado en Studio ('${resObj.modelName}') no coincide con '${expectedAsset.name}'.`,
+    };
   }
 
   return { valid: true };
@@ -686,8 +908,8 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   /**
-   * Recovers local draft while verifying baseHash against the current saved/remote version
-   * to prevent silently overwriting newer saved changes.
+   * Recovers local draft while strictly validating baseHash and baseAsset against the current saved/remote version.
+   * Never accepts unknown or diverged bases silently.
    */
   const recoverDraft = useCallback(() => {
     try {
@@ -702,7 +924,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           };
           const draftHash = computeAssetContentHash(stabilizedDraft);
           const draftIdentity = parsed.identityKey || getAssetIdentityKey(stabilizedDraft);
-          const draftBaseHash: string = typeof parsed.baseHash === 'string' ? parsed.baseHash : '';
+          const draftBaseHash: string = typeof parsed.baseHash === 'string' ? parsed.baseHash.trim() : '';
 
           // Find current saved/remote version for this asset identity if available
           let currentSavedAsset: Forge3DAsset | null = null;
@@ -733,13 +955,12 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             ? computeAssetContentHash(currentSavedAsset)
             : '';
 
-          // If draft had a known baseHash AND a saved version exists whose hash differs from baseHash and draftHash -> CONFLICT
+          // Case 1: A saved version exists for this asset identity, and the draft either lacks baseHash or its baseHash diverges
           if (
-            draftBaseHash &&
             currentSavedAsset &&
             currentSavedHash &&
-            draftBaseHash !== currentSavedHash &&
-            currentSavedHash !== draftHash
+            currentSavedHash !== draftHash &&
+            (!draftBaseHash || draftBaseHash !== currentSavedHash)
           ) {
             savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(currentSavedAsset));
             savedAssetHashRef.current = currentSavedHash;
@@ -750,34 +971,96 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               localAsset: stabilizedDraft,
               remoteAsset: currentSavedAsset,
             });
+            const reasonDetail = !draftBaseHash
+              ? 'El borrador carece de baseHash verificable frente al modelo guardado actual.'
+              : `Base del borrador (${draftBaseHash.slice(0, 8)}) ≠ Versión guardada actual (${currentSavedHash.slice(0, 8)}).`;
             setCurrentSyncStatus({
               state: 'conflict',
               operation: 'merge',
               message:
-                'Conflicto de borrador: El modelo guardado cambió desde que se creó el borrador local.',
-              details: `Base del borrador (${draftBaseHash.slice(0, 8)}) ≠ Versión guardada actual (${currentSavedHash.slice(0, 8)}).`,
+                'Conflicto de borrador: El modelo guardado cambió o no coincide con la base del borrador local.',
+              details: reasonDetail,
               timestamp: new Date().toLocaleTimeString(),
             });
             setNotification({
               type: 'warning',
               message:
-                'Conflicto detectado: La versión guardada del modelo cambió desde que se guardó el borrador.',
+                'Conflicto detectado: La versión guardada del modelo no coincide con la base del borrador.',
             });
             setHasRecoverableDraft(false);
             return;
           }
 
-          // No conflict: restore baseline snapshot and draft state
+          // Case 2: No saved version in session/library, and draft has no verifiable baseAsset snapshot or missing baseHash
+          const hasVerifiableBaseSnapshot =
+            parsed.baseAsset &&
+            typeof parsed.baseAsset === 'object' &&
+            Array.isArray(parsed.baseAsset.parts);
+
+          if (!currentSavedAsset && !hasVerifiableBaseSnapshot) {
+            // Do not silently accept an unknown base; flag conflict so user explicitly decides
+            const fallbackRemote: Forge3DAsset = {
+              ...stabilizedDraft,
+              parts: [],
+            };
+            savedAssetSnapshotRef.current = null;
+            savedAssetHashRef.current = '';
+            setActiveAssetState(stabilizedDraft);
+            setSelectedPart(findMatchingPart(stabilizedParts, null));
+            setPendingChanges(true);
+            setActiveConflict({
+              localAsset: stabilizedDraft,
+              remoteAsset: fallbackRemote,
+            });
+            setCurrentSyncStatus({
+              state: 'conflict',
+              operation: 'merge',
+              message:
+                'Borrador con base desconocida: No se encontró el estado base original en la biblioteca ni en el snapshot.',
+              details: `baseHash reportado: ${draftBaseHash || 'ausente'}. Confirma para persistir la versión local.`,
+              timestamp: new Date().toLocaleTimeString(),
+            });
+            setNotification({
+              type: 'warning',
+              message:
+                'Borrador de base desconocida: requiere confirmación antes de sobrescribir o sincronizar.',
+            });
+            setHasRecoverableDraft(false);
+            return;
+          }
+
+          // Case 3: Verified base (either currentSavedAsset matches draftBaseHash, or parsed.baseAsset matches draftBaseHash)
           if (currentSavedAsset) {
             savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(currentSavedAsset));
             savedAssetHashRef.current = currentSavedHash;
-          } else if (parsed.baseAsset) {
-            savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(parsed.baseAsset));
-            savedAssetHashRef.current =
-              draftBaseHash || computeAssetContentHash(parsed.baseAsset);
-          } else {
-            savedAssetSnapshotRef.current = null;
-            savedAssetHashRef.current = draftBaseHash;
+          } else if (hasVerifiableBaseSnapshot) {
+            const stabilizedBase: Forge3DAsset = {
+              ...parsed.baseAsset,
+              parts: ensureStablePartIds(parsed.baseAsset.parts || [], parsed.baseAsset.name || stabilizedDraft.name),
+            };
+            const computedBaseSnapHash = computeAssetContentHash(stabilizedBase);
+            if (draftBaseHash && draftBaseHash !== computedBaseSnapHash) {
+              // Base snapshot and baseHash disagree -> conflict
+              savedAssetSnapshotRef.current = stabilizedBase;
+              savedAssetHashRef.current = computedBaseSnapHash;
+              setActiveAssetState(stabilizedDraft);
+              setSelectedPart(findMatchingPart(stabilizedParts, null));
+              setPendingChanges(true);
+              setActiveConflict({
+                localAsset: stabilizedDraft,
+                remoteAsset: stabilizedBase,
+              });
+              setCurrentSyncStatus({
+                state: 'conflict',
+                operation: 'merge',
+                message: 'Conflicto de integridad en borrador: baseHash no coincide con baseAsset.',
+                timestamp: new Date().toLocaleTimeString(),
+              });
+              setHasRecoverableDraft(false);
+              return;
+            }
+            savedAssetSnapshotRef.current = stabilizedBase;
+            savedAssetHashRef.current = computedBaseSnapHash;
           }
 
           setActiveAssetState(stabilizedDraft);
@@ -787,7 +1070,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setPendingChanges(draftHash !== savedAssetHashRef.current);
           setNotification({
             type: 'info',
-            message: 'Borrador no guardado recuperado con éxito.',
+            message: 'Borrador no guardado recuperado y verificado contra su base.',
           });
         }
       }
@@ -841,7 +1124,10 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (!activeConflict) return false;
 
       if (resolution === 'keep_local') {
-        const localToPersist = activeConflict.localAsset;
+        const localToPersist: Forge3DAsset = {
+          ...activeConflict.localAsset,
+          parts: ensureStablePartIds(activeConflict.localAsset.parts || [], activeConflict.localAsset.name),
+        };
         const geoValidation = validateRobloxGeometry(localToPersist);
         if (!geoValidation.isValid) {
           const errorMsg = `No se puede sincronizar la versión local: ${geoValidation.errors.join('; ')}`;
@@ -1164,8 +1450,13 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     async (saveToRojo = true): Promise<boolean> => {
       if (!activeAsset) return false;
 
+      const stabilizedActive: Forge3DAsset = {
+        ...activeAsset,
+        parts: ensureStablePartIds(activeAsset.parts || [], activeAsset.name),
+      };
+
       // Validate geometry before initiating save
-      const geoValidation = validateRobloxGeometry(activeAsset);
+      const geoValidation = validateRobloxGeometry(stabilizedActive);
       if (!geoValidation.isValid) {
         const errorMsg = `Validación geométrica falló: ${geoValidation.errors.join('; ')}`;
         setNotification({
@@ -1180,7 +1471,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            asset: activeAsset,
+            asset: stabilizedActive,
             save_to_rojo: saveToRojo,
             save_to_library: true,
           }),
@@ -1195,7 +1486,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             };
 
             // Verify that returned asset content matches the sent asset
-            const verification = verifyPersistedAssetContent(activeAsset, savedAsset);
+            const verification = verifyPersistedAssetContent(stabilizedActive, savedAsset);
             if (!verification.valid) {
               throw new Error(verification.reason || 'El contenido devuelto por el servidor no coincide con el enviado.');
             }
@@ -1254,17 +1545,23 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [saveAssetToDisk, pendingSwitchTarget, pendingSwitchTab, applyActiveAssetDirectly]);
 
   /**
-   * Pushes model to Roblox Studio via Local Bridge with pre-flight geometry validation
-   * and strictly verified operation states. Does not clear pendingChanges until Studio confirms completion.
+   * Pushes model to Roblox Studio via Local Bridge with pre-flight geometry validation,
+   * persisted Rojo verification, and strict Studio receipt verification (appliedPartCount, operationId, modelHash).
+   * Does not clear pendingChanges until Studio confirms verifiable application.
    */
   const pushToStudio = useCallback(
     async (
       targetAsset?: Forge3DAsset
     ): Promise<{ success: boolean; appliedInStudio: boolean; message: string; taskId?: string }> => {
-      const assetToPush = targetAsset || activeAsset;
-      if (!assetToPush) {
+      const rawAssetToPush = targetAsset || activeAsset;
+      if (!rawAssetToPush) {
         return { success: false, appliedInStudio: false, message: 'No hay ningún modelo activo para enviar.' };
       }
+
+      const assetToPush: Forge3DAsset = {
+        ...rawAssetToPush,
+        parts: ensureStablePartIds(rawAssetToPush.parts || [], rawAssetToPush.name),
+      };
 
       // Step 0: Pre-flight geometry validation before sending to Rojo or Studio
       const geoValidation = validateRobloxGeometry(assetToPush);
@@ -1289,6 +1586,8 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setNotification({ type: 'error', message: errMsg });
         return { success: false, appliedInStudio: false, message: errMsg };
       }
+
+      const expectedModelHash = computeAssetContentHash(assetToPush);
 
       // Step 1: Preparing
       setCurrentSyncStatus({
@@ -1361,7 +1660,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return { success: false, appliedInStudio: false, message: errMsg };
       }
 
-      // Step 3: Sending to Bridge
+      // Step 3: Sending to Bridge with expectedModelHash & expected_part_count
       try {
         setCurrentSyncStatus({
           state: 'sending',
@@ -1370,14 +1669,29 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           timestamp: new Date().toLocaleTimeString(),
         });
 
+        const baselineForDiff = savedAssetSnapshotRef.current
+          ? {
+              ...savedAssetSnapshotRef.current,
+              parts: ensureStablePartIds(savedAssetSnapshotRef.current.parts || [], savedAssetSnapshotRef.current.name),
+            }
+          : null;
+        const incrementalDiff = baselineForDiff
+          ? computeIncrementalDiff(baselineForDiff, assetToPush)
+          : null;
+
         const res = await fetch('/api/v1/bridge/enqueue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             operation: 'studio.reconstruct_model',
             payload: {
+              name: assetToPush.name,
               model_name: assetToPush.name,
+              model_hash: expectedModelHash,
+              expected_part_count: assetToPush.parts.length,
               parts: assetToPush.parts,
+              asset: assetToPush,
+              incremental_diff: incrementalDiff,
               conflict_policy: 'smart_merge',
               target_parent: 'Workspace',
             },
@@ -1394,41 +1708,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const taskId = taskResult.taskId;
         const taskStatus = taskResult.status;
 
-        // ONLY completed is a true success applied in Studio — update baseline hash & clear pendingChanges here
-        if (taskStatus === 'completed' && taskResult.result?.status !== 'error') {
-          savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(persistedRojoAsset));
-          savedAssetHashRef.current = computeAssetContentHash(persistedRojoAsset);
-          setPendingChanges(false);
-          try {
-            localStorage.removeItem('forge_active_draft');
-          } catch {}
-          setHasRecoverableDraft(false);
-          setDraftTimestamp(null);
-
-          const successMsg = `Modelo '${assetToPush.name}' aplicado y verificado en Roblox Studio (${assetToPush.parts.length} piezas).`;
-          setCurrentSyncStatus({
-            state: 'applied_successfully',
-            operation: 'push',
-            taskId,
-            message: successMsg,
-            details: taskResult.result?.details || 'Completado por el plugin v2.2.0',
-            timestamp: new Date().toLocaleTimeString(),
-          });
-
-          const successItem: SyncHistoryItem = {
-            id: `sync-${Date.now()}`,
-            timestamp: new Date().toLocaleTimeString(),
-            type: 'push',
-            modelName: assetToPush.name,
-            partCount: assetToPush.parts.length,
-            status: 'applied_successfully',
-            details: successMsg,
-            taskId,
-          };
-          setSyncHistory((prev) => [successItem, ...prev].slice(0, 20));
-          setNotification({ type: 'success', message: successMsg });
-          return { success: true, appliedInStudio: true, message: successMsg, taskId };
-        } else if (taskStatus === 'awaiting_studio_confirmation' || taskStatus === 'queued') {
+        if (taskStatus === 'awaiting_studio_confirmation' || taskStatus === 'queued') {
           // Queued in Bridge: NOT applied yet in Studio -> do NOT mark synchronization as completed
           const queuedMsg = `Solicitud en cola en el puente local (ID: ${taskId || 'N/A'}). Pendiente de ejecución en Studio.`;
           setCurrentSyncStatus({
@@ -1453,30 +1733,99 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setSyncHistory((prev) => [queuedItem, ...prev].slice(0, 20));
           setNotification({ type: 'info', message: queuedMsg });
           return { success: false, appliedInStudio: false, message: queuedMsg, taskId };
-        } else {
-          const errMsg = taskResult.error || taskResult.result?.error || 'Roblox Studio no pudo aplicar el modelo';
+        }
+
+        if (taskStatus === 'completed') {
+          const receiptVerification = verifyStudioApplicationReceipt(
+            taskResult,
+            taskId,
+            assetToPush,
+            expectedModelHash
+          );
+
+          if (!receiptVerification.valid) {
+            const errMsg = `Confirmación de Studio rechazada: ${receiptVerification.reason}`;
+            setCurrentSyncStatus({
+              state: 'error',
+              operation: 'push',
+              taskId,
+              message: errMsg,
+              timestamp: new Date().toLocaleTimeString(),
+            });
+
+            const errorItem: SyncHistoryItem = {
+              id: `sync-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString(),
+              type: 'push',
+              modelName: assetToPush.name,
+              partCount: assetToPush.parts.length,
+              status: 'error',
+              details: errMsg,
+              taskId,
+            };
+            setSyncHistory((prev) => [errorItem, ...prev].slice(0, 20));
+            setNotification({ type: 'error', message: errMsg });
+            return { success: false, appliedInStudio: false, message: errMsg, taskId };
+          }
+
+          // Receipt verified: Studio confirmed exact part count, operationId, and modelHash
+          setActiveAssetState(persistedRojoAsset);
+          savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(persistedRojoAsset));
+          savedAssetHashRef.current = computeAssetContentHash(persistedRojoAsset);
+          setPendingChanges(false);
+          try {
+            localStorage.removeItem('forge_active_draft');
+          } catch {}
+          setHasRecoverableDraft(false);
+          setDraftTimestamp(null);
+
+          const successMsg = `Modelo '${assetToPush.name}' aplicado y verificado en Roblox Studio (${assetToPush.parts.length} piezas, hash ${expectedModelHash.slice(0, 8)}).`;
           setCurrentSyncStatus({
-            state: 'error',
+            state: 'applied_successfully',
             operation: 'push',
             taskId,
-            message: errMsg,
+            message: successMsg,
+            details: taskResult.result?.details || `Operación ${taskId} verificada por el plugin v2.2.0`,
             timestamp: new Date().toLocaleTimeString(),
           });
 
-          const errorItem: SyncHistoryItem = {
+          const successItem: SyncHistoryItem = {
             id: `sync-${Date.now()}`,
             timestamp: new Date().toLocaleTimeString(),
             type: 'push',
             modelName: assetToPush.name,
             partCount: assetToPush.parts.length,
-            status: 'error',
-            details: errMsg,
+            status: 'applied_successfully',
+            details: successMsg,
             taskId,
           };
-          setSyncHistory((prev) => [errorItem, ...prev].slice(0, 20));
-          setNotification({ type: 'error', message: errMsg });
-          return { success: false, appliedInStudio: false, message: errMsg, taskId };
+          setSyncHistory((prev) => [successItem, ...prev].slice(0, 20));
+          setNotification({ type: 'success', message: successMsg });
+          return { success: true, appliedInStudio: true, message: successMsg, taskId };
         }
+
+        const errMsg = taskResult.error || taskResult.result?.error || 'Roblox Studio no pudo aplicar el modelo';
+        setCurrentSyncStatus({
+          state: 'error',
+          operation: 'push',
+          taskId,
+          message: errMsg,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+
+        const errorItem: SyncHistoryItem = {
+          id: `sync-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'push',
+          modelName: assetToPush.name,
+          partCount: assetToPush.parts.length,
+          status: 'error',
+          details: errMsg,
+          taskId,
+        };
+        setSyncHistory((prev) => [errorItem, ...prev].slice(0, 20));
+        setNotification({ type: 'error', message: errMsg });
+        return { success: false, appliedInStudio: false, message: errMsg, taskId };
       } catch (err: any) {
         // Differentiate bridge failure: Model was saved to Rojo, but bridge transfer failed
         const bridgeMsg = `Modelo guardado en disco Rojo, pero el puente local (puerto 48720) no respondió: ${err?.message || 'Inicia npm run bridge'}.`;

@@ -574,6 +574,7 @@ test('6. Recuperación de borradores locales (recoverDraft) y detección de conf
       asset: draftAsset,
       timestamp: Date.now(),
       baseHash: savedHash, // Hash antiguo
+      baseAsset: savedVersion,
     })
   );
 
@@ -588,6 +589,33 @@ test('6. Recuperación de borradores locales (recoverDraft) y detección de conf
   assert.equal(contextValue.currentSyncStatus.state, 'conflict');
   assert.deepEqual(contextValue.activeConflict.localAsset.parts[0].color, [99, 88, 77]);
   assert.deepEqual(contextValue.activeConflict.remoteAsset.parts[0].color, [10, 20, 30]);
+
+  // Caso 6C: Si el borrador no tiene base verificable (no existe modelo guardado en sesión/librería ni baseAsset válido), NO debe aceptarse silenciosamente
+  await act(async () => {
+    await contextValue.resolveConflict('accept_remote');
+    contextValue.setActiveAsset(null, true);
+  });
+
+  const orphanDraft = createSampleAsset('OrphanModelWithNoKnownBase');
+  domWindow.localStorage.setItem(
+    'forge_active_draft',
+    JSON.stringify({
+      asset: orphanDraft,
+      timestamp: Date.now(),
+      baseHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      // Sin baseAsset y sin versión guardada en assetLibrary
+    })
+  );
+
+  await act(async () => {
+    contextValue.recoverDraft();
+  });
+
+  assert.ok(
+    contextValue.activeConflict,
+    'recoverDraft DEBE señalar conflicto cuando la base del borrador no puede verificarse contra ningún modelo guardado'
+  );
+  assert.equal(contextValue.currentSyncStatus.state, 'conflict');
 
   await act(async () => {
     root.unmount();
@@ -675,7 +703,86 @@ test('7. Detección y resolución real de conflictos local vs remoto (keep_local
   });
 });
 
-test('8. Verificación de persistencia en saveAssetToDisk y estado pendiente en pushToStudio cuando queda en cola', async () => {
+test('8. Verificación exhaustiva de persistencia (verifyPersistedAssetContent) y recibo verificable de Roblox Studio en pushToStudio', async () => {
+  const { verifyPersistedAssetContent, verifyStudioApplicationReceipt } = await import('../src/context/ForgeContext.tsx');
+
+  // 8.1 Prueba unitaria directa de verifyPersistedAssetContent: rechaza piezas extra inexplicables
+  const reqAsset = createSampleAsset('SplitCheckModel');
+  const withUnexpectedExtra: Forge3DAsset = JSON.parse(JSON.stringify(reqAsset));
+  withUnexpectedExtra.parts.push({
+    ...reqAsset.parts[0],
+    partId: 'part_unexpected_injected',
+    name: 'InjectedExtraPart',
+  });
+  const extraCheck = verifyPersistedAssetContent(reqAsset, withUnexpectedExtra);
+  assert.equal(
+    extraCheck.valid,
+    false,
+    'verifyPersistedAssetContent debe rechazar piezas adicionales cuando ninguna pieza original superaba el límite de subdivisión'
+  );
+
+  // 8.2 Prueba unitaria de subdivisión legítima (_Sub1, _Sub2) cuando una pieza supera >9500 caras
+  const largeFaces: number[][] = [];
+  for (let i = 0; i < 9600; i++) {
+    largeFaces.push([0, 1, 2]);
+  }
+  const oversizedAsset: Forge3DAsset = {
+    ...createSampleAsset('OversizedMeshAsset'),
+    parts: [
+      {
+        ...reqAsset.parts[0],
+        partId: 'hull_heavy',
+        name: 'HeavyHull',
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: largeFaces,
+        },
+      },
+    ],
+  };
+  const legitimateSplitAsset: Forge3DAsset = {
+    ...oversizedAsset,
+    parts: [
+      {
+        ...oversizedAsset.parts[0],
+        partId: 'hull_heavy_Sub1',
+        name: 'HeavyHull_Sub1',
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: largeFaces.slice(0, 5000),
+        },
+      },
+      {
+        ...oversizedAsset.parts[0],
+        partId: 'hull_heavy_Sub2',
+        name: 'HeavyHull_Sub2',
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: largeFaces.slice(5000),
+        },
+      },
+    ],
+  };
+  const splitCheck = verifyPersistedAssetContent(oversizedAsset, legitimateSplitAsset);
+  assert.equal(
+    splitCheck.valid,
+    true,
+    `verifyPersistedAssetContent debe aceptar subdivisiones _SubN legítimas que conservan el conteo exacto de caras (${splitCheck.reason || 'ok'})`
+  );
+
+  // 8.3 Integración en ForgeContext
   let contextValue: any = null;
   function SyncInspector() {
     contextValue = useForge();
@@ -767,7 +874,7 @@ test('8. Verificación de persistencia en saveAssetToDisk y estado pendiente en 
     'pushToStudio NO debe limpiar pendingChanges cuando la operación apenas quedó en cola y no fue confirmada por Studio'
   );
 
-  // 8C. Cuando Studio confirma completed, pushToStudio actualiza el baseline y limpia pendingChanges
+  // 8C. Si Studio reporta completed pero SIN recibo verificable (sin appliedPartCount ni modelHash), pushToStudio debe rechazarlo
   globalThis.fetch = (async (url: string, init?: any) => {
     if (url.includes('/api/v1/assets/rebuild-luau')) {
       const sent = JSON.parse(init.body).asset;
@@ -782,9 +889,50 @@ test('8. Verificación de persistencia en saveAssetToDisk y estado pendiente en 
         ok: true,
         status: 200,
         json: async () => ({
-          taskId: 'task-completed-2',
+          taskId: 'task-unverified-receipt',
           status: 'completed',
-          result: { status: 'ok', details: 'Applied in Studio' },
+          result: { status: 'ok', details: 'Missing partCount and modelHash' },
+        }),
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  await act(async () => {
+    const pushRes = await contextValue.pushToStudio();
+    assert.equal(pushRes.success, false, 'Debe rechazar respuestas completed que carezcan de recibo verificable');
+    assert.equal(pushRes.appliedInStudio, false);
+  });
+  assert.equal(contextValue.currentSyncStatus.state, 'error');
+  assert.equal(contextValue.pendingChanges, true);
+
+  // 8D. Cuando Studio confirma completed CON recibo verificable (operationId, appliedPartCount y modelHash exactos), actualiza el baseline y limpia pendingChanges
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const sent = JSON.parse(init.body).asset;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: sent }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/enqueue')) {
+      const enqueueBody = JSON.parse(init.body);
+      const payload = enqueueBody.payload;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          taskId: 'task-completed-verified',
+          status: 'completed',
+          result: {
+            status: 'ok',
+            verified: true,
+            operationId: 'task-completed-verified',
+            modelName: payload.name,
+            appliedPartCount: payload.parts.length,
+            modelHash: payload.model_hash,
+          },
         }),
       };
     }
@@ -800,8 +948,26 @@ test('8. Verificación de persistencia en saveAssetToDisk y estado pendiente en 
   assert.equal(
     contextValue.pendingChanges,
     false,
-    'pushToStudio limpia pendingChanges únicamente tras confirmar que Studio completó la operación'
+    'pushToStudio limpia pendingChanges únicamente tras verificar el recibo completo de Roblox Studio'
   );
+
+  // Verificar directamente verifyStudioApplicationReceipt ante discrepancia de modelHash
+  const mismatchCheck = verifyStudioApplicationReceipt(
+    {
+      taskId: 'task-1',
+      status: 'completed',
+      result: {
+        status: 'ok',
+        operationId: 'task-1',
+        appliedPartCount: contextValue.activeAsset.parts.length,
+        modelHash: 'bad_hash_0000',
+      },
+    },
+    'task-1',
+    contextValue.activeAsset,
+    computeAssetContentHash(contextValue.activeAsset)
+  );
+  assert.equal(mismatchCheck.valid, false);
 
   globalThis.fetch = origFetch;
 
@@ -809,3 +975,151 @@ test('8. Verificación de persistencia en saveAssetToDisk y estado pendiente en 
     root.unmount();
   });
 });
+
+test('9. Ciclo E2E completo: Crear modelo -> Asignar IDs persistentes -> Editar (añadir, modificar, eliminar piezas) -> Guardar -> Recuperar -> Sincronizar incrementalmente con Studio', async () => {
+  let contextValue: any = null;
+  function E2EInspector() {
+    contextValue = useForge();
+    return React.createElement('div', null, contextValue.activeAsset?.name);
+  }
+
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(React.createElement(ForgeProvider, null, React.createElement(E2EInspector)));
+  });
+
+  // Paso 1: Crear un modelo cuyas piezas inicialmente no tienen partId
+  const rawCreatedModel: Forge3DAsset = {
+    ...createSampleAsset('MechWalkerE2E'),
+    parts: [
+      {
+        ...createSampleAsset().parts[0],
+        partId: undefined,
+        name: 'Chassis',
+        hierarchyPath: 'Workspace/MechWalkerE2E/Chassis',
+      },
+      {
+        ...createSampleAsset().parts[1],
+        partId: undefined,
+        name: 'LeftCannon',
+        hierarchyPath: 'Workspace/MechWalkerE2E/LeftCannon',
+      },
+    ],
+  };
+
+  const origFetch = globalThis.fetch;
+  let lastBridgePayload: any = null;
+
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const sent = JSON.parse(init.body).asset;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: sent }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/enqueue')) {
+      const body = JSON.parse(init.body);
+      lastBridgePayload = body.payload;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          taskId: 'task-e2e-sync-1',
+          status: 'completed',
+          result: {
+            status: 'ok',
+            verified: true,
+            operationId: 'task-e2e-sync-1',
+            modelName: body.payload.name,
+            appliedPartCount: body.payload.parts.length,
+            modelHash: body.payload.model_hash,
+          },
+        }),
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  // Cargar modelo inicial: debe generar y persistir partIds deterministas automáticamente
+  await act(async () => {
+    contextValue.setActiveAsset(rawCreatedModel);
+  });
+
+  const chassisId = contextValue.activeAsset.parts[0].partId;
+  const leftCannonId = contextValue.activeAsset.parts[1].partId;
+  assert.ok(chassisId && chassisId.startsWith('pid_'), 'Chassis debe recibir un partId persistente');
+  assert.ok(leftCannonId && leftCannonId.startsWith('pid_'), 'LeftCannon debe recibir un partId persistente');
+  assert.notEqual(chassisId, leftCannonId);
+
+  // Paso 2: Guardar el modelo base en disco
+  await act(async () => {
+    const saved = await contextValue.saveAssetToDisk(true);
+    assert.equal(saved, true);
+  });
+  assert.equal(contextValue.pendingChanges, false);
+
+  // Paso 3: Editar el modelo (Modificar Chassis, Eliminar LeftCannon, Añadir RightMissilePod)
+  const editedModel: Forge3DAsset = {
+    ...contextValue.activeAsset,
+    parts: [
+      {
+        ...contextValue.activeAsset.parts[0], // Chassis modificado en color y posición
+        color: [255, 128, 0],
+        position: [0, 1.5, 0],
+      },
+      // LeftCannon eliminado
+      {
+        partId: 'part_missile_pod_new',
+        name: 'RightMissilePod',
+        shape: 'Block',
+        size: [2, 2, 3],
+        position: [3, 3, 0],
+        rotation: [0, 0, 0],
+        color: [40, 40, 40],
+        material: 'Metal',
+        roughness: 0.3,
+        metalness: 0.85,
+        transparency: 0,
+        canCollide: true,
+        anchored: true,
+        collisionFidelity: 'Box',
+        hierarchyPath: 'Workspace/MechWalkerE2E/RightMissilePod',
+      },
+    ],
+  };
+
+  await act(async () => {
+    contextValue.applyAssetChange(editedModel, 'Modificar Chassis, eliminar LeftCannon y añadir RightMissilePod');
+  });
+  assert.equal(contextValue.pendingChanges, true);
+
+  // Paso 4: Sincronizar con Roblox Studio y verificar el diff incremental enviado + recibo confirmado
+  await act(async () => {
+    const pushRes = await contextValue.pushToStudio();
+    assert.equal(pushRes.success, true);
+    assert.equal(pushRes.appliedInStudio, true);
+  });
+
+  assert.ok(lastBridgePayload, 'El puente debe haber recibido el payload de sincronización');
+  assert.ok(lastBridgePayload.incremental_diff, 'El payload debe incluir incremental_diff');
+  assert.equal(lastBridgePayload.incremental_diff.added.length, 1, 'Debe reportar 1 pieza añadida (RightMissilePod)');
+  assert.equal(lastBridgePayload.incremental_diff.added[0].partId, 'part_missile_pod_new');
+  assert.equal(lastBridgePayload.incremental_diff.removed.length, 1, 'Debe reportar 1 pieza eliminada (LeftCannon)');
+  assert.equal(lastBridgePayload.incremental_diff.removed[0].partId, leftCannonId);
+  assert.equal(lastBridgePayload.incremental_diff.modified.length, 1, 'Debe reportar 1 pieza modificada (Chassis)');
+  assert.equal(lastBridgePayload.incremental_diff.modified[0].partId, chassisId);
+
+  assert.equal(contextValue.currentSyncStatus.state, 'applied_successfully');
+  assert.equal(contextValue.pendingChanges, false);
+
+  globalThis.fetch = origFetch;
+
+  await act(async () => {
+    root.unmount();
+  });
+});
+

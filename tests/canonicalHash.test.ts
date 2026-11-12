@@ -9,7 +9,11 @@ import {
   computePropertiesHash,
   strictOrdinalCompare,
 } from '../src/utils/canonicalHash.ts';
-import { computeIncrementalDiff } from '../src/utils/incrementalSync.ts';
+import {
+  computeIncrementalDiff,
+  assignPersistentPartIds,
+  ensurePersistentPartIdsForParts,
+} from '../src/utils/incrementalSync.ts';
 import { Forge3DAsset } from '../src/utils/roblox3DEngine.ts';
 
 function createBaseTestAsset(name = 'CanonTestModel'): Forge3DAsset {
@@ -517,28 +521,61 @@ test('11. computeIncrementalDiff: Detección quirúrgica de piezas añadidas, el
   assert.equal(diff.modified[0].appearanceChanged, true);
   assert.equal(diff.modified[0].geometryChanged, false);
 
-  // Caso 11C: Piezas sin partId con el mismo nombre no se sobrescriben silenciosamente y emiten advertencia
-  const noIdAssetA: Forge3DAsset = {
+  // Caso 11C: Dos piezas sin partId que comparten la misma ruta/nombre lanzan error explícito en lugar de usar #ocurrencia (que intercambiaría su identidad al reordenar)
+  const ambiguousNoIdAsset: Forge3DAsset = {
     ...asset,
     parts: [
-      { ...asset.parts[0], partId: undefined, name: 'DuplicateBolt', position: [0, 0, 0] },
-      { ...asset.parts[1], partId: undefined, name: 'DuplicateBolt', position: [5, 0, 0] },
+      { ...asset.parts[0], partId: undefined, hierarchyPath: 'Workspace/Model/DuplicateBolt', name: 'DuplicateBolt', position: [0, 0, 0] },
+      { ...asset.parts[1], partId: undefined, hierarchyPath: 'Workspace/Model/DuplicateBolt', name: 'DuplicateBolt', position: [5, 0, 0] },
     ],
   };
-  const noIdAssetB: Forge3DAsset = {
-    ...asset,
-    parts: [
-      { ...asset.parts[0], partId: undefined, name: 'DuplicateBolt', position: [0, 0, 0] },
-      { ...asset.parts[1], partId: undefined, name: 'DuplicateBolt', position: [10, 0, 0] }, // Segunda pieza movida
-    ],
-  };
-  const noIdDiff = computeIncrementalDiff(noIdAssetA, noIdAssetB);
-  assert.equal(noIdDiff.hasMissingPartIds, true, 'Debe señalar que faltan partIds explícitos');
-  assert.ok(noIdDiff.warnings.length > 0, 'Debe registrar advertencias por piezas sin partId');
-  assert.equal(noIdDiff.unchanged.length, 1, 'La primera pieza homónima sin cambios no debe perderse');
-  assert.equal(noIdDiff.modified.length, 1, 'La segunda pieza homónima modificada debe detectarse individualmente');
+  assert.throws(
+    () => computeIncrementalDiff(asset, ambiguousNoIdAsset),
+    /Colisión de identidad ambigua/,
+    'Dos piezas sin partId con el mismo nombre/ruta no deben usar #ocurrencia como clave sino exigir assignPersistentPartIds'
+  );
 
-  // Caso 11D: IDs explícitos duplicados deben lanzar un error claro en vez de sobrescribir en el Map
+  // Caso 11D: Al asignar partIds persistentes antes de comparar o reordenar, la identidad se mantiene estable aunque se invierta el orden del array
+  const stabilizedNoIdA = assignPersistentPartIds(ambiguousNoIdAsset);
+  assert.ok(stabilizedNoIdA.parts[0].partId);
+  assert.ok(stabilizedNoIdA.parts[1].partId);
+  assert.notEqual(
+    stabilizedNoIdA.parts[0].partId,
+    stabilizedNoIdA.parts[1].partId,
+    'assignPersistentPartIds debe generar partIds distintos para piezas homónimas con distinta geometría/posición'
+  );
+
+  // Si reordenamos las piezas antes de asignar IDs, cada pieza recibe exactamente el MISMO partId determinista basado en su contenido
+  const reorderedBeforeIdAssignment: Forge3DAsset = {
+    ...ambiguousNoIdAsset,
+    parts: [ambiguousNoIdAsset.parts[1], ambiguousNoIdAsset.parts[0]],
+  };
+  const stabilizedReordered = assignPersistentPartIds(reorderedBeforeIdAssignment);
+  assert.equal(
+    stabilizedReordered.parts[0].partId,
+    stabilizedNoIdA.parts[1].partId,
+    'El partId generado debe depender del contenido de la pieza y NUNCA de su índice de ocurrencia en la lista'
+  );
+  assert.equal(
+    stabilizedReordered.parts[1].partId,
+    stabilizedNoIdA.parts[0].partId,
+    'Al invertir el orden de la lista, las piezas conservan su propia identidad y jamás la intercambian'
+  );
+
+  // Comparar la versión original con la versión reordenada donde además se movió una sola pieza
+  const stabilizedModifiedReordered: Forge3DAsset = {
+    ...stabilizedNoIdA,
+    parts: [
+      { ...stabilizedNoIdA.parts[1], position: [10, 0, 0] }, // Segunda pieza movida y colocada primero
+      stabilizedNoIdA.parts[0], // Primera pieza intacta colocada segunda
+    ],
+  };
+  const stableDiff = computeIncrementalDiff(stabilizedNoIdA, stabilizedModifiedReordered);
+  assert.equal(stableDiff.unchanged.length, 1, 'La pieza no modificada se reconoce como intacta aunque haya cambiado de posición en el array');
+  assert.equal(stableDiff.modified.length, 1, 'La pieza modificada se detecta con su propio partId persistente');
+  assert.equal(stableDiff.modified[0].partId, stabilizedNoIdA.parts[1].partId);
+
+  // Caso 11E: IDs explícitos duplicados deben lanzar un error claro en vez de sobrescribir en el Map
   const dupExplicitIdAsset: Forge3DAsset = {
     ...asset,
     parts: [
@@ -551,3 +588,4 @@ test('11. computeIncrementalDiff: Detección quirúrgica de piezas añadidas, el
     /Colisión de identidad/
   );
 });
+

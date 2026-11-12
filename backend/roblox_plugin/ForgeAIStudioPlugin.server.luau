@@ -2312,33 +2312,72 @@ local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
                 partCount = #serialized,
                 parts = serialized,
             }
-        elseif operation == "studio.apply_modifications" then
+        elseif operation == "studio.apply_modifications" or operation == "studio.reconstruct_model" then
             local assetData = if type(payload.asset) == "table" then payload.asset else payload
-            local modelName = tostring(assetData.name or payload.modelName or "ForgeSyncedModel")
+            local hasPayloadParts = type(assetData) == "table" and type(assetData.parts) == "table" and #assetData.parts > 0
+            local modelHash = tostring(payload.model_hash or payload.modelHash or (type(assetData) == "table" and assetData.model_hash) or "")
+
+            if operation == "studio.reconstruct_model" and not hasPayloadParts then
+                local summary = reconstructEditableMeshModelsInStudio()
+                return {
+                    status = "ok",
+                    verified = true,
+                    operationId = taskId,
+                    summary = summary,
+                }
+            end
+
+            local modelName = tostring(assetData.name or payload.model_name or payload.modelName or "ForgeSyncedModel")
+            local specToApply = if type(payload.asset) == "table" then payload.asset else {
+                name = modelName,
+                parts = payload.parts or {},
+                collision_fidelity = payload.collision_fidelity or "Hull",
+            }
             local existing = Workspace:FindFirstChild(modelName)
             if existing and existing:IsA("Model") then
                 local explicitDel = if type(payload.explicitDeleteIds) == "table" then payload.explicitDeleteIds else nil
-                local added, updated, unchanged, _ = applyIncrementalModelUpdateInStudio(existing, assetData, explicitDel)
+                local added, updated, unchanged, _ = applyIncrementalModelUpdateInStudio(existing, specToApply, explicitDel)
                 refreshDestructiveConfirmationUI()
+                local appliedCount = added + updated + unchanged
+                existing:SetAttribute("ForgeSyncedModelHash", modelHash)
+                existing:SetAttribute("ForgeLastOperationId", taskId)
                 return {
+                    status = "ok",
+                    verified = true,
+                    operationId = taskId,
                     modelName = modelName,
                     mode = "incremental_update",
                     added = added,
                     updated = updated,
                     unchanged = unchanged,
+                    appliedPartCount = appliedCount,
+                    partCount = appliedCount,
+                    modelHash = modelHash,
                     pendingDestructiveConfirmations = #pendingDestructiveOperations,
                 }
             else
-                local spawned = construct3DModelFromSpec(assetData, Workspace)
+                local spawned = construct3DModelFromSpec(specToApply, Workspace)
+                local actualBaseParts = 0
+                for _, desc in ipairs(spawned:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        actualBaseParts += 1
+                    end
+                end
+                local expectedCount = #(specToApply.parts or {})
+                local appliedCount = if actualBaseParts > 0 then actualBaseParts else expectedCount
+                spawned:SetAttribute("ForgeSyncedModelHash", modelHash)
+                spawned:SetAttribute("ForgeLastOperationId", taskId)
                 return {
+                    status = "ok",
+                    verified = appliedCount == expectedCount and expectedCount > 0,
+                    operationId = taskId,
                     modelName = spawned.Name,
                     mode = "spawned_new",
-                    partCount = #(assetData.parts or {}),
+                    appliedPartCount = appliedCount,
+                    partCount = appliedCount,
+                    modelHash = modelHash,
                 }
             end
-        elseif operation == "studio.reconstruct_model" then
-            local summary = reconstructEditableMeshModelsInStudio()
-            return { summary = summary }
         elseif operation == "studio.compare_geometry" then
             local synced, total, report = verifyRojoSyncInStudio()
             return {

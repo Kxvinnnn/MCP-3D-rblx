@@ -182,3 +182,121 @@ test('6. validateRobloxGeometry: Estructuras geométricas incompletas (vértices
   assert.equal(report.hasIncompleteGeometry, true);
   assert.ok(report.errors.some((e) => e.includes('meshData vacío o insuficiente')));
 });
+
+test('7. validateRobloxGeometry: Validación equivalente de baseMeshData (índices fuera de rango, coordenadas no finitas y caras degeneradas)', () => {
+  // 7A. baseMeshData con índice inválido aunque meshData sea válido
+  const assetInvalidBaseIdx = createMockAsset();
+  assetInvalidBaseIdx.parts[0].baseMeshData = {
+    vertices: [
+      [0, 0, 0],
+      [1, 0, 0],
+      [0, 1, 0],
+    ],
+    faces: [[0, 1, 77]],
+  };
+  const reportBaseIdx = validateRobloxGeometry(assetInvalidBaseIdx);
+  assert.equal(reportBaseIdx.isValid, false, 'Un índice inválido en baseMeshData debe invalidar el asset');
+  assert.equal(reportBaseIdx.hasInvalidIndices, true);
+  assert.ok(reportBaseIdx.errors.some((e) => e.includes('baseMeshData') && e.includes('índice inválido')));
+
+  // 7B. baseMeshData con coordenada NaN
+  const assetNaNBase = createMockAsset();
+  assetNaNBase.parts[0].baseMeshData = {
+    vertices: [
+      [0, 0, 0],
+      [NaN, 0, 0],
+      [0, 1, 0],
+    ],
+    faces: [[0, 1, 2]],
+  };
+  const reportNaNBase = validateRobloxGeometry(assetNaNBase);
+  assert.equal(reportNaNBase.isValid, false, 'Coordenadas NaN en baseMeshData deben invalidar el asset');
+  assert.equal(reportNaNBase.hasNonFiniteCoordinates, true);
+  assert.ok(reportNaNBase.errors.some((e) => e.includes('baseMeshData') && e.includes('coordenadas no finitas')));
+
+  // 7C. baseMeshData completamente degenerado (todas las caras colineales)
+  const assetDegenerateBase = createMockAsset();
+  assetDegenerateBase.parts[0].baseMeshData = {
+    vertices: [
+      [0, 0, 0],
+      [1, 0, 0],
+      [2, 0, 0],
+    ],
+    faces: [[0, 1, 2]],
+  };
+  const reportDegenerateBase = validateRobloxGeometry(assetDegenerateBase);
+  assert.equal(reportDegenerateBase.isValid, false, 'baseMeshData sin ningún triángulo válido debe invalidar el asset');
+  assert.equal(reportDegenerateBase.hasDegenerateFaces, true);
+  assert.ok(reportDegenerateBase.errors.some((e) => e.includes('baseMeshData') && e.includes('degenerada')));
+});
+
+test('8. validateRobloxGeometry: Política explícita sobre modelos vacíos (no exportables por defecto vs contenedor vacío opcional)', () => {
+  const emptyAsset = createMockAsset('EmptyModel');
+  emptyAsset.parts = [];
+
+  // Por defecto un modelo sin piezas NO es exportable ni válido para sincronizar
+  const defaultReport = validateRobloxGeometry(emptyAsset);
+  assert.equal(defaultReport.isEmptyModel, true);
+  assert.equal(defaultReport.isValid, false, 'Un modelo sin piezas debe marcarse como inválido (isValid: false) por defecto');
+  assert.ok(defaultReport.errors.some((e) => e.includes('no contiene ninguna pieza')));
+
+  // Sólo si se indica explícitamente allowEmptyParts: true se permite como contenedor lógico
+  const containerReport = validateRobloxGeometry(emptyAsset, { allowEmptyParts: true });
+  assert.equal(containerReport.isEmptyModel, true);
+  assert.equal(containerReport.isValid, true);
+  assert.ok(containerReport.warnings.some((w) => w.includes('contenedor vacío')));
+});
+
+test('9. Tolerancias geométricas relativas a la escala: soporte de micro-escalas (0.001 studs) y macro-escalas (2000 studs)', () => {
+  // 9A. Micro-escala: polígono válido de 0.001 studs (cuya área al cuadrado es ~1e-12, menor que un umbral absoluto fijo 1e-8)
+  const microScale = 0.001;
+  const microVertices = [
+    [0, 0, 0],
+    [microScale, 0, 0],
+    [microScale, microScale, 0],
+    [0, microScale, 0],
+  ];
+  const microQuadFace = [0, 1, 2, 3];
+  const microTriResult = triangulatePolygonFace3D(microQuadFace, microVertices);
+  assert.equal(
+    microTriResult.valid,
+    true,
+    'Un quad bien formado a escala 0.001 studs debe ser válido con tolerancia relativa a la escala'
+  );
+  assert.equal(microTriResult.triangles.length, 2, 'Quad a micro-escala debe producir 2 triángulos');
+
+  const microAsset = createMockAsset('MicroAsset');
+  microAsset.parts[0].size = [0.001, 0.001, 0.001];
+  microAsset.parts[0].meshData = {
+    vertices: microVertices,
+    faces: [microQuadFace],
+  };
+  const microReport = validateRobloxGeometry(microAsset);
+  assert.equal(microReport.isValid, true);
+  assert.equal(microReport.totalTriangles, 2);
+
+  // 9B. Macro-escala: polígono válido de 2000 studs y rechazo de polígono degenerado a macro-escala
+  const macroScale = 2000;
+  const macroVertices = [
+    [0, 0, 0],
+    [macroScale, 0, 0],
+    [macroScale, macroScale, 0],
+    [0, macroScale, 0],
+  ];
+  const macroTriResult = triangulatePolygonFace3D([0, 1, 2, 3], macroVertices);
+  assert.equal(macroTriResult.valid, true);
+  assert.equal(macroTriResult.triangles.length, 2);
+
+  // Triángulo degenerado a macro-escala (base de 2000 studs con desviación transversal microscópica de 1e-6 studs -> colineal a esa escala)
+  const macroCollinearVertices = [
+    [0, 0, 0],
+    [1000, 1e-6, 0],
+    [2000, 0, 0],
+  ];
+  assert.equal(
+    countValidTrianglesInFace([0, 1, 2], macroCollinearVertices),
+    0,
+    'Un triángulo de 2000 studs de largo con desviación de 1e-6 studs es colineal a su escala y debe rechazarse'
+  );
+});
+

@@ -2,6 +2,7 @@ import { Forge3DAsset, MeshPart3DSpec } from './roblox3DEngine.ts';
 import {
   toCanonicalJsonValue,
   sha256Hex,
+  strictOrdinalCompare,
 } from './canonicalHash.ts';
 
 export type PartChangeType = 'added' | 'removed' | 'modified' | 'unchanged';
@@ -38,7 +39,7 @@ export interface IncrementalDiffReport {
 /**
  * Computes a hash for an individual part's geometry.
  */
-function partGeometryHash(p: MeshPart3DSpec): string {
+export function partGeometryHash(p: MeshPart3DSpec): string {
   return sha256Hex(
     toCanonicalJsonValue({
       shape: p.shape,
@@ -52,7 +53,7 @@ function partGeometryHash(p: MeshPart3DSpec): string {
 /**
  * Computes a hash for an individual part's appearance/material.
  */
-function partAppearanceHash(p: MeshPart3DSpec): string {
+export function partAppearanceHash(p: MeshPart3DSpec): string {
   return sha256Hex(
     toCanonicalJsonValue({
       color: p.color,
@@ -71,7 +72,7 @@ function partAppearanceHash(p: MeshPart3DSpec): string {
 /**
  * Computes a hash for an individual part's physical properties and transforms.
  */
-function partPropertiesHash(p: MeshPart3DSpec): string {
+export function partPropertiesHash(p: MeshPart3DSpec): string {
   return sha256Hex(
     toCanonicalJsonValue({
       position: p.position,
@@ -87,9 +88,97 @@ function partPropertiesHash(p: MeshPart3DSpec): string {
 }
 
 /**
- * Builds an indexed map of parts without ever silently overwriting entries.
+ * Generates and persists deterministic, order-independent `partId`s for parts in an asset
+ * before any version comparison or synchronization occurs.
+ * If two parts lack `partId` and have identical names, their initial spatial/geometric digest
+ * is incorporated into the generated `partId`, and any remaining identical clones receive a
+ * canonical sort-order suffix so the generated IDs are persisted on the part objects themselves.
+ */
+export function ensurePersistentPartIdsForParts(
+  parts: MeshPart3DSpec[],
+  assetName: string
+): MeshPart3DSpec[] {
+  if (!Array.isArray(parts) || parts.length === 0) return [];
+
+  const usedIds = new Set<string>();
+  for (const p of parts) {
+    if (p.partId && typeof p.partId === 'string' && p.partId.trim().length > 0) {
+      usedIds.add(p.partId.trim());
+    }
+  }
+
+  // Canonical sort of indices for parts missing partId so ID assignment is independent of input array order
+  const indicesMissingId: number[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (!p.partId || typeof p.partId !== 'string' || p.partId.trim().length === 0) {
+      indicesMissingId.push(i);
+    }
+  }
+
+  indicesMissingId.sort((idxA, idxB) => {
+    const canonA = toCanonicalJsonValue(parts[idxA]);
+    const canonB = toCanonicalJsonValue(parts[idxB]);
+    return strictOrdinalCompare(canonA, canonB);
+  });
+
+  const assignedByOriginalIndex = new Map<number, string>();
+  const prefixCounts = new Map<string, number>();
+
+  for (const origIdx of indicesMissingId) {
+    const p = parts[origIdx];
+    const safeName = (p.name || 'Part').replace(/[^a-zA-Z0-9_]/g, '_') || 'Part';
+    const contentDigest = sha256Hex(
+      toCanonicalJsonValue({
+        name: p.name,
+        hierarchyPath: p.hierarchyPath || `Workspace/${assetName}/${p.name}`,
+        parentId: p.parentId || '',
+        shape: p.shape,
+        size: p.size,
+        position: p.position,
+        rotation: p.rotation,
+      })
+    ).slice(0, 10);
+
+    const baseCandidate = `pid_${safeName}_${contentDigest}`;
+    const count = (prefixCounts.get(baseCandidate) || 0) + 1;
+    prefixCounts.set(baseCandidate, count);
+
+    let finalId = count === 1 ? baseCandidate : `${baseCandidate}_${count}`;
+    while (usedIds.has(finalId)) {
+      finalId = `${finalId}_x`;
+    }
+    usedIds.add(finalId);
+    assignedByOriginalIndex.set(origIdx, finalId);
+  }
+
+  return parts.map((p, idx) => {
+    const existingId = typeof p.partId === 'string' && p.partId.trim().length > 0 ? p.partId.trim() : '';
+    const partId = existingId || assignedByOriginalIndex.get(idx)!;
+    return {
+      ...p,
+      partId,
+      hierarchyPath: p.hierarchyPath || `Workspace/${assetName}/${p.name}`,
+    };
+  });
+}
+
+/**
+ * Ensures an entire Forge3DAsset has persistent `partId`s assigned to all parts.
+ */
+export function assignPersistentPartIds(asset: Forge3DAsset): Forge3DAsset {
+  return {
+    ...asset,
+    parts: ensurePersistentPartIdsForParts(asset.parts || [], asset.name),
+  };
+}
+
+/**
+ * Builds an indexed map of parts without ever silently overwriting entries or relying on array occurrence indices.
  * - Throws an explicit error if two parts share the same explicit `partId`.
- * - Disambiguates parts lacking `partId` using hierarchyPath + name + occurrence index.
+ * - For a part lacking `partId`, uses an order-independent composite key (`fallback::parentId::hierarchyPath::name`).
+ * - If two or more parts lack `partId` and collide on that composite key, throws an explicit error demanding
+ *   persistent `partId` assignment prior to diffing (never uses `#occurrence`, which would swap identities upon reordering).
  */
 function buildCollisionSafePartMap(
   parts: MeshPart3DSpec[],
@@ -98,7 +187,6 @@ function buildCollisionSafePartMap(
 ): { map: Map<string, MeshPart3DSpec>; hasMissingPartIds: boolean } {
   const map = new Map<string, MeshPart3DSpec>();
   const explicitIds = new Set<string>();
-  const fallbackCounts = new Map<string, number>();
   let hasMissingPartIds = false;
 
   for (let i = 0; i < parts.length; i++) {
@@ -115,21 +203,16 @@ function buildCollisionSafePartMap(
       map.set(explicitId, p);
     } else {
       hasMissingPartIds = true;
-      const baseFallbackKey = `fallback::${p.parentId || ''}::${p.hierarchyPath || ''}::${p.name || 'UnnamedPart'}`;
-      const occurrence = (fallbackCounts.get(baseFallbackKey) || 0) + 1;
-      fallbackCounts.set(baseFallbackKey, occurrence);
-
-      const uniqueKey = `${baseFallbackKey}#${occurrence}`;
-      if (occurrence > 1) {
-        warnings.push(
-          `Pieza sin partId estable en ${label} ('${p.name || 'UnnamedPart'}') desambiguada como ocurrencia #${occurrence}.`
-        );
-      } else {
-        warnings.push(
-          `Pieza '${p.name || 'UnnamedPart'}' en ${label} carece de partId estable; se usó clave compuesta '${uniqueKey}'.`
+      const fallbackKey = `fallback::${p.parentId || ''}::${p.hierarchyPath || ''}::${p.name || 'UnnamedPart'}`;
+      if (map.has(fallbackKey)) {
+        throw new Error(
+          `Colisión de identidad ambigua en ${label}: múltiples piezas sin partId comparten '${fallbackKey}'. Los identificadores persistentes (partId) deben generarse y persistirse antes de comparar versiones.`
         );
       }
-      map.set(uniqueKey, p);
+      warnings.push(
+        `Pieza '${p.name || 'UnnamedPart'}' en ${label} carece de partId explícito; se usó clave jerárquica '${fallbackKey}'.`
+      );
+      map.set(fallbackKey, p);
     }
   }
 
