@@ -4,8 +4,12 @@ import {
   sha256Hex,
   toCanonicalJsonValue,
   computeCanonicalAssetHash,
+  computeGeometryHash,
+  computeAppearanceHash,
+  computePropertiesHash,
   strictOrdinalCompare,
 } from '../src/utils/canonicalHash.ts';
+import { computeIncrementalDiff } from '../src/utils/incrementalSync.ts';
 import { Forge3DAsset } from '../src/utils/roblox3DEngine.ts';
 
 function createBaseTestAsset(name = 'CanonTestModel'): Forge3DAsset {
@@ -290,4 +294,153 @@ test('6. Sensibilidad exhaustiva: PBR, matrices de rotación, transformaciones s
   assert.equal(strictOrdinalCompare('abc', 'abc'), 0);
   assert.equal(strictOrdinalCompare('abc', 'abd'), -1);
   assert.equal(strictOrdinalCompare('abd', 'abc'), 1);
+});
+
+test('7. sha256Hex: Límites exactos de bloques SHA-256 (55, 56, 63, 64, 65 bytes y multi-bloque) vs crypto', async () => {
+  const crypto = await import('crypto');
+  const nodeSha256 = (s: string) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+
+  const lengths = [0, 1, 54, 55, 56, 57, 63, 64, 65, 127, 128, 129, 500, 1024];
+
+  for (const len of lengths) {
+    const testStr = 'A'.repeat(len);
+    const expected = nodeSha256(testStr);
+    const actual = sha256Hex(testStr);
+    assert.equal(
+      actual,
+      expected,
+      `sha256Hex debe coincidir exactamente con NIST/crypto para entrada de longitud ${len} bytes`
+    );
+  }
+
+  // Caracteres Unicode combinados
+  const combinedStr = 'e\u0301 vs \u00e9 (ñ, ü, 🚀🔥)';
+  assert.equal(sha256Hex(combinedStr), nodeSha256(combinedStr));
+});
+
+test('8. toCanonicalJsonValue: Rechazo estricto de tipos no serializables y referencias circulares', () => {
+  // 8A. BigInt debe lanzar TypeError
+  assert.throws(
+    () => toCanonicalJsonValue({ val: BigInt(12345) }),
+    /BigInt values cannot be serialized/
+  );
+
+  // 8B. Function debe lanzar TypeError
+  assert.throws(
+    () => toCanonicalJsonValue({ fn: () => true }),
+    /Function values cannot be serialized/
+  );
+
+  // 8C. Symbol debe lanzar TypeError
+  assert.throws(
+    () => toCanonicalJsonValue({ sym: Symbol('forge') }),
+    /Symbol values cannot be serialized/
+  );
+
+  // 8D. Referencia circular debe lanzar TypeError descriptivo
+  const circularObj: any = { name: 'PartA' };
+  circularObj.self = circularObj;
+  assert.throws(
+    () => toCanonicalJsonValue(circularObj),
+    /Circular reference detected/
+  );
+});
+
+test('9. toCanonicalJsonValue: Normalización semántica de Date, Map, Set, TypedArray y números no finitos', () => {
+  // 9A. Date normalizado a ISO string
+  const dateObj = { time: new Date('2026-11-12T00:00:00.000Z') };
+  assert.equal(toCanonicalJsonValue(dateObj), '{"time":"2026-11-12T00:00:00.000Z"}');
+
+  // 9B. Map normalizado ordenando claves
+  const map = new Map<string, any>([
+    ['b', 2],
+    ['a', 1],
+  ]);
+  assert.equal(toCanonicalJsonValue(map), '{"a":1,"b":2}');
+
+  // 9C. Set normalizado a array ordenado
+  const set = new Set(['x', 'y']);
+  assert.equal(toCanonicalJsonValue(set), '["x","y"]');
+
+  // 9D. TypedArray normalizado
+  const typedArr = new Float32Array([1.5, 2.5]);
+  assert.equal(toCanonicalJsonValue(typedArr), '[1.5,2.5]');
+
+  // 9E. NaN e Infinity normalizados a null
+  const nonFinite = { nanVal: NaN, infVal: Infinity, negInfVal: -Infinity };
+  assert.equal(toCanonicalJsonValue(nonFinite), '{"infVal":null,"nanVal":null,"negInfVal":null}');
+});
+
+test('10. Granular sub-hashes: geometryHash, appearanceHash y propertiesHash diferencian tipos de cambios', () => {
+  const asset = createBaseTestAsset();
+
+  const baseGeo = computeGeometryHash(asset);
+  const baseApp = computeAppearanceHash(asset);
+  const baseProp = computePropertiesHash(asset);
+
+  // Cambio 1: Solo color / apariencia
+  const appModified: Forge3DAsset = JSON.parse(JSON.stringify(asset));
+  appModified.parts[0].color = [0, 255, 0];
+  assert.equal(computeGeometryHash(appModified), baseGeo, 'Cambio de color no debe alterar geometryHash');
+  assert.equal(computePropertiesHash(appModified), baseProp, 'Cambio de color no debe alterar propertiesHash');
+  assert.notEqual(computeAppearanceHash(appModified), baseApp, 'Cambio de color DEBE alterar appearanceHash');
+
+  // Cambio 2: Solo posición / propiedades físicas
+  const propModified: Forge3DAsset = JSON.parse(JSON.stringify(asset));
+  propModified.parts[0].position = [10, 20, 30];
+  assert.equal(computeGeometryHash(propModified), baseGeo, 'Cambio de posición no debe alterar geometryHash');
+  assert.equal(computeAppearanceHash(propModified), baseApp, 'Cambio de posición no debe alterar appearanceHash');
+  assert.notEqual(computePropertiesHash(propModified), baseProp, 'Cambio de posición DEBE alterar propertiesHash');
+
+  // Cambio 3: Solo tamaño / geometría
+  const geoModified: Forge3DAsset = JSON.parse(JSON.stringify(asset));
+  geoModified.parts[0].size = [10, 10, 10];
+  assert.notEqual(computeGeometryHash(geoModified), baseGeo, 'Cambio de tamaño DEBE alterar geometryHash');
+  assert.equal(computeAppearanceHash(geoModified), baseApp, 'Cambio de tamaño no debe alterar appearanceHash');
+  assert.equal(computePropertiesHash(geoModified), baseProp, 'Cambio de tamaño no debe alterar propertiesHash');
+});
+
+test('11. computeIncrementalDiff: Detección quirúrgica de piezas añadidas, eliminadas, modificadas e inalteradas', () => {
+  const asset = createBaseTestAsset();
+
+  // Caso: Modificar 1 pieza, eliminar 1 y añadir 1
+  const updated: Forge3DAsset = {
+    ...asset,
+    parts: [
+      {
+        ...asset.parts[0],
+        color: [0, 0, 0], // Modified Head
+      },
+      // Torso removed
+      {
+        partId: 'part_arm_new',
+        name: 'RightArm',
+        shape: 'Block',
+        size: [1, 3, 1],
+        position: [3, 2, 0],
+        rotation: [0, 0, 0],
+        color: [255, 200, 150],
+        material: 'SmoothPlastic',
+        roughness: 0.5,
+        metalness: 0,
+        transparency: 0,
+        canCollide: true,
+        anchored: true,
+        collisionFidelity: 'Box',
+      },
+    ],
+  };
+
+  const diff = computeIncrementalDiff(asset, updated);
+
+  assert.equal(diff.added.length, 1, 'Debe detectar 1 pieza añadida');
+  assert.equal(diff.added[0].partId, 'part_arm_new');
+
+  assert.equal(diff.removed.length, 1, 'Debe detectar 1 pieza eliminada');
+  assert.equal(diff.removed[0].partId, 'part_torso');
+
+  assert.equal(diff.modified.length, 1, 'Debe detectar 1 pieza modificada');
+  assert.equal(diff.modified[0].partId, 'part_head');
+  assert.equal(diff.modified[0].appearanceChanged, true);
+  assert.equal(diff.modified[0].geometryChanged, false);
 });

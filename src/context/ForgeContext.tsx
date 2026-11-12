@@ -11,7 +11,8 @@ import {
   MeshPart3DSpec,
   OperationHistoryEntry,
 } from '../utils/roblox3DEngine.ts';
-import { computeCanonicalAssetHash } from '../utils/canonicalHash.ts';
+import { computeCanonicalAssetHash, getAssetIdentityKey } from '../utils/canonicalHash.ts';
+import { validateRobloxGeometry } from '../utils/robloxGeometryValidator.ts';
 
 export type UIMode = 'simple' | 'advanced';
 
@@ -69,7 +70,9 @@ export type SyncOperationState =
   | 'applied_partially'
   | 'rejected'
   | 'error'
-  | 'timeout';
+  | 'timeout'
+  | 'conflict'
+  | 'cancelled';
 
 export interface SyncOperationStatus {
   state: SyncOperationState;
@@ -125,7 +128,7 @@ function computeTriangleArea3D(v0: number[], v1: number[], v2: number[]): number
 
 /**
  * Validates face vertex index bounds, cleans duplicate vertices, and computes
- * non-degenerate triangles for polygons.
+ * non-degenerate 3D triangles for convex and concave polygons via Ear Clipping.
  */
 function countValidTrianglesInFace(face: number[], vertices: number[][]): number {
   if (!Array.isArray(face) || face.length < 3) return 0;
@@ -150,17 +153,121 @@ function countValidTrianglesInFace(face: number[], vertices: number[][]): number
 
   if (cleaned.length < 3) return 0;
 
-  let validTris = 0;
-  const v0 = vertices[cleaned[0]];
+  if (cleaned.length === 3) {
+    const v0 = vertices[cleaned[0]];
+    const v1 = vertices[cleaned[1]];
+    const v2 = vertices[cleaned[2]];
+    return computeTriangleArea3D(v0, v1, v2) > 1e-7 ? 1 : 0;
+  }
 
-  for (let i = 1; i < cleaned.length - 1; i++) {
-    const idx1 = cleaned[i];
-    const idx2 = cleaned[i + 1];
-    if (cleaned[0] !== idx1 && cleaned[0] !== idx2 && idx1 !== idx2) {
-      const v1 = vertices[idx1];
-      const v2 = vertices[idx2];
-      const area = computeTriangleArea3D(v0, v1, v2);
-      if (area > 1e-7) {
+  // Newell's method for normal of 3D polygon
+  let nx = 0, ny = 0, nz = 0;
+  const n = cleaned.length;
+  for (let i = 0; i < n; i++) {
+    const curr = vertices[cleaned[i]];
+    const next = vertices[cleaned[(i + 1) % n]];
+    if (!curr || !next) continue;
+    nx += (curr[1] - next[1]) * (curr[2] + next[2]);
+    ny += (curr[2] - next[2]) * (curr[0] + next[0]);
+    nz += (curr[0] - next[0]) * (curr[1] + next[1]);
+  }
+
+  const normLength = Math.sqrt(nx * nx + ny * ny + nz * nz);
+  if (normLength < 1e-8) {
+    return 0; // Collinear / degenerate face
+  }
+
+  // Project to 2D
+  const absX = Math.abs(nx);
+  const absY = Math.abs(ny);
+  const absZ = Math.abs(nz);
+
+  const project2D = (v: number[]): [number, number] => {
+    if (absX >= absY && absX >= absZ) return [v[1], v[2]];
+    if (absY >= absX && absY >= absZ) return [v[0], v[2]];
+    return [v[0], v[1]];
+  };
+
+  const poly2D: [number, number][] = cleaned.map((idx) => project2D(vertices[idx]));
+
+  const area2D = (p0: [number, number], p1: [number, number], p2: [number, number]) => {
+    return (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+  };
+
+  let totalArea2D = 0;
+  for (let i = 0; i < poly2D.length; i++) {
+    const p0 = poly2D[i];
+    const p1 = poly2D[(i + 1) % poly2D.length];
+    totalArea2D += p0[0] * p1[1] - p1[0] * p0[1];
+  }
+  const ccw = totalArea2D >= 0;
+
+  const isPointInTri2D = (pt: [number, number], a: [number, number], b: [number, number], c: [number, number]) => {
+    const cp1 = (b[0] - a[0]) * (pt[1] - a[1]) - (b[1] - a[1]) * (pt[0] - a[0]);
+    const cp2 = (c[0] - b[0]) * (pt[1] - b[1]) - (c[1] - b[1]) * (pt[0] - b[0]);
+    const cp3 = (a[0] - c[0]) * (pt[1] - c[1]) - (a[1] - c[1]) * (pt[0] - c[0]);
+
+    if (ccw) {
+      return cp1 >= -1e-9 && cp2 >= -1e-9 && cp3 >= -1e-9;
+    } else {
+      return cp1 <= 1e-9 && cp2 <= 1e-9 && cp3 <= 1e-9;
+    }
+  };
+
+  let activeIndices = cleaned.map((_, i) => i);
+  let validTris = 0;
+  let guardCounter = activeIndices.length * 2;
+
+  while (activeIndices.length >= 3 && guardCounter > 0) {
+    guardCounter--;
+    let earFound = false;
+
+    for (let i = 0; i < activeIndices.length; i++) {
+      const prevIdx = activeIndices[(i - 1 + activeIndices.length) % activeIndices.length];
+      const currIdx = activeIndices[i];
+      const nextIdx = activeIndices[(i + 1) % activeIndices.length];
+
+      const pPrev = poly2D[prevIdx];
+      const pCurr = poly2D[currIdx];
+      const pNext = poly2D[nextIdx];
+
+      const triCross = area2D(pPrev, pCurr, pNext);
+      const isConvex = ccw ? triCross > 1e-9 : triCross < -1e-9;
+
+      if (!isConvex) continue;
+
+      let containsOtherPt = false;
+      for (let j = 0; j < activeIndices.length; j++) {
+        if (j === i || j === (i - 1 + activeIndices.length) % activeIndices.length || j === (i + 1) % activeIndices.length) continue;
+        const testPt = poly2D[activeIndices[j]];
+        if (isPointInTri2D(testPt, pPrev, pCurr, pNext)) {
+          containsOtherPt = true;
+          break;
+        }
+      }
+
+      if (!containsOtherPt) {
+        const v3d0 = vertices[cleaned[prevIdx]];
+        const v3d1 = vertices[cleaned[currIdx]];
+        const v3d2 = vertices[cleaned[nextIdx]];
+        if (computeTriangleArea3D(v3d0, v3d1, v3d2) > 1e-7) {
+          validTris++;
+        }
+        activeIndices.splice(i, 1);
+        earFound = true;
+        break;
+      }
+    }
+
+    if (!earFound) break;
+  }
+
+  if (activeIndices.length >= 3 && guardCounter === 0) {
+    for (let i = 1; i < activeIndices.length - 1; i++) {
+      const v0 = vertices[cleaned[activeIndices[0]]];
+      const v1 = vertices[cleaned[activeIndices[i]]];
+      const v2 = vertices[cleaned[activeIndices[i + 1]]];
+      if (computeTriangleArea3D(v0, v1, v2) > 1e-7) {
         validTris++;
       }
     }
@@ -360,6 +467,16 @@ interface ForgeContextType {
   confirmSwitchSaveAndProceed: () => Promise<void>;
   cancelSwitch: () => void;
 
+  // Local Draft Recovery
+  hasRecoverableDraft: boolean;
+  draftTimestamp: number | null;
+  recoverDraft: () => void;
+  discardDraft: () => void;
+
+  // Conflict Resolution
+  activeConflict: { localAsset: Forge3DAsset; remoteAsset: Forge3DAsset } | null;
+  resolveConflict: (resolution: 'keep_local' | 'accept_remote') => void;
+
   // System & Bridge Status
   bridgeStatus: BridgeHealthStatus;
   refreshBridgeStatus: () => Promise<void>;
@@ -437,6 +554,29 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const savedAssetHashRef = useRef<string>('');
   const savedAssetSnapshotRef = useRef<Forge3DAsset | null>(null);
   const [pendingChanges, setPendingChanges] = useState<boolean>(false);
+
+  // Local Draft Recovery state
+  const [hasRecoverableDraft, setHasRecoverableDraft] = useState<boolean>(false);
+  const [draftTimestamp, setDraftTimestamp] = useState<number | null>(null);
+
+  // Active Conflict state
+  const [activeConflict, setActiveConflict] = useState<{ localAsset: Forge3DAsset; remoteAsset: Forge3DAsset } | null>(null);
+
+  // Check for recoverable draft on mount
+  useEffect(() => {
+    try {
+      const rawDraft = localStorage.getItem('forge_active_draft');
+      if (rawDraft) {
+        const parsed = JSON.parse(rawDraft);
+        if (parsed && parsed.asset && Array.isArray(parsed.asset.parts)) {
+          setHasRecoverableDraft(true);
+          setDraftTimestamp(parsed.timestamp || Date.now());
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }, []);
 
   // Unsaved changes confirmation modal state
   const [showUnsavedModal, setShowUnsavedModal] = useState<boolean>(false);
@@ -523,7 +663,13 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
    */
   const setActiveAsset = useCallback(
     (newAsset: Forge3DAsset | null, force = false) => {
-      if (!force && pendingChanges && activeAsset && newAsset && activeAsset.name !== newAsset.name) {
+      if (
+        !force &&
+        pendingChanges &&
+        activeAsset &&
+        newAsset &&
+        getAssetIdentityKey(activeAsset) !== getAssetIdentityKey(newAsset)
+      ) {
         setPendingSwitchTarget(newAsset);
         setShowUnsavedModal(true);
         return;
@@ -558,6 +704,12 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setPendingChanges(false);
     }
 
+    try {
+      localStorage.removeItem('forge_active_draft');
+    } catch {}
+    setHasRecoverableDraft(false);
+    setDraftTimestamp(null);
+
     if (pendingSwitchTab) {
       setActiveTab(pendingSwitchTab);
       setPendingSwitchTab(null);
@@ -569,6 +721,75 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setPendingSwitchTarget(null);
     setPendingSwitchTab(null);
   }, []);
+
+  const recoverDraft = useCallback(() => {
+    try {
+      const rawDraft = localStorage.getItem('forge_active_draft');
+      if (rawDraft) {
+        const parsed = JSON.parse(rawDraft);
+        if (parsed && parsed.asset) {
+          applyActiveAssetDirectly(parsed.asset);
+          setPendingChanges(true);
+          setNotification({
+            type: 'info',
+            message: 'Borrador no guardado recuperado con éxito.',
+          });
+        }
+      }
+    } catch {
+      setNotification({
+        type: 'error',
+        message: 'No se pudo recuperar el borrador local.',
+      });
+    }
+    setHasRecoverableDraft(false);
+  }, [applyActiveAssetDirectly]);
+
+  const discardDraft = useCallback(() => {
+    try {
+      localStorage.removeItem('forge_active_draft');
+    } catch {}
+    setHasRecoverableDraft(false);
+    setDraftTimestamp(null);
+    setNotification({
+      type: 'info',
+      message: 'Borrador descartado.',
+    });
+  }, []);
+
+  const resolveConflict = useCallback(
+    (resolution: 'keep_local' | 'accept_remote') => {
+      if (!activeConflict) return;
+      if (resolution === 'keep_local') {
+        setActiveConflict(null);
+        setCurrentSyncStatus({
+          state: 'idle',
+          operation: 'pull',
+          message: 'Conflicto resuelto: Se mantuvieron las modificaciones locales.',
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        setNotification({
+          type: 'info',
+          message: 'Se conservó la versión local del modelo.',
+        });
+      } else {
+        const remote = activeConflict.remoteAsset;
+        setActiveConflict(null);
+        applyActiveAssetDirectly(remote);
+        setCurrentSyncStatus({
+          state: 'applied_successfully',
+          operation: 'pull',
+          message: 'Conflicto resuelto: Se adoptó la versión de Roblox Studio.',
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        setNotification({
+          type: 'success',
+          message: 'Se cargó la versión de Roblox Studio.',
+        });
+      }
+    },
+    [activeConflict, applyActiveAssetDirectly]
+  );
 
   // Fetch asset library from backend
   const fetchAssetLibrary = useCallback(async () => {
@@ -731,7 +952,26 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       // Check current hash against saved baseline
       const currentHash = computeAssetContentHash(finalAsset);
-      setPendingChanges(currentHash !== savedAssetHashRef.current);
+      const isModified = currentHash !== savedAssetHashRef.current;
+      setPendingChanges(isModified);
+
+      // Persist draft to localStorage for crash/reload recovery
+      if (isModified) {
+        try {
+          localStorage.setItem(
+            'forge_active_draft',
+            JSON.stringify({
+              asset: finalAsset,
+              timestamp: Date.now(),
+              baseHash: savedAssetHashRef.current,
+            })
+          );
+          setHasRecoverableDraft(true);
+          setDraftTimestamp(Date.now());
+        } catch {
+          // Ignore storage quota errors
+        }
+      }
 
       // Preserve selection using stable identifiers
       if (selectedPart) {
@@ -785,6 +1025,18 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const saveAssetToDisk = useCallback(
     async (saveToRojo = true): Promise<boolean> => {
       if (!activeAsset) return false;
+
+      // Validate geometry before initiating save
+      const geoValidation = validateRobloxGeometry(activeAsset);
+      if (!geoValidation.isValid) {
+        const errorMsg = `Validación geométrica falló: ${geoValidation.errors.join('; ')}`;
+        setNotification({
+          type: 'error',
+          message: errorMsg,
+        });
+        return false;
+      }
+
       try {
         const res = await fetch('/api/v1/assets/rebuild-luau', {
           method: 'POST',
@@ -799,6 +1051,11 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (res.ok) {
           const data = await res.json();
           if (data.asset) {
+            // Check returned asset completeness
+            if (activeAsset.parts.length > 0 && (!Array.isArray(data.asset.parts) || data.asset.parts.length === 0)) {
+              throw new Error('El servidor devolvió un modelo inconsistente o sin piezas.');
+            }
+
             const savedAsset: Forge3DAsset = {
               ...data.asset,
               parts: ensureStablePartIds(data.asset.parts || [], data.asset.name),
@@ -809,6 +1066,13 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(savedAsset));
             savedAssetHashRef.current = computeAssetContentHash(savedAsset);
             setPendingChanges(false);
+
+            // Clean draft on confirmed persistence
+            try {
+              localStorage.removeItem('forge_active_draft');
+            } catch {}
+            setHasRecoverableDraft(false);
+            setDraftTimestamp(null);
 
             fetchAssetLibrary();
             setNotification({
@@ -1087,6 +1351,40 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           parts: ensureStablePartIds(data.asset.parts || [], data.asset.name),
         };
 
+        const remoteHash = computeCanonicalAssetHash(stabilized);
+        const localHash = computeCanonicalAssetHash(activeAsset);
+        const baselineHash = savedAssetHashRef.current;
+
+        // Conflict check: local has pending unpersisted changes AND remote differs from baseline AND remote differs from local
+        if (pendingChanges && baselineHash && remoteHash !== baselineHash && remoteHash !== localHash) {
+          setActiveConflict({
+            localAsset: activeAsset!,
+            remoteAsset: stabilized,
+          });
+
+          const conflictMsg = `Conflicto detectado: Modificaciones locales sin guardar chocan con cambios de Roblox Studio.`;
+          setCurrentSyncStatus({
+            state: 'conflict',
+            operation: 'pull',
+            message: conflictMsg,
+            details: `Local: ${activeAsset?.parts.length || 0} piezas. Remoto: ${stabilized.parts.length} piezas.`,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+
+          const conflictItem: SyncHistoryItem = {
+            id: `sync-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'pull',
+            modelName: stabilized.name,
+            partCount: stabilized.parts.length,
+            status: 'conflict',
+            details: conflictMsg,
+          };
+          setSyncHistory((prev) => [conflictItem, ...prev].slice(0, 20));
+          setNotification({ type: 'warning', message: conflictMsg });
+          return { success: false, message: conflictMsg, asset: stabilized };
+        }
+
         applyAssetChange(stabilized, 'Sincronizado desde Roblox Studio', 'incremental_sync');
         const msg = `Se recibieron ${stabilized.parts.length} piezas desde Roblox Studio con éxito.`;
 
@@ -1134,7 +1432,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setNotification({ type: 'error', message: errDetail });
       return { success: false, message: errDetail };
     }
-  }, [activeAsset, applyAssetChange]);
+  }, [activeAsset, pendingChanges, applyAssetChange]);
 
   return (
     <ForgeContext.Provider
@@ -1167,6 +1465,12 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         confirmSwitchDiscard,
         confirmSwitchSaveAndProceed,
         cancelSwitch,
+        hasRecoverableDraft,
+        draftTimestamp,
+        recoverDraft,
+        discardDraft,
+        activeConflict,
+        resolveConflict,
         bridgeStatus,
         refreshBridgeStatus,
         currentSyncStatus,

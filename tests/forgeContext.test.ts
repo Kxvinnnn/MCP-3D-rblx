@@ -434,3 +434,176 @@ test('4. EJECUCIÓN REAL DE REACT FORGECONTEXT: prueba de estado, confirmSwitchD
     root.unmount();
   });
 });
+
+test('5. Detección de identidad de recursos: Dos modelos con el mismo nombre pero distintas rutas/identidades no se confunden', async () => {
+  const { getAssetIdentityKey } = await import('../src/utils/canonicalHash.ts');
+
+  // Modelo A: 'Turret' en src/shared/weapons
+  const assetA = createSampleAsset('Turret');
+  assetA.rojo_target_folder = 'src/shared/weapons';
+  assetA.file_name = 'TurretWeapons.luau';
+
+  // Modelo B: 'Turret' en src/shared/decorations
+  const assetB = createSampleAsset('Turret');
+  assetB.rojo_target_folder = 'src/shared/decorations';
+  assetB.file_name = 'TurretDeco.luau';
+
+  const keyA = getAssetIdentityKey(assetA);
+  const keyB = getAssetIdentityKey(assetB);
+
+  assert.notEqual(
+    keyA,
+    keyB,
+    'Modelos con el mismo nombre en diferentes carpetas/archivos deben tener claves de identidad distintas'
+  );
+
+  let contextValue: any = null;
+  function TestInspector() {
+    contextValue = useForge();
+    return React.createElement('div', null, contextValue.activeAsset?.name);
+  }
+
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(React.createElement(ForgeProvider, null, React.createElement(TestInspector)));
+  });
+
+  // Cargar asset A y modificarlo
+  await act(async () => {
+    contextValue.setActiveAsset(assetA);
+  });
+
+  await act(async () => {
+    contextValue.applyAssetChange(
+      { ...contextValue.activeAsset, parts: [{ ...contextValue.activeAsset.parts[0], color: [0, 255, 0] }] },
+      'Modificar color en asset A'
+    );
+  });
+
+  assert.equal(contextValue.pendingChanges, true);
+
+  // Intentar cambiar a asset B (mismo nombre 'Turret')
+  await act(async () => {
+    contextValue.setActiveAsset(assetB);
+  });
+
+  assert.equal(
+    contextValue.showUnsavedModal,
+    true,
+    'Cambiar a un modelo con el mismo nombre pero diferente identidad debe activar el modal de confirmación sin perder cambios'
+  );
+
+  await act(async () => {
+    root.unmount();
+  });
+});
+
+test('6. Recuperación y descarte de borradores locales (draft recovery)', async () => {
+  let contextValue: any = null;
+  function DraftInspector() {
+    contextValue = useForge();
+    return React.createElement('div', null, contextValue.activeAsset?.name);
+  }
+
+  // Simular borrador guardado en localStorage
+  const draftAsset = createSampleAsset('RecoveredDraft');
+  draftAsset.parts[0].color = [99, 88, 77];
+  domWindow.localStorage.setItem(
+    'forge_active_draft',
+    JSON.stringify({ asset: draftAsset, timestamp: Date.now(), baseHash: 'fake_hash' })
+  );
+
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(React.createElement(ForgeProvider, null, React.createElement(DraftInspector)));
+  });
+
+  assert.equal(contextValue.hasRecoverableDraft, true, 'Debe detectar el borrador en localStorage');
+
+  // Ejecutar recuperación
+  await act(async () => {
+    contextValue.recoverDraft();
+  });
+
+  assert.equal(contextValue.activeAsset.name, 'RecoveredDraft');
+  assert.deepEqual(contextValue.activeAsset.parts[0].color, [99, 88, 77]);
+  assert.equal(contextValue.pendingChanges, true, 'El borrador recuperado debe marcarse con cambios pendientes');
+
+  await act(async () => {
+    root.unmount();
+  });
+});
+
+test('7. Detección y resolución de conflictos local vs remoto en pullFromStudio', async () => {
+  let contextValue: any = null;
+  function ConflictInspector() {
+    contextValue = useForge();
+    return React.createElement('div', null, contextValue.activeAsset?.name);
+  }
+
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(React.createElement(ForgeProvider, null, React.createElement(ConflictInspector)));
+  });
+
+  const baseAsset = createSampleAsset('ConflictModel');
+  await act(async () => {
+    contextValue.setActiveAsset(baseAsset);
+  });
+
+  // 1. Modificación local (cambia color a verde)
+  await act(async () => {
+    contextValue.applyAssetChange(
+      { ...contextValue.activeAsset, parts: [{ ...contextValue.activeAsset.parts[0], color: [0, 255, 0] }] },
+      'Edición local'
+    );
+  });
+  assert.equal(contextValue.pendingChanges, true);
+
+  // 2. Simular respuesta de Studio donde el modelo remoto cambió en Studio (color azul)
+  const remoteAsset = JSON.parse(JSON.stringify(baseAsset));
+  remoteAsset.parts[0].color = [0, 0, 255];
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (url.includes('/api/v1/assets/pull-from-rojo')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, asset: remoteAsset }),
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  // 3. Ejecutar pull: Debe detectar conflicto en lugar de sobrescribir silenciosamente
+  await act(async () => {
+    const result = await contextValue.pullFromStudio();
+    assert.equal(result.success, false);
+  });
+
+  assert.equal(contextValue.currentSyncStatus.state, 'conflict', 'El estado de sincronización debe ser conflict');
+  assert.ok(contextValue.activeConflict, 'activeConflict debe estar poblado con ambas versiones');
+  assert.deepEqual(contextValue.activeConflict.localAsset.parts[0].color, [0, 255, 0]);
+  assert.deepEqual(contextValue.activeConflict.remoteAsset.parts[0].color, [0, 0, 255]);
+
+  // 4. Resolver conflicto eligiendo versión local
+  await act(async () => {
+    contextValue.resolveConflict('keep_local');
+  });
+
+  assert.equal(contextValue.activeConflict, null, 'Conflicto resuelto');
+  assert.deepEqual(contextValue.activeAsset.parts[0].color, [0, 255, 0], 'Conserva versión local');
+
+  globalThis.fetch = origFetch;
+
+  await act(async () => {
+    root.unmount();
+  });
+});

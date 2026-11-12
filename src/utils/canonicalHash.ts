@@ -137,72 +137,122 @@ export function strictOrdinalCompare(a: string, b: string): number {
 }
 
 /**
+ * Computes a stable persistent key for an asset to differentiate models with identical names.
+ */
+export function getAssetIdentityKey(asset: Forge3DAsset | null | undefined): string {
+  if (!asset) return '';
+  if (asset.id && typeof asset.id === 'string' && asset.id.trim()) return asset.id;
+  if ((asset as any).asset_id && typeof (asset as any).asset_id === 'string') return (asset as any).asset_id;
+  const targetFolder = asset.rojo_target_folder || '';
+  const fileName = asset.file_name || '';
+  return `asset_${asset.name}_${targetFolder}_${fileName}`;
+}
+
+/**
  * Recursively converts a JavaScript value into a canonical, deterministic JSON string.
- * Rules:
- * - Object keys are sorted using strict ordinal comparison.
- * - Root-level volatile keys (created_at, updated_at, saved_path, etc.) are excluded ONLY at the root object level.
- * - Internal keys starting with '_' are excluded at all levels.
- * - Non-finite numbers (NaN, Infinity, -Infinity) are normalized to null.
- * - Undefined values in object properties are normalized to null.
- * - Root 'parts' array is sorted deterministically using ordinal primary keys and canonical tie-breaking.
+ * Rejects circular references, BigInt, Function, and Symbol explicitly with descriptive errors.
  */
 export function toCanonicalJsonValue(
   val: any,
   isRootPartsArray = false,
-  isRootObject = false
+  isRootObject = false,
+  seen: WeakSet<object> = new WeakSet()
 ): string {
   if (val === null || val === undefined) {
     return 'null';
   }
 
-  if (typeof val === 'number') {
+  const valType = typeof val;
+
+  if (valType === 'bigint') {
+    throw new TypeError('BigInt values cannot be serialized in canonical asset hash');
+  }
+
+  if (valType === 'function') {
+    throw new TypeError('Function values cannot be serialized in canonical asset hash');
+  }
+
+  if (valType === 'symbol') {
+    throw new TypeError('Symbol values cannot be serialized in canonical asset hash');
+  }
+
+  if (valType === 'number') {
     if (!Number.isFinite(val)) {
-      return 'null';
+      return 'null'; // Normalize NaN, Infinity, -Infinity to null
     }
     return JSON.stringify(val);
   }
 
-  if (typeof val === 'boolean') {
+  if (valType === 'boolean') {
     return val ? 'true' : 'false';
   }
 
-  if (typeof val === 'string') {
+  if (valType === 'string') {
     return JSON.stringify(val);
   }
 
-  if (Array.isArray(val)) {
-    let items = val;
-    if (isRootPartsArray) {
-      // Sort parts array deterministically using ordinal key comparison and canonical tie-breaking
-      items = [...val].sort((a, b) => {
-        const keyA = `${a?.partId || ''}\0${a?.hierarchyPath || ''}\0${a?.name || ''}`;
-        const keyB = `${b?.partId || ''}\0${b?.hierarchyPath || ''}\0${b?.name || ''}`;
-        const comp = strictOrdinalCompare(keyA, keyB);
-        if (comp !== 0) return comp;
-        // Deterministic tie-break using full canonical representation of the part
-        const canonA = toCanonicalJsonValue(a, false, false);
-        const canonB = toCanonicalJsonValue(b, false, false);
-        return strictOrdinalCompare(canonA, canonB);
-      });
-    }
-    return '[' + items.map((item) => toCanonicalJsonValue(item, false, false)).join(',') + ']';
+  if (val instanceof Date) {
+    return JSON.stringify(val.toISOString());
   }
 
-  if (typeof val === 'object') {
-    const sortedKeys = Object.keys(val)
-      .filter((k) => {
-        if (k.startsWith('_')) return false;
-        if (isRootObject && ROOT_EXCLUDED_CANONICAL_KEYS.has(k)) return false;
-        return true;
-      })
-      .sort(strictOrdinalCompare);
+  if (val instanceof Map) {
+    const obj: Record<string, any> = {};
+    for (const [k, v] of val.entries()) {
+      obj[String(k)] = v;
+    }
+    return toCanonicalJsonValue(obj, false, false, seen);
+  }
 
-    const pairs = sortedKeys.map((k) => {
-      const isPartsKey = isRootObject && k === 'parts' && Array.isArray(val[k]);
-      return JSON.stringify(k) + ':' + toCanonicalJsonValue(val[k], isPartsKey, false);
-    });
+  if (val instanceof Set) {
+    const arr = Array.from(val);
+    return toCanonicalJsonValue(arr, false, false, seen);
+  }
 
-    return '{' + pairs.join(',') + '}';
+  if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) {
+    const arr = Array.from(val as any);
+    return toCanonicalJsonValue(arr, false, false, seen);
+  }
+
+  if (valType === 'object') {
+    if (seen.has(val)) {
+      throw new TypeError('Circular reference detected in asset structure during canonical serialization');
+    }
+    seen.add(val);
+
+    try {
+      if (Array.isArray(val)) {
+        let items = val;
+        if (isRootPartsArray) {
+          items = [...val].sort((a, b) => {
+            const keyA = `${a?.partId || ''}\0${a?.hierarchyPath || ''}\0${a?.name || ''}`;
+            const keyB = `${b?.partId || ''}\0${b?.hierarchyPath || ''}\0${b?.name || ''}`;
+            const comp = strictOrdinalCompare(keyA, keyB);
+            if (comp !== 0) return comp;
+            const canonA = toCanonicalJsonValue(a, false, false, seen);
+            const canonB = toCanonicalJsonValue(b, false, false, seen);
+            return strictOrdinalCompare(canonA, canonB);
+          });
+        }
+        return '[' + items.map((item) => toCanonicalJsonValue(item, false, false, seen)).join(',') + ']';
+      }
+
+      const sortedKeys = Object.keys(val)
+        .filter((k) => {
+          if (k.startsWith('_')) return false;
+          if (isRootObject && ROOT_EXCLUDED_CANONICAL_KEYS.has(k)) return false;
+          return true;
+        })
+        .sort(strictOrdinalCompare);
+
+      const pairs = sortedKeys.map((k) => {
+        const isPartsKey = isRootObject && k === 'parts' && Array.isArray(val[k]);
+        return JSON.stringify(k) + ':' + toCanonicalJsonValue(val[k], isPartsKey, false, seen);
+      });
+
+      return '{' + pairs.join(',') + '}';
+    } finally {
+      seen.delete(val);
+    }
   }
 
   return 'null';
@@ -216,4 +266,59 @@ export function computeCanonicalAssetHash(asset: Forge3DAsset | null): string {
   if (!asset) return '';
   const canonicalJson = toCanonicalJsonValue(asset, false, true);
   return sha256Hex(canonicalJson);
+}
+
+/**
+ * Computes a granular hash of ONLY the 3D geometry and topology of an asset.
+ */
+export function computeGeometryHash(asset: Forge3DAsset | null): string {
+  if (!asset) return '';
+  const geoSpec = (asset.parts || []).map((p) => ({
+    partId: p.partId,
+    shape: p.shape,
+    size: p.size,
+    meshData: p.meshData,
+    baseMeshData: p.baseMeshData,
+  }));
+  return sha256Hex(toCanonicalJsonValue(geoSpec));
+}
+
+/**
+ * Computes a granular hash of ONLY materials, colors, textures and PBR profiles.
+ */
+export function computeAppearanceHash(asset: Forge3DAsset | null): string {
+  if (!asset) return '';
+  const appSpec = {
+    pbr_profile: asset.pbr_profile,
+    parts: (asset.parts || []).map((p) => ({
+      partId: p.partId,
+      color: p.color,
+      material: p.material,
+      roughness: p.roughness,
+      metalness: p.metalness,
+      transparency: p.transparency,
+      doubleSided: p.doubleSided,
+      pbrMaterial: p.pbrMaterial,
+    })),
+  };
+  return sha256Hex(toCanonicalJsonValue(appSpec));
+}
+
+/**
+ * Computes a granular hash of ONLY physical properties and 3D space transforms.
+ */
+export function computePropertiesHash(asset: Forge3DAsset | null): string {
+  if (!asset) return '';
+  const propSpec = (asset.parts || []).map((p) => ({
+    partId: p.partId,
+    position: p.position,
+    rotation: p.rotation,
+    rotationMatrix: p.rotationMatrix,
+    anchored: p.anchored,
+    canCollide: p.canCollide,
+    collisionFidelity: p.collisionFidelity,
+    renderFidelity: p.renderFidelity,
+    castShadow: p.castShadow,
+  }));
+  return sha256Hex(toCanonicalJsonValue(propSpec));
 }
