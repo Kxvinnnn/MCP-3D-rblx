@@ -318,7 +318,7 @@ test('7. sha256Hex: Límites exactos de bloques SHA-256 (55, 56, 63, 64, 65 byte
   assert.equal(sha256Hex(combinedStr), nodeSha256(combinedStr));
 });
 
-test('8. toCanonicalJsonValue: Rechazo estricto de tipos no serializables y referencias circulares', () => {
+test('8. toCanonicalJsonValue: Rechazo estricto de tipos no serializables y referencias circulares (incluyendo Map y Set)', () => {
   // 8A. BigInt debe lanzar TypeError
   assert.throws(
     () => toCanonicalJsonValue({ val: BigInt(12345) }),
@@ -337,36 +337,96 @@ test('8. toCanonicalJsonValue: Rechazo estricto de tipos no serializables y refe
     /Symbol values cannot be serialized/
   );
 
-  // 8D. Referencia circular debe lanzar TypeError descriptivo
+  // 8D. Referencia circular en objeto plano debe lanzar TypeError descriptivo
   const circularObj: any = { name: 'PartA' };
   circularObj.self = circularObj;
   assert.throws(
     () => toCanonicalJsonValue(circularObj),
     /Circular reference detected/
   );
+
+  // 8E. Referencia circular en Map que se contiene a sí mismo
+  const circularMap = new Map<string, any>();
+  circularMap.set('self', circularMap);
+  assert.throws(
+    () => toCanonicalJsonValue(circularMap),
+    /Circular reference detected/
+  );
+
+  // 8F. Referencia circular en Set que se contiene a sí mismo
+  const circularSet = new Set<any>();
+  circularSet.add(circularSet);
+  assert.throws(
+    () => toCanonicalJsonValue(circularSet),
+    /Circular reference detected/
+  );
+
+  // 8G. Invalid Date y RegExp deben lanzar TypeError explícito
+  assert.throws(
+    () => toCanonicalJsonValue(new Date('invalid-date-string')),
+    /Invalid Date cannot be serialized/
+  );
+  assert.throws(
+    () => toCanonicalJsonValue(/regex/),
+    /Unsupported object type \(RegExp\)/
+  );
 });
 
-test('9. toCanonicalJsonValue: Normalización semántica de Date, Map, Set, TypedArray y números no finitos', () => {
+test('9. toCanonicalJsonValue: Normalización canónica de Date, Map (sin colisión 1 vs "1"), Set (independiente del orden de inserción), ArrayBuffer y TypedArray', () => {
   // 9A. Date normalizado a ISO string
   const dateObj = { time: new Date('2026-11-12T00:00:00.000Z') };
   assert.equal(toCanonicalJsonValue(dateObj), '{"time":"2026-11-12T00:00:00.000Z"}');
 
-  // 9B. Map normalizado ordenando claves
+  // 9B. Map con claves string normalizado ordenando claves
   const map = new Map<string, any>([
     ['b', 2],
     ['a', 1],
   ]);
   assert.equal(toCanonicalJsonValue(map), '{"a":1,"b":2}');
 
-  // 9C. Set normalizado a array ordenado
-  const set = new Set(['x', 'y']);
-  assert.equal(toCanonicalJsonValue(set), '["x","y"]');
+  // 9C. Map con claves numéricas vs string (1 vs "1") NO debe colisionar ni sobrescribirse
+  const mapNumAndStr = new Map<any, any>([
+    [1, 'number_key'],
+    ['1', 'string_key'],
+  ]);
+  const mapStrAndNum = new Map<any, any>([
+    ['1', 'string_key'],
+    [1, 'number_key'],
+  ]);
+  const serializedMixedMap = toCanonicalJsonValue(mapNumAndStr);
+  assert.equal(
+    serializedMixedMap,
+    toCanonicalJsonValue(mapStrAndNum),
+    'Map con claves mixtas debe ser determinista independientemente del orden de inserción'
+  );
+  assert.ok(
+    serializedMixedMap.includes('"number_key"') && serializedMixedMap.includes('"string_key"'),
+    'Map con claves 1 y "1" debe preservar ambas entradas sin colisión'
+  );
 
-  // 9D. TypedArray normalizado
+  // 9D. Set normalizado a array ordenado independientemente del orden de inserción
+  const setOrderA = new Set(['z', 'a', 'm']);
+  const setOrderB = new Set(['m', 'z', 'a']);
+  assert.equal(toCanonicalJsonValue(setOrderA), '["a","m","z"]');
+  assert.equal(
+    toCanonicalJsonValue(setOrderA),
+    toCanonicalJsonValue(setOrderB),
+    'Dos Sets con los mismos elementos en distinto orden de inserción deben producir el mismo JSON canónico'
+  );
+
+  // 9E. ArrayBuffer serializa sus bytes reales (no [])
+  const rawBuffer = new Uint8Array([10, 20, 30, 255]).buffer;
+  assert.equal(
+    toCanonicalJsonValue(rawBuffer),
+    '[10,20,30,255]',
+    'ArrayBuffer debe serializar sus valores de bytes reales y no un array vacío []'
+  );
+
+  // 9F. TypedArray normalizado
   const typedArr = new Float32Array([1.5, 2.5]);
   assert.equal(toCanonicalJsonValue(typedArr), '[1.5,2.5]');
 
-  // 9E. NaN e Infinity normalizados a null
+  // 9G. NaN e Infinity normalizados a null
   const nonFinite = { nanVal: NaN, infVal: Infinity, negInfVal: -Infinity };
   assert.equal(toCanonicalJsonValue(nonFinite), '{"infVal":null,"nanVal":null,"negInfVal":null}');
 });
@@ -400,10 +460,23 @@ test('10. Granular sub-hashes: geometryHash, appearanceHash y propertiesHash dif
   assert.equal(computePropertiesHash(geoModified), baseProp, 'Cambio de tamaño no debe alterar propertiesHash');
 });
 
-test('11. computeIncrementalDiff: Detección quirúrgica de piezas añadidas, eliminadas, modificadas e inalteradas', () => {
+test('11. computeIncrementalDiff: Detección quirúrgica de piezas añadidas, eliminadas, modificadas, banderas globales y colisiones de ID', () => {
   const asset = createBaseTestAsset();
 
-  // Caso: Modificar 1 pieza, eliminar 1 y añadir 1
+  // Caso 11A: Eliminar únicamente 1 pieza sin modificar las demás debe activar las banderas globales de cambio
+  const onlyRemovedAsset: Forge3DAsset = {
+    ...asset,
+    parts: [asset.parts[0]], // Se elimina part_torso
+  };
+  const removeDiff = computeIncrementalDiff(asset, onlyRemovedAsset);
+  assert.equal(removeDiff.removed.length, 1);
+  assert.equal(removeDiff.removed[0].partId, 'part_torso');
+  assert.equal(removeDiff.hasGeometryChanges, true, 'Eliminar una pieza debe activar hasGeometryChanges');
+  assert.equal(removeDiff.hasAppearanceChanges, true, 'Eliminar una pieza debe activar hasAppearanceChanges');
+  assert.equal(removeDiff.hasPropertiesChanges, true, 'Eliminar una pieza debe activar hasPropertiesChanges');
+  assert.equal(removeDiff.hasHierarchyChanges, true, 'Eliminar una pieza debe activar hasHierarchyChanges');
+
+  // Caso 11B: Modificar 1 pieza, eliminar 1 y añadir 1
   const updated: Forge3DAsset = {
     ...asset,
     parts: [
@@ -443,4 +516,38 @@ test('11. computeIncrementalDiff: Detección quirúrgica de piezas añadidas, el
   assert.equal(diff.modified[0].partId, 'part_head');
   assert.equal(diff.modified[0].appearanceChanged, true);
   assert.equal(diff.modified[0].geometryChanged, false);
+
+  // Caso 11C: Piezas sin partId con el mismo nombre no se sobrescriben silenciosamente y emiten advertencia
+  const noIdAssetA: Forge3DAsset = {
+    ...asset,
+    parts: [
+      { ...asset.parts[0], partId: undefined, name: 'DuplicateBolt', position: [0, 0, 0] },
+      { ...asset.parts[1], partId: undefined, name: 'DuplicateBolt', position: [5, 0, 0] },
+    ],
+  };
+  const noIdAssetB: Forge3DAsset = {
+    ...asset,
+    parts: [
+      { ...asset.parts[0], partId: undefined, name: 'DuplicateBolt', position: [0, 0, 0] },
+      { ...asset.parts[1], partId: undefined, name: 'DuplicateBolt', position: [10, 0, 0] }, // Segunda pieza movida
+    ],
+  };
+  const noIdDiff = computeIncrementalDiff(noIdAssetA, noIdAssetB);
+  assert.equal(noIdDiff.hasMissingPartIds, true, 'Debe señalar que faltan partIds explícitos');
+  assert.ok(noIdDiff.warnings.length > 0, 'Debe registrar advertencias por piezas sin partId');
+  assert.equal(noIdDiff.unchanged.length, 1, 'La primera pieza homónima sin cambios no debe perderse');
+  assert.equal(noIdDiff.modified.length, 1, 'La segunda pieza homónima modificada debe detectarse individualmente');
+
+  // Caso 11D: IDs explícitos duplicados deben lanzar un error claro en vez de sobrescribir en el Map
+  const dupExplicitIdAsset: Forge3DAsset = {
+    ...asset,
+    parts: [
+      { ...asset.parts[0], partId: 'same_explicit_id' },
+      { ...asset.parts[1], partId: 'same_explicit_id' },
+    ],
+  };
+  assert.throws(
+    () => computeIncrementalDiff(asset, dupExplicitIdAsset),
+    /Colisión de identidad/
+  );
 });

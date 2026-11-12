@@ -129,7 +129,7 @@ const ROOT_EXCLUDED_CANONICAL_KEYS = new Set([
 ]);
 
 /**
- * Strict ordinal code-point string comparator (locale-independent).
+ * Strict UTF-16 code-unit / ordinal string comparator (locale-independent).
  */
 export function strictOrdinalCompare(a: string, b: string): number {
   if (a === b) return 0;
@@ -150,7 +150,12 @@ export function getAssetIdentityKey(asset: Forge3DAsset | null | undefined): str
 
 /**
  * Recursively converts a JavaScript value into a canonical, deterministic JSON string.
- * Rejects circular references, BigInt, Function, and Symbol explicitly with descriptive errors.
+ * Policy:
+ * - Rejects circular references (including inside Map, Set, Array, and plain objects).
+ * - Rejects BigInt, Function, Symbol, Invalid Date, RegExp, Error, WeakMap, WeakSet, and custom class instances.
+ * - Normalizes Set by sorting canonical element representations so insertion order does not alter the hash.
+ * - Normalizes Map preserving key types when non-string keys exist so 1 and "1" never collide.
+ * - Normalizes ArrayBuffer via Uint8Array byte representation.
  */
 export function toCanonicalJsonValue(
   val: any,
@@ -180,7 +185,8 @@ export function toCanonicalJsonValue(
     if (!Number.isFinite(val)) {
       return 'null'; // Normalize NaN, Infinity, -Infinity to null
     }
-    return JSON.stringify(val);
+    // Normalize -0 to 0
+    return JSON.stringify(Object.is(val, -0) ? 0 : val);
   }
 
   if (valType === 'boolean') {
@@ -191,28 +197,6 @@ export function toCanonicalJsonValue(
     return JSON.stringify(val);
   }
 
-  if (val instanceof Date) {
-    return JSON.stringify(val.toISOString());
-  }
-
-  if (val instanceof Map) {
-    const obj: Record<string, any> = {};
-    for (const [k, v] of val.entries()) {
-      obj[String(k)] = v;
-    }
-    return toCanonicalJsonValue(obj, false, false, seen);
-  }
-
-  if (val instanceof Set) {
-    const arr = Array.from(val);
-    return toCanonicalJsonValue(arr, false, false, seen);
-  }
-
-  if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) {
-    const arr = Array.from(val as any);
-    return toCanonicalJsonValue(arr, false, false, seen);
-  }
-
   if (valType === 'object') {
     if (seen.has(val)) {
       throw new TypeError('Circular reference detected in asset structure during canonical serialization');
@@ -220,6 +204,70 @@ export function toCanonicalJsonValue(
     seen.add(val);
 
     try {
+      if (val instanceof Date) {
+        if (Number.isNaN(val.getTime())) {
+          throw new TypeError('Invalid Date cannot be serialized in canonical asset hash');
+        }
+        return JSON.stringify(val.toISOString());
+      }
+
+      if (val instanceof RegExp || val instanceof Error || val instanceof WeakMap || val instanceof WeakSet) {
+        throw new TypeError(`Unsupported object type (${val.constructor?.name || 'Object'}) in canonical asset hash`);
+      }
+
+      if (val instanceof Map) {
+        const entries = Array.from(val.entries());
+        const allStringKeys = entries.every(([k]) => typeof k === 'string');
+        if (allStringKeys) {
+          const sortedEntries = entries
+            .map(([k, v]) => [k as string, toCanonicalJsonValue(v, false, false, seen)] as const)
+            .sort((a, b) => strictOrdinalCompare(a[0], b[0]));
+          return (
+            '{' +
+            sortedEntries.map(([k, cv]) => JSON.stringify(k) + ':' + cv).join(',') +
+            '}'
+          );
+        } else {
+          // Non-string keys present: preserve exact key type so 1 and "1" never collide
+          const canonicalPairs = entries
+            .map(([k, v]) => [
+              toCanonicalJsonValue(k, false, false, seen),
+              toCanonicalJsonValue(v, false, false, seen),
+            ] as const)
+            .sort((a, b) => {
+              const cmp = strictOrdinalCompare(a[0], b[0]);
+              return cmp !== 0 ? cmp : strictOrdinalCompare(a[1], b[1]);
+            });
+          return (
+            '[' +
+            canonicalPairs.map(([ck, cv]) => `[${ck},${cv}]`).join(',') +
+            ']'
+          );
+        }
+      }
+
+      if (val instanceof Set) {
+        // Canonicalize each element and sort deterministically so Set insertion order never changes the hash
+        const canonicalElements = Array.from(val)
+          .map((item) => toCanonicalJsonValue(item, false, false, seen))
+          .sort(strictOrdinalCompare);
+        return '[' + canonicalElements.join(',') + ']';
+      }
+
+      if (val instanceof ArrayBuffer) {
+        const byteArr = Array.from(new Uint8Array(val));
+        return '[' + byteArr.map((b) => String(b)).join(',') + ']';
+      }
+
+      if (ArrayBuffer.isView(val)) {
+        if (val instanceof DataView) {
+          const byteArr = Array.from(new Uint8Array(val.buffer, val.byteOffset, val.byteLength));
+          return '[' + byteArr.map((b) => String(b)).join(',') + ']';
+        }
+        const arr = Array.from(val as any);
+        return '[' + arr.map((item) => toCanonicalJsonValue(item, false, false, seen)).join(',') + ']';
+      }
+
       if (Array.isArray(val)) {
         let items = val;
         if (isRootPartsArray) {
@@ -234,6 +282,12 @@ export function toCanonicalJsonValue(
           });
         }
         return '[' + items.map((item) => toCanonicalJsonValue(item, false, false, seen)).join(',') + ']';
+      }
+
+      // Ensure object is a plain object (Object.prototype or null prototype)
+      const proto = Object.getPrototypeOf(val);
+      if (proto !== null && proto !== Object.prototype) {
+        throw new TypeError(`Unsupported custom class instance (${proto.constructor?.name || 'Unknown'}) in canonical asset hash`);
       }
 
       const sortedKeys = Object.keys(val)
@@ -255,7 +309,7 @@ export function toCanonicalJsonValue(
     }
   }
 
-  return 'null';
+  throw new TypeError(`Unsupported value type (${valType}) in canonical asset hash`);
 }
 
 /**
@@ -280,7 +334,7 @@ export function computeGeometryHash(asset: Forge3DAsset | null): string {
     meshData: p.meshData,
     baseMeshData: p.baseMeshData,
   }));
-  return sha256Hex(toCanonicalJsonValue(geoSpec));
+  return sha256Hex(toCanonicalJsonValue(geoSpec, true, false));
 }
 
 /**
@@ -301,7 +355,7 @@ export function computeAppearanceHash(asset: Forge3DAsset | null): string {
       pbrMaterial: p.pbrMaterial,
     })),
   };
-  return sha256Hex(toCanonicalJsonValue(appSpec));
+  return sha256Hex(toCanonicalJsonValue(appSpec, false, true));
 }
 
 /**
@@ -320,5 +374,5 @@ export function computePropertiesHash(asset: Forge3DAsset | null): string {
     renderFidelity: p.renderFidelity,
     castShadow: p.castShadow,
   }));
-  return sha256Hex(toCanonicalJsonValue(propSpec));
+  return sha256Hex(toCanonicalJsonValue(propSpec, true, false));
 }

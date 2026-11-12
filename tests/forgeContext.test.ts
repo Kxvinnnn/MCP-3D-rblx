@@ -13,7 +13,7 @@ const domWindow = new Window();
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 // Mock fetch for headless React component lifecycle without HTTP server
-globalThis.fetch = (async (url: string) => {
+globalThis.fetch = (async (_url: string) => {
   return {
     ok: true,
     status: 200,
@@ -339,7 +339,6 @@ test('3. ensureStablePartIds y findMatchingPart aseguran persistencia y no selec
 test('4. EJECUCIÓN REAL DE REACT FORGECONTEXT: prueba de estado, confirmSwitchDiscard y reversión real al snapshot', async () => {
   let contextValue: any = null;
 
-  // Componente consumidor para extraer la instancia del contexto React en vivo
   function ContextInspector() {
     contextValue = useForge();
     return React.createElement('div', { id: 'inspector' }, contextValue.activeAsset?.name || 'none');
@@ -348,7 +347,6 @@ test('4. EJECUCIÓN REAL DE REACT FORGECONTEXT: prueba de estado, confirmSwitchD
   const container = domWindow.document.createElement('div');
   const root = createRoot(container as unknown as Element);
 
-  // Montar ForgeProvider y el consumidor
   await act(async () => {
     root.render(
       React.createElement(
@@ -429,33 +427,23 @@ test('4. EJECUCIÓN REAL DE REACT FORGECONTEXT: prueba de estado, confirmSwitchD
     'CRÍTICO: confirmSwitchDiscard debe restaurar el modelo en memoria a su snapshot guardado original'
   );
 
-  // Limpiar árbol de React
   await act(async () => {
     root.unmount();
   });
 });
 
-test('5. Detección de identidad de recursos: Dos modelos con el mismo nombre pero distintas rutas/identidades no se confunden', async () => {
+test('5. Guardias de setActiveAsset: cambio a otro recurso, cambio a null y recarga de otra versión del mismo recurso con cambios pendientes', async () => {
   const { getAssetIdentityKey } = await import('../src/utils/canonicalHash.ts');
 
-  // Modelo A: 'Turret' en src/shared/weapons
   const assetA = createSampleAsset('Turret');
   assetA.rojo_target_folder = 'src/shared/weapons';
   assetA.file_name = 'TurretWeapons.luau';
 
-  // Modelo B: 'Turret' en src/shared/decorations
   const assetB = createSampleAsset('Turret');
   assetB.rojo_target_folder = 'src/shared/decorations';
   assetB.file_name = 'TurretDeco.luau';
 
-  const keyA = getAssetIdentityKey(assetA);
-  const keyB = getAssetIdentityKey(assetB);
-
-  assert.notEqual(
-    keyA,
-    keyB,
-    'Modelos con el mismo nombre en diferentes carpetas/archivos deben tener claves de identidad distintas'
-  );
+  assert.notEqual(getAssetIdentityKey(assetA), getAssetIdentityKey(assetB));
 
   let contextValue: any = null;
   function TestInspector() {
@@ -470,7 +458,6 @@ test('5. Detección de identidad de recursos: Dos modelos con el mismo nombre pe
     root.render(React.createElement(ForgeProvider, null, React.createElement(TestInspector)));
   });
 
-  // Cargar asset A y modificarlo
   await act(async () => {
     contextValue.setActiveAsset(assetA);
   });
@@ -484,35 +471,74 @@ test('5. Detección de identidad de recursos: Dos modelos con el mismo nombre pe
 
   assert.equal(contextValue.pendingChanges, true);
 
-  // Intentar cambiar a asset B (mismo nombre 'Turret')
+  // 5A. Intentar cambiar a null (cerrar modelo activo) mientras hay cambios pendientes
   await act(async () => {
-    contextValue.setActiveAsset(assetB);
+    contextValue.setActiveAsset(null);
   });
-
   assert.equal(
     contextValue.showUnsavedModal,
     true,
-    'Cambiar a un modelo con el mismo nombre pero diferente identidad debe activar el modal de confirmación sin perder cambios'
+    'setActiveAsset(null) con cambios pendientes debe abrir el modal y no borrar el modelo sin confirmación'
   );
+  assert.ok(contextValue.activeAsset, 'El modelo activo debe seguir cargado hasta confirmar');
+
+  await act(async () => {
+    contextValue.cancelSwitch();
+  });
+  assert.equal(contextValue.showUnsavedModal, false);
+
+  // 5B. Intentar cargar una versión distinta del MISMO recurso (misma identidad pero contenido distinto, ej. original sin editar)
+  await act(async () => {
+    contextValue.setActiveAsset(assetA);
+  });
+  assert.equal(
+    contextValue.showUnsavedModal,
+    true,
+    'Cargar otra versión del mismo recurso con cambios pendientes debe abrir el modal y no sobrescribir silenciosamente'
+  );
+  assert.deepEqual(
+    contextValue.activeAsset.parts[0].color,
+    [0, 255, 0],
+    'Los cambios locales se mantienen protegidos'
+  );
+
+  await act(async () => {
+    contextValue.cancelSwitch();
+  });
+
+  // 5C. Intentar cambiar a otro recurso con el mismo nombre pero distinta ruta/identidad
+  await act(async () => {
+    contextValue.setActiveAsset(assetB);
+  });
+  assert.equal(contextValue.showUnsavedModal, true);
 
   await act(async () => {
     root.unmount();
   });
 });
 
-test('6. Recuperación y descarte de borradores locales (draft recovery)', async () => {
+test('6. Recuperación de borradores locales (recoverDraft) y detección de conflicto cuando baseHash difiere del modelo guardado actual', async () => {
   let contextValue: any = null;
   function DraftInspector() {
     contextValue = useForge();
     return React.createElement('div', null, contextValue.activeAsset?.name);
   }
 
-  // Simular borrador guardado en localStorage
+  // Caso 6A: Recuperación normal cuando baseHash coincide con la versión guardada
+  const savedVersion = createSampleAsset('RecoveredDraft');
+  const savedHash = computeAssetContentHash(savedVersion);
+
   const draftAsset = createSampleAsset('RecoveredDraft');
   draftAsset.parts[0].color = [99, 88, 77];
+
   domWindow.localStorage.setItem(
     'forge_active_draft',
-    JSON.stringify({ asset: draftAsset, timestamp: Date.now(), baseHash: 'fake_hash' })
+    JSON.stringify({
+      asset: draftAsset,
+      timestamp: Date.now(),
+      baseHash: savedHash,
+      baseAsset: savedVersion,
+    })
   );
 
   const container = domWindow.document.createElement('div');
@@ -524,7 +550,6 @@ test('6. Recuperación y descarte de borradores locales (draft recovery)', async
 
   assert.equal(contextValue.hasRecoverableDraft, true, 'Debe detectar el borrador en localStorage');
 
-  // Ejecutar recuperación
   await act(async () => {
     contextValue.recoverDraft();
   });
@@ -532,13 +557,44 @@ test('6. Recuperación y descarte de borradores locales (draft recovery)', async
   assert.equal(contextValue.activeAsset.name, 'RecoveredDraft');
   assert.deepEqual(contextValue.activeAsset.parts[0].color, [99, 88, 77]);
   assert.equal(contextValue.pendingChanges, true, 'El borrador recuperado debe marcarse con cambios pendientes');
+  assert.equal(contextValue.activeConflict, null, 'No debe haber conflicto cuando baseHash coincide');
+
+  // Caso 6B: Si el modelo guardado cambió respecto al baseHash del borrador, recoverDraft() debe señalar conflicto
+  const newerSavedVersion = createSampleAsset('RecoveredDraft');
+  newerSavedVersion.parts[0].color = [10, 20, 30]; // Versión guardada más reciente en servidor/sesión
+
+  await act(async () => {
+    contextValue.setActiveAsset(newerSavedVersion, true);
+  });
+
+  // El borrador en localStorage tenía baseHash antiguo (savedHash) distinto al de newerSavedVersion
+  domWindow.localStorage.setItem(
+    'forge_active_draft',
+    JSON.stringify({
+      asset: draftAsset,
+      timestamp: Date.now(),
+      baseHash: savedHash, // Hash antiguo
+    })
+  );
+
+  await act(async () => {
+    contextValue.recoverDraft();
+  });
+
+  assert.ok(
+    contextValue.activeConflict,
+    'recoverDraft debe activar activeConflict cuando baseHash del borrador difiere de la versión guardada actual'
+  );
+  assert.equal(contextValue.currentSyncStatus.state, 'conflict');
+  assert.deepEqual(contextValue.activeConflict.localAsset.parts[0].color, [99, 88, 77]);
+  assert.deepEqual(contextValue.activeConflict.remoteAsset.parts[0].color, [10, 20, 30]);
 
   await act(async () => {
     root.unmount();
   });
 });
 
-test('7. Detección y resolución de conflictos local vs remoto en pullFromStudio', async () => {
+test('7. Detección y resolución real de conflictos local vs remoto (keep_local persiste al backend, accept_remote adopta remoto)', async () => {
   let contextValue: any = null;
   function ConflictInspector() {
     contextValue = useForge();
@@ -560,7 +616,7 @@ test('7. Detección y resolución de conflictos local vs remoto en pullFromStudi
   // 1. Modificación local (cambia color a verde)
   await act(async () => {
     contextValue.applyAssetChange(
-      { ...contextValue.activeAsset, parts: [{ ...contextValue.activeAsset.parts[0], color: [0, 255, 0] }] },
+      { ...contextValue.activeAsset, parts: [{ ...contextValue.activeAsset.parts[0], color: [0, 255, 0] }, contextValue.activeAsset.parts[1]] },
       'Edición local'
     );
   });
@@ -570,13 +626,23 @@ test('7. Detección y resolución de conflictos local vs remoto en pullFromStudi
   const remoteAsset = JSON.parse(JSON.stringify(baseAsset));
   remoteAsset.parts[0].color = [0, 0, 255];
 
+  let rebuildCalledWithAsset: any = null;
   const origFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: string) => {
+  globalThis.fetch = (async (url: string, init?: any) => {
     if (url.includes('/api/v1/assets/pull-from-rojo')) {
       return {
         ok: true,
         status: 200,
         json: async () => ({ success: true, asset: remoteAsset }),
+      };
+    }
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const body = JSON.parse(init.body);
+      rebuildCalledWithAsset = body.asset;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: body.asset }),
       };
     }
     return origFetch(url);
@@ -590,16 +656,152 @@ test('7. Detección y resolución de conflictos local vs remoto en pullFromStudi
 
   assert.equal(contextValue.currentSyncStatus.state, 'conflict', 'El estado de sincronización debe ser conflict');
   assert.ok(contextValue.activeConflict, 'activeConflict debe estar poblado con ambas versiones');
-  assert.deepEqual(contextValue.activeConflict.localAsset.parts[0].color, [0, 255, 0]);
-  assert.deepEqual(contextValue.activeConflict.remoteAsset.parts[0].color, [0, 0, 255]);
 
-  // 4. Resolver conflicto eligiendo versión local
+  // 4. Resolver conflicto eligiendo versión local: debe persistir/sincronizar en backend
   await act(async () => {
-    contextValue.resolveConflict('keep_local');
+    const resolved = await contextValue.resolveConflict('keep_local');
+    assert.equal(resolved, true, 'resolveConflict(keep_local) debe persistir con éxito');
   });
 
-  assert.equal(contextValue.activeConflict, null, 'Conflicto resuelto');
-  assert.deepEqual(contextValue.activeAsset.parts[0].color, [0, 255, 0], 'Conserva versión local');
+  assert.ok(rebuildCalledWithAsset, 'resolveConflict(keep_local) DEBE enviar la versión local al backend');
+  assert.deepEqual(rebuildCalledWithAsset.parts[0].color, [0, 255, 0]);
+  assert.equal(contextValue.activeConflict, null, 'Conflicto cerrado tras persistencia exitosa');
+  assert.equal(contextValue.pendingChanges, false, 'Tras persistir la versión local, pendingChanges queda en false');
+
+  globalThis.fetch = origFetch;
+
+  await act(async () => {
+    root.unmount();
+  });
+});
+
+test('8. Verificación de persistencia en saveAssetToDisk y estado pendiente en pushToStudio cuando queda en cola', async () => {
+  let contextValue: any = null;
+  function SyncInspector() {
+    contextValue = useForge();
+    return React.createElement('div', null, contextValue.activeAsset?.name);
+  }
+
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(React.createElement(ForgeProvider, null, React.createElement(SyncInspector)));
+  });
+
+  const model = createSampleAsset('VerifiedTank');
+  await act(async () => {
+    contextValue.setActiveAsset(model);
+  });
+
+  await act(async () => {
+    contextValue.applyAssetChange(
+      {
+        ...contextValue.activeAsset,
+        parts: [
+          { ...contextValue.activeAsset.parts[0], color: [200, 100, 50] },
+          contextValue.activeAsset.parts[1],
+        ],
+      },
+      'Cambiar color para prueba de guardado'
+    );
+  });
+  assert.equal(contextValue.pendingChanges, true);
+
+  const origFetch = globalThis.fetch;
+
+  // 8A. Si el servidor devuelve un modelo cuyo contenido no coincide con el enviado, saveAssetToDisk debe rechazarlo y conservar pendingChanges = true
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const sent = JSON.parse(init.body).asset;
+      const corrupted = JSON.parse(JSON.stringify(sent));
+      corrupted.parts[0].color = [0, 0, 0]; // Servidor alteró el color indebidamente
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: corrupted }),
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  await act(async () => {
+    const saved = await contextValue.saveAssetToDisk(true);
+    assert.equal(saved, false, 'saveAssetToDisk debe retornar false si el servidor devuelve contenido alterado');
+  });
+  assert.equal(
+    contextValue.pendingChanges,
+    true,
+    'pendingChanges debe mantenerse en true cuando la verificación del modelo devuelto falla'
+  );
+
+  // 8B. En pushToStudio, si la tarea queda en cola (queued) en el puente, NO debe marcarse como aplicada ni limpiar prematuramente pendingChanges
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const sent = JSON.parse(init.body).asset;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: sent }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/enqueue')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ taskId: 'task-queued-1', status: 'queued' }),
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  await act(async () => {
+    const pushRes = await contextValue.pushToStudio();
+    assert.equal(pushRes.success, false);
+    assert.equal(pushRes.appliedInStudio, false);
+  });
+  assert.equal(contextValue.currentSyncStatus.state, 'awaiting_studio');
+  assert.equal(
+    contextValue.pendingChanges,
+    true,
+    'pushToStudio NO debe limpiar pendingChanges cuando la operación apenas quedó en cola y no fue confirmada por Studio'
+  );
+
+  // 8C. Cuando Studio confirma completed, pushToStudio actualiza el baseline y limpia pendingChanges
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const sent = JSON.parse(init.body).asset;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: sent }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/enqueue')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          taskId: 'task-completed-2',
+          status: 'completed',
+          result: { status: 'ok', details: 'Applied in Studio' },
+        }),
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  await act(async () => {
+    const pushRes = await contextValue.pushToStudio();
+    assert.equal(pushRes.success, true);
+    assert.equal(pushRes.appliedInStudio, true);
+  });
+  assert.equal(contextValue.currentSyncStatus.state, 'applied_successfully');
+  assert.equal(
+    contextValue.pendingChanges,
+    false,
+    'pushToStudio limpia pendingChanges únicamente tras confirmar que Studio completó la operación'
+  );
 
   globalThis.fetch = origFetch;
 

@@ -1,6 +1,6 @@
-# Arquitectura de Software Modular — Forge AI Studio v2.2 (AI-First Edition)
+# Arquitectura de Software Modular — Forge AI Studio v2.2 (AI-First & Data Integrity Edition)
 
-Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**, diseñada con **paridad modular 1:1 entre Python (`backend/engines/`) y TypeScript (`src/server/engines/`)**, más un **Podador de Contexto por Dominio (`ContextPruner`)** que reduce en ~65% el contexto extra enviado a Gemini en cada generación.
+Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**, diseñada con **paridad modular 1:1 entre Python (`backend/engines/`) y TypeScript (`src/server/engines/`)**, un **Podador de Contexto por Dominio (`ContextPruner`)** y un **Núcleo Unificado de Integridad de Datos, Hashing Canónico SHA-256 y Triangulación Geométrica 3D Real**.
 
 > **Índice Rápido para IA**: Consulta `AI_ARCHITECTURE_MAP.md` en la raíz del proyecto o invoca `GET /api/v1/ai-manifest` para obtener los contratos e invariantes de cada módulo en formato compacto.
 
@@ -51,7 +51,62 @@ Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**,
 
 ---
 
-## 2. Plugin de Roblox Studio v2.1 (`backend/roblox_plugin/ForgeAIStudioPlugin.server.luau`)
+## 2. Sub-Sistema de Integridad de Datos, Hashing y Sincronización (`src/utils/`)
+
+### 2.1 `Canonical Hash Engine` (`src/utils/canonicalHash.ts`)
+- **Hashing SHA-256 (NIST FIPS 180-4)**:
+  - Codifica cadenas utilizando `TextEncoder` antes de procesar bloques de 512 bits, calculando la longitud exacta en bits a partir del arreglo de bytes UTF-8 (`bytes.length * 8`). Esto elimina errores en pares sustitutos UTF-16, caracteres acentuados en español y emojis.
+- **Normalización JSON Canónica (`toCanonicalJsonValue`)**:
+  - Ordena las claves de los objetos lexicográficamente de forma independiente a la localización (`strictOrdinalCompare`).
+  - En la raíz del recurso excluye claves volátiles de servidor (`created_at`, `updated_at`, `version`, `saved_path`), pero las preserva dentro de objetos anidados (`customMeta`, etc.).
+  - Reordena los elementos de un `Set` tras serializarlos canónicamente, garantizando que el orden de inserción no afecte el digest.
+  - Para `Map` con claves mixtas, serializa pares `[canonicalKey, canonicalValue]` de forma que la clave numérica `1` y la cadena `"1"` no colisionen.
+  - Representa `ArrayBuffer` mediante arreglos de bytes enteros (`Uint8Array`).
+- **Sub-Hashes Granulares**:
+  - `computeGeometryHash()`: Cubre únicamente formas, tamaños y mallas de vértices/caras (`meshData`, `baseMeshData`).
+  - `computeAppearanceHash()`: Cubre únicamente colores, materiales, transparencias y perfiles PBR.
+  - `computePropertiesHash()`: Cubre únicamente posiciones, rotaciones, matrices `CFrame` y banderas físicas (`anchored`, `canCollide`, etc.).
+
+### 2.2 `Roblox Geometry Validator` (`src/utils/robloxGeometryValidator.ts`)
+- **Triangulación 3D Real Ear Clipping (`triangulatePolygonFace3D`)**:
+  - Calcula la normal del polígono 3D mediante la fórmula de Newell.
+  - Proyecta los vértices sobre el plano dominante 2D (XY, XZ o YZ).
+  - Recorta "orejas" (ears) convexas verificando que ningún otro vértice se encuentre dentro del triángulo.
+  - Comprueba en 3D que cada triángulo generado posea una superficie no nula (`computeTriangleArea3D > 1e-7`).
+- **Validación de Límites y Restricciones de Roblox Studio**:
+  - Limites de escala por pieza (`0.001` a `2048` studs).
+  - Verificación de coordenadas finitas (rechazo de `NaN` o `Infinity` en posición, rotación o `rotationMatrix`).
+  - Detección de caras malformadas (`< 3` vértices), índices fuera de límites de vértices y caras degeneradas/colineales.
+
+### 2.3 `Incremental Sync Engine` (`src/utils/incrementalSync.ts`)
+- **Prevenición de Colisiones de Identidad (`buildCollisionSafePartMap`)**:
+  - Exige unicidad en `partId` explícitos; si se detectan duplicados, interrumpe la sincronización con un error claro.
+  - Para piezas sin `partId`, genera una clave jerárquica unívoca (`fallback::parentId::hierarchyPath::name#occurrence`) y registra advertencias sin sobrescribir elementos.
+- **Clasificación Quirúrgica de Cambios (`computeIncrementalDiff`)**:
+  - Clasifica las piezas en `added`, `removed`, `modified` y `unchanged`.
+  - Las piezas eliminadas (`removed`) o añadidas (`added`) activan automáticamente los flags globales de cambio de geometría, apariencia, propiedades y jerarquía.
+
+---
+
+## 3. Máquina de Estados del Contexto React (`src/context/ForgeContext.tsx`)
+
+### 3.1 Transiciones Protegidas de `setActiveAsset()`
+- **Cierre o Cambio de Recurso con Cambios Pendientes**:
+  - Invocaciones a `setActiveAsset(null)` o a otro recurso cuando `pendingChanges = true` no destruyen el estado activo.
+  - Se activa `showUnsavedModal = true` y se registra la intención en `pendingSwitchToNullRef` o `pendingSwitchTarget`.
+  - `confirmSwitchDiscard()` restaura el recurso activo exactamente al snapshot persistido original (`savedAssetSnapshotRef`).
+
+### 3.2 Detección de Conflictos al Recuperar Borradores (`recoverDraft`)
+- Compara `baseHash` del borrador contra el hash de la versión guardada actual.
+- Si el modelo guardado cambió en la sesión o biblioteca desde que se guardó el borrador, se activa `activeConflict` (`localAsset` vs `remoteAsset`) solicitando resolución al usuario.
+
+### 3.3 Verificación de Persistencia y Sincronización en `pushToStudio()`
+- `saveAssetToDisk()` valida el modelo devuelto por el servidor mediante `verifyPersistedAssetContent()` antes de borrar `pendingChanges`.
+- `pushToStudio()` realiza una validación geométrica previa (`validateRobloxGeometry`); si la tarea queda en cola (`queued`) en el puente local, no limpia `pendingChanges`. Únicamente actualiza la línea base cuando Roblox Studio confirma la ejecución completa (`completed`).
+
+---
+
+## 4. Plugin de Roblox Studio v2.2 (`backend/roblox_plugin/ForgeAIStudioPlugin.server.luau`)
 
 - **Reconstrucción `EditableMesh` en Modo Edición (`RunService:IsEdit()`)**:
   - Listener automático `Workspace.ChildAdded` que reconstruye cualquier modelo `.rbxmx` importado en Modo Edición sin necesidad de pulsar Play.

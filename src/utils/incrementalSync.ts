@@ -2,10 +2,6 @@ import { Forge3DAsset, MeshPart3DSpec } from './roblox3DEngine.ts';
 import {
   toCanonicalJsonValue,
   sha256Hex,
-  computeGeometryHash,
-  computeAppearanceHash,
-  computePropertiesHash,
-  strictOrdinalCompare,
 } from './canonicalHash.ts';
 
 export type PartChangeType = 'added' | 'removed' | 'modified' | 'unchanged';
@@ -35,6 +31,8 @@ export interface IncrementalDiffReport {
   hasAppearanceChanges: boolean;
   hasPropertiesChanges: boolean;
   hasHierarchyChanges: boolean;
+  hasMissingPartIds: boolean;
+  warnings: string[];
 }
 
 /**
@@ -62,8 +60,10 @@ function partAppearanceHash(p: MeshPart3DSpec): string {
       roughness: p.roughness,
       metalness: p.metalness,
       transparency: p.transparency,
+      reflectance: p.reflectance,
       doubleSided: p.doubleSided,
       pbrMaterial: p.pbrMaterial,
+      textureId: p.textureId,
     })
   );
 }
@@ -87,6 +87,56 @@ function partPropertiesHash(p: MeshPart3DSpec): string {
 }
 
 /**
+ * Builds an indexed map of parts without ever silently overwriting entries.
+ * - Throws an explicit error if two parts share the same explicit `partId`.
+ * - Disambiguates parts lacking `partId` using hierarchyPath + name + occurrence index.
+ */
+function buildCollisionSafePartMap(
+  parts: MeshPart3DSpec[],
+  label: string,
+  warnings: string[]
+): { map: Map<string, MeshPart3DSpec>; hasMissingPartIds: boolean } {
+  const map = new Map<string, MeshPart3DSpec>();
+  const explicitIds = new Set<string>();
+  const fallbackCounts = new Map<string, number>();
+  let hasMissingPartIds = false;
+
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const explicitId = typeof p.partId === 'string' && p.partId.trim().length > 0 ? p.partId.trim() : '';
+
+    if (explicitId) {
+      if (explicitIds.has(explicitId) || map.has(explicitId)) {
+        throw new Error(
+          `Colisión de identidad en ${label}: El partId explícito '${explicitId}' está duplicado en múltiples piezas.`
+        );
+      }
+      explicitIds.add(explicitId);
+      map.set(explicitId, p);
+    } else {
+      hasMissingPartIds = true;
+      const baseFallbackKey = `fallback::${p.parentId || ''}::${p.hierarchyPath || ''}::${p.name || 'UnnamedPart'}`;
+      const occurrence = (fallbackCounts.get(baseFallbackKey) || 0) + 1;
+      fallbackCounts.set(baseFallbackKey, occurrence);
+
+      const uniqueKey = `${baseFallbackKey}#${occurrence}`;
+      if (occurrence > 1) {
+        warnings.push(
+          `Pieza sin partId estable en ${label} ('${p.name || 'UnnamedPart'}') desambiguada como ocurrencia #${occurrence}.`
+        );
+      } else {
+        warnings.push(
+          `Pieza '${p.name || 'UnnamedPart'}' en ${label} carece de partId estable; se usó clave compuesta '${uniqueKey}'.`
+        );
+      }
+      map.set(uniqueKey, p);
+    }
+  }
+
+  return { map, hasMissingPartIds };
+}
+
+/**
  * Compares two versions of an asset and determines surgical part-level changes:
  * added, removed, modified (with granular geometry/appearance/properties/hierarchy flags),
  * and unchanged parts.
@@ -97,18 +147,14 @@ export function computeIncrementalDiff(
 ): IncrementalDiffReport {
   const baseParts = Array.isArray(baseAsset?.parts) ? baseAsset!.parts : [];
   const updatedParts = Array.isArray(updatedAsset.parts) ? updatedAsset.parts : [];
+  const warnings: string[] = [];
 
-  const baseMap = new Map<string, MeshPart3DSpec>();
-  for (const bp of baseParts) {
-    const id = bp.partId || bp.hierarchyPath || bp.name;
-    baseMap.set(id, bp);
-  }
+  const baseResult = buildCollisionSafePartMap(baseParts, 'baseAsset', warnings);
+  const updatedResult = buildCollisionSafePartMap(updatedParts, 'updatedAsset', warnings);
 
-  const updatedMap = new Map<string, MeshPart3DSpec>();
-  for (const up of updatedParts) {
-    const id = up.partId || up.hierarchyPath || up.name;
-    updatedMap.set(id, up);
-  }
+  const baseMap = baseResult.map;
+  const updatedMap = updatedResult.map;
+  const hasMissingPartIds = baseResult.hasMissingPartIds || updatedResult.hasMissingPartIds;
 
   const added: MeshPart3DSpec[] = [];
   const removed: MeshPart3DSpec[] = [];
@@ -120,10 +166,23 @@ export function computeIncrementalDiff(
   let hasPropertiesChanges = false;
   let hasHierarchyChanges = false;
 
-  // Detect removed parts
+  // Detect root PBR profile changes
+  if (baseAsset) {
+    const basePbrHash = sha256Hex(toCanonicalJsonValue(baseAsset.pbr_profile));
+    const updatedPbrHash = sha256Hex(toCanonicalJsonValue(updatedAsset.pbr_profile));
+    if (basePbrHash !== updatedPbrHash) {
+      hasAppearanceChanges = true;
+    }
+  }
+
+  // Detect removed parts: removing a part affects geometry, appearance, properties, and hierarchy
   for (const [id, bp] of baseMap.entries()) {
     if (!updatedMap.has(id)) {
       removed.push(bp);
+      hasGeometryChanges = true;
+      hasAppearanceChanges = true;
+      hasPropertiesChanges = true;
+      hasHierarchyChanges = true;
     }
   }
 
@@ -133,6 +192,9 @@ export function computeIncrementalDiff(
     if (!bp) {
       added.push(up);
       hasGeometryChanges = true;
+      hasAppearanceChanges = true;
+      hasPropertiesChanges = true;
+      hasHierarchyChanges = true;
       continue;
     }
 
@@ -142,7 +204,8 @@ export function computeIncrementalDiff(
     const hierChanged =
       (bp.hierarchyPath || '') !== (up.hierarchyPath || '') ||
       (bp.parentId || '') !== (up.parentId || '') ||
-      (bp.parentName || '') !== (up.parentName || '');
+      (bp.parentName || '') !== (up.parentName || '') ||
+      (bp.name || '') !== (up.name || '');
 
     if (geoChanged || appChanged || propChanged || hierChanged) {
       if (geoChanged) hasGeometryChanges = true;
@@ -179,5 +242,7 @@ export function computeIncrementalDiff(
     hasAppearanceChanges,
     hasPropertiesChanges,
     hasHierarchyChanges,
+    hasMissingPartIds,
+    warnings,
   };
 }
