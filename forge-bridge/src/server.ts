@@ -22,7 +22,7 @@ import {
 } from './protocol.js';
 import { verifyTokenConstantTime } from './security.js';
 import { LocalRojoManager } from './rojoHandler.js';
-import { TaskExecutionCoordinator } from './studioQueue.js';
+import { TaskExecutionCoordinator, TaskStateStoreAdapter } from './studioQueue.js';
 import { ForgeCloudOutboundClient } from './cloudClient.js';
 
 dotenv.config();
@@ -39,6 +39,9 @@ export interface BridgeServerOptions {
   maxConcurrency?: number;
   maxFileSizeBytes?: number;
   autoConnectCloud?: boolean;
+  confirmationExpirationMs?: number;
+  stateStore?: TaskStateStoreAdapter;
+  stateFilePath?: string;
 }
 
 export interface ActivityLogEntry {
@@ -119,6 +122,9 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
   const coordinator = new TaskExecutionCoordinator({
     maxConcurrency,
     defaultTimeoutMs: taskTimeoutMs,
+    confirmationExpirationMs: options?.confirmationExpirationMs,
+    stateStore: options?.stateStore,
+    stateFilePath: options?.stateFilePath,
   });
 
   const cloudClient = new ForgeCloudOutboundClient({

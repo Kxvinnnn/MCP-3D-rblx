@@ -683,13 +683,25 @@ export interface StudioApplicationReceipt {
 }
 
 /**
- * Verifies that a task result from the Bridge/Studio contains a cryptographic and structural
- * confirmation receipt proving that Roblox Studio actually reconstructed/applied the expected model:
- * - Rules A-H:
- *   - Never marks completed or verified=true when pendingDeletionPartIds is non-empty (awaiting_confirmation)
- *   - Never marks completed or verified=true when failedPartIds or errors is non-empty (partially_applied / failed)
- *   - Verifies operationId/taskId, expectedPartCount === actualPartCount, expectedModelHash === appliedModelHash,
- *     and per-part verifiedGeometryPartIds when present.
+ * Strictly validates that a task result from the Bridge/Studio contains all 12 mandatory fields
+ * of a cryptographic and structural confirmation receipt proving that Roblox Studio actually
+ * reconstructed/applied the expected model (Fase 2):
+ * - Mandatory fields (zero fallback defaults):
+ *   1. `expectedTaskId`
+ *   2. `taskResult.taskId`
+ *   3. `result.taskId`
+ *   4. `result.operationId`
+ *   5. `result.modelName`
+ *   6. `result.expectedPartCount`
+ *   7. `result.actualPartCount`
+ *   8. `result.expectedModelHash`
+ *   9. `result.appliedModelHash`
+ *  10. `result.verifiedGeometryPartIds`
+ *  11. `result.failedPartIds`
+ *  12. `result.pendingDeletionPartIds`
+ * - Enforces explicit `partId` policy on all `expectedAsset.parts` (rejects missing or duplicate `partId`s).
+ * - Rejects missing IDs, contradictory IDs, duplicate IDs, wrong `modelName`, wrong hash, wrong counts,
+ *   unverified parts, failed parts, pending deletions, and receipts belonging to another task.
  */
 export function verifyStudioApplicationReceipt(
   taskResult: any,
@@ -710,42 +722,280 @@ export function verifyStudioApplicationReceipt(
     };
   }
 
-  const resObj = taskResult.result && typeof taskResult.result === 'object' ? taskResult.result : {};
-  const toStrArray = (arr: any): string[] =>
+  const trimmedExpectedTaskId = typeof expectedTaskId === 'string' ? expectedTaskId.trim() : '';
+  if (!trimmedExpectedTaskId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'expectedTaskId es obligatorio para verificar el recibo de Roblox Studio.',
+    };
+  }
+
+  const envelopeTaskId = typeof taskResult.taskId === 'string' ? taskResult.taskId.trim() : '';
+  if (!envelopeTaskId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El sobre de respuesta del puente carece de taskResult.taskId obligatorio.',
+    };
+  }
+
+  if (envelopeTaskId !== trimmedExpectedTaskId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `Contradicción de taskId: taskResult.taskId ('${envelopeTaskId}') no coincide con expectedTaskId ('${trimmedExpectedTaskId}').`,
+    };
+  }
+
+  if (!expectedAsset || typeof expectedAsset !== 'object' || typeof expectedAsset.name !== 'string' || !expectedAsset.name.trim()) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El modelo esperado (expectedAsset) carece de identidad o nombre válido.',
+    };
+  }
+
+  const trimmedExpectedHash = typeof expectedModelHash === 'string' ? expectedModelHash.trim() : '';
+  if (!trimmedExpectedHash) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'expectedModelHash es obligatorio y no puede ser vacío.',
+    };
+  }
+
+  // Explicit identity policy on expectedAsset.parts: every part must have a unique, non-empty partId
+  const expectedParts = Array.isArray(expectedAsset.parts) ? expectedAsset.parts : [];
+  const expectedPartIdSet = new Set<string>();
+  for (let i = 0; i < expectedParts.length; i++) {
+    const p = expectedParts[i];
+    const pid = typeof p?.partId === 'string' ? p.partId.trim() : '';
+    if (!pid) {
+      return {
+        valid: false,
+        status: 'failed',
+        reason: `Política de identidad violada: La pieza esperada #${i + 1} ('${p?.name || 'SinNombre'}') carece de partId explícito.`,
+      };
+    }
+    if (expectedPartIdSet.has(pid)) {
+      return {
+        valid: false,
+        status: 'failed',
+        reason: `Política de identidad violada: partId duplicado ('${pid}') en expectedAsset.parts.`,
+      };
+    }
+    expectedPartIdSet.add(pid);
+  }
+
+  if (!taskResult.result || typeof taskResult.result !== 'object' || Array.isArray(taskResult.result)) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason:
+        taskResult.error ||
+        `El puente reportó estado '${String(taskResult.status)}' sin un objeto de recibo estructurado (result ausente).`,
+    };
+  }
+
+  const resObj = taskResult.result as Record<string, any>;
+
+  const parseStrictIdArray = (
+    raw: unknown,
+    fieldName: string
+  ): { ok: true; values: string[] } | { ok: false; error: string } => {
+    if (!Array.isArray(raw)) {
+      return {
+        ok: false,
+        error: `Campo obligatorio '${fieldName}' ausente o no es un array en el recibo de Studio.`,
+      };
+    }
+    const values: string[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < raw.length; i++) {
+      const item = raw[i];
+      if (typeof item !== 'string' || item.trim().length === 0) {
+        return {
+          ok: false,
+          error: `Campo '${fieldName}' contiene un identificador vacío o no válido en la posición ${i}.`,
+        };
+      }
+      const trimmed = item.trim();
+      if (seen.has(trimmed)) {
+        return {
+          ok: false,
+          error: `Campo '${fieldName}' contiene un identificador duplicado ('${trimmed}').`,
+        };
+      }
+      seen.add(trimmed);
+      values.push(trimmed);
+    }
+    return { ok: true, values };
+  };
+
+  // Validate mandatory result.taskId and result.operationId (no fallbacks)
+  const receiptTaskId = typeof resObj.taskId === 'string' ? resObj.taskId.trim() : '';
+  if (!receiptTaskId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El recibo de Studio carece del campo obligatorio result.taskId.',
+    };
+  }
+  const receiptOperationId = typeof resObj.operationId === 'string' ? resObj.operationId.trim() : '';
+  if (!receiptOperationId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El recibo de Studio carece del campo obligatorio result.operationId.',
+    };
+  }
+  if (receiptTaskId !== trimmedExpectedTaskId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `Contradicción de taskId: result.taskId ('${receiptTaskId}') no coincide con expectedTaskId ('${trimmedExpectedTaskId}').`,
+    };
+  }
+  if (receiptOperationId !== trimmedExpectedTaskId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `Contradicción de operationId: result.operationId ('${receiptOperationId}') no coincide con expectedTaskId ('${trimmedExpectedTaskId}').`,
+    };
+  }
+  if (receiptTaskId !== receiptOperationId) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `Contradicción interna en recibo: result.taskId ('${receiptTaskId}') !== result.operationId ('${receiptOperationId}').`,
+    };
+  }
+
+  // Validate mandatory modelName (no fallback to expectedAsset.name)
+  const receiptModelName = typeof resObj.modelName === 'string' ? resObj.modelName.trim() : '';
+  if (!receiptModelName) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El recibo de Studio carece del campo obligatorio modelName.',
+    };
+  }
+  if (receiptModelName !== expectedAsset.name) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `El modelName del recibo ('${receiptModelName}') no coincide con el modelo enviado ('${expectedAsset.name}').`,
+    };
+  }
+
+  // Validate mandatory expectedPartCount and actualPartCount (no fallback to expectedAsset.parts.length)
+  if (
+    typeof resObj.expectedPartCount !== 'number' ||
+    !Number.isInteger(resObj.expectedPartCount) ||
+    resObj.expectedPartCount < 0
+  ) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El recibo de Studio carece de un expectedPartCount entero válido.',
+    };
+  }
+  if (resObj.expectedPartCount !== expectedParts.length) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `El expectedPartCount del recibo (${resObj.expectedPartCount}) no coincide con las piezas enviadas (${expectedParts.length}).`,
+    };
+  }
+
+  if (
+    typeof resObj.actualPartCount !== 'number' ||
+    !Number.isInteger(resObj.actualPartCount) ||
+    resObj.actualPartCount < 0
+  ) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El recibo de Studio carece de un actualPartCount entero válido.',
+    };
+  }
+
+  // Validate mandatory expectedModelHash and appliedModelHash (no fallback to expectedModelHash)
+  const receiptExpectedHash = typeof resObj.expectedModelHash === 'string' ? resObj.expectedModelHash.trim() : '';
+  if (!receiptExpectedHash) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El recibo de Studio carece del campo obligatorio expectedModelHash.',
+    };
+  }
+  if (receiptExpectedHash !== trimmedExpectedHash) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: `El expectedModelHash del recibo ('${receiptExpectedHash.slice(0, 12)}') no coincide con el hash enviado ('${trimmedExpectedHash.slice(0, 12)}').`,
+    };
+  }
+
+  const receiptAppliedHash = typeof resObj.appliedModelHash === 'string' ? resObj.appliedModelHash.trim() : '';
+  if (!receiptAppliedHash) {
+    return {
+      valid: false,
+      status: 'failed',
+      reason: 'El recibo de Studio carece del campo obligatorio appliedModelHash.',
+    };
+  }
+
+  // Validate mandatory verifiedGeometryPartIds, failedPartIds, pendingDeletionPartIds arrays (no fallback to [])
+  const verifiedArrCheck = parseStrictIdArray(resObj.verifiedGeometryPartIds, 'verifiedGeometryPartIds');
+  if (!verifiedArrCheck.ok) {
+    return { valid: false, status: 'failed', reason: verifiedArrCheck.error };
+  }
+  const failedArrCheck = parseStrictIdArray(resObj.failedPartIds, 'failedPartIds');
+  if (!failedArrCheck.ok) {
+    return { valid: false, status: 'failed', reason: failedArrCheck.error };
+  }
+  const pendingDelArrCheck = parseStrictIdArray(resObj.pendingDeletionPartIds, 'pendingDeletionPartIds');
+  if (!pendingDelArrCheck.ok) {
+    return { valid: false, status: 'failed', reason: pendingDelArrCheck.error };
+  }
+
+  const verifiedGeometryPartIds = verifiedArrCheck.values;
+  const failedPartIds = failedArrCheck.values;
+  const pendingDeletionPartIds = pendingDelArrCheck.values;
+
+  // Reject contradictory IDs appearing in both verifiedGeometryPartIds and failedPartIds
+  const verifiedSet = new Set(verifiedGeometryPartIds);
+  for (const fid of failedPartIds) {
+    if (verifiedSet.has(fid)) {
+      return {
+        valid: false,
+        status: 'failed',
+        reason: `Contradicción en recibo: partId '${fid}' figura simultáneamente en verifiedGeometryPartIds y failedPartIds.`,
+      };
+    }
+  }
+
+  const toOptionalStrArray = (arr: unknown): string[] =>
     Array.isArray(arr) ? arr.map((x) => String(x || '').trim()).filter(Boolean) : [];
 
-  const pendingDeletionPartIds = toStrArray(resObj.pendingDeletionPartIds);
-  const failedPartIds = toStrArray(resObj.failedPartIds);
-  const verifiedGeometryPartIds = toStrArray(resObj.verifiedGeometryPartIds);
-  const addedPartIds = toStrArray(resObj.addedPartIds);
-  const updatedPartIds = toStrArray(resObj.updatedPartIds);
-  const removedPartIds = toStrArray(resObj.removedPartIds);
-  const warnings = toStrArray(resObj.warnings);
-  const errors = toStrArray(resObj.errors);
-
-  const confirmedOpId = String(resObj.operationId || resObj.taskId || taskResult.taskId || '').trim();
-  const rawActualCount =
-    typeof resObj.actualPartCount === 'number'
-      ? resObj.actualPartCount
-      : typeof resObj.appliedPartCount === 'number'
-      ? resObj.appliedPartCount
-      : typeof resObj.partCount === 'number'
-      ? resObj.partCount
-      : undefined;
-
-  const confirmedHash = String(resObj.appliedModelHash || resObj.modelHash || '').trim();
+  const addedPartIds = toOptionalStrArray(resObj.addedPartIds);
+  const updatedPartIds = toOptionalStrArray(resObj.updatedPartIds);
+  const removedPartIds = toOptionalStrArray(resObj.removedPartIds);
+  const warnings = toOptionalStrArray(resObj.warnings);
+  const errors = toOptionalStrArray(resObj.errors);
 
   const normalizedReceipt: StudioApplicationReceipt = {
-    operationId: confirmedOpId,
-    taskId: String(taskResult.taskId || resObj.taskId || confirmedOpId),
+    operationId: receiptOperationId,
+    taskId: receiptTaskId,
     status: 'failed',
     verified: Boolean(resObj.verified),
-    modelName: String(resObj.modelName || expectedAsset.name),
-    expectedModelHash: String(resObj.expectedModelHash || expectedModelHash),
-    appliedModelHash: confirmedHash,
-    expectedPartCount:
-      typeof resObj.expectedPartCount === 'number' ? resObj.expectedPartCount : expectedAsset.parts.length,
-    actualPartCount: typeof rawActualCount === 'number' ? rawActualCount : 0,
+    modelName: receiptModelName,
+    expectedModelHash: receiptExpectedHash,
+    appliedModelHash: receiptAppliedHash,
+    expectedPartCount: resObj.expectedPartCount,
+    actualPartCount: resObj.actualPartCount,
     addedPartIds,
     updatedPartIds,
     removedPartIds,
@@ -765,10 +1015,17 @@ export function verifyStudioApplicationReceipt(
     resObj.status === 'awaiting_studio_confirmation' ||
     (typeof resObj.pendingDestructiveConfirmations === 'number' && resObj.pendingDestructiveConfirmations > 0)
   ) {
+    if (pendingDeletionPartIds.length === 0) {
+      return {
+        valid: false,
+        status: 'failed',
+        reason: 'El recibo indica awaiting_confirmation pero pendingDeletionPartIds está vacío.',
+        receipt: normalizedReceipt,
+      };
+    }
     normalizedReceipt.status = 'awaiting_confirmation';
     normalizedReceipt.verified = false;
-    const pendingList =
-      pendingDeletionPartIds.length > 0 ? ` (${pendingDeletionPartIds.join(', ')})` : '';
+    const pendingList = ` (${pendingDeletionPartIds.join(', ')})`;
     return {
       valid: false,
       status: 'awaiting_confirmation',
@@ -796,7 +1053,9 @@ export function verifyStudioApplicationReceipt(
     const detail =
       errors.length > 0
         ? errors.join('; ')
-        : `Fallaron ${failedPartIds.length} pieza(s): ${failedPartIds.join(', ')}`;
+        : failedPartIds.length > 0
+        ? `Fallaron ${failedPartIds.length} pieza(s): ${failedPartIds.join(', ')}`
+        : 'Aplicación parcial reportada por Roblox Studio.';
     return {
       valid: false,
       status: derivedStatus,
@@ -816,118 +1075,67 @@ export function verifyStudioApplicationReceipt(
     };
   }
 
-  if (!taskResult.result || typeof taskResult.result !== 'object') {
+  if (resObj.status !== 'completed' || resObj.verified !== true) {
+    normalizedReceipt.status = 'failed';
+    normalizedReceipt.verified = false;
     return {
       valid: false,
       status: 'failed',
-      reason: 'El puente reportó completed pero Roblox Studio no devolvió un objeto de confirmación (result vacío).',
+      reason: resObj.error || 'El plugin de Roblox Studio reportó un fallo de verificación o estado no completado.',
       receipt: normalizedReceipt,
     };
   }
 
-  if (resObj.status === 'error' || resObj.status === 'failed' || resObj.verified === false) {
-    return {
-      valid: false,
-      status: 'failed',
-      reason: resObj.error || 'El plugin de Roblox Studio reportó un fallo de verificación al aplicar el modelo.',
-      receipt: normalizedReceipt,
-    };
-  }
-
-  // 1. Verify operation identifier
-  if (!confirmedOpId) {
-    return {
-      valid: false,
-      status: 'failed',
-      reason: 'La respuesta de Studio carece de identificador de operación verificable (operationId / taskId).',
-      receipt: normalizedReceipt,
-    };
-  }
-  if (expectedTaskId && resObj.operationId && String(resObj.operationId) !== String(expectedTaskId)) {
-    return {
-      valid: false,
-      status: 'failed',
-      reason: `El operationId confirmado por Studio ('${resObj.operationId}') no coincide con la tarea enviada ('${expectedTaskId}').`,
-      receipt: normalizedReceipt,
-    };
-  }
-
-  // 2. Verify applied part count
-  if (typeof rawActualCount !== 'number' || !Number.isInteger(rawActualCount)) {
-    return {
-      valid: false,
-      status: 'failed',
-      reason: 'La respuesta de Studio no incluye la cantidad verificada de piezas aplicadas (actualPartCount / appliedPartCount).',
-      receipt: normalizedReceipt,
-    };
-  }
-
-  if (rawActualCount !== expectedAsset.parts.length) {
-    const derivedStatus: StudioApplicationReceipt['status'] = rawActualCount > 0 ? 'partially_applied' : 'failed';
+  // Verify applied part count matches expected
+  if (resObj.actualPartCount !== expectedParts.length) {
+    const derivedStatus: StudioApplicationReceipt['status'] =
+      resObj.actualPartCount > 0 ? 'partially_applied' : 'failed';
     normalizedReceipt.status = derivedStatus;
     normalizedReceipt.verified = false;
     return {
       valid: false,
       status: derivedStatus,
-      reason: `Roblox Studio aplicó ${rawActualCount} pieza(s), pero el modelo enviado contiene ${expectedAsset.parts.length} pieza(s).`,
+      reason: `Roblox Studio aplicó ${resObj.actualPartCount} pieza(s), pero el modelo enviado contiene ${expectedParts.length} pieza(s).`,
       receipt: normalizedReceipt,
     };
   }
 
-  // 3. Verify per-part verifiedGeometryPartIds if provided in structured receipt
-  if (Array.isArray(resObj.verifiedGeometryPartIds)) {
-    if (verifiedGeometryPartIds.length !== expectedAsset.parts.length) {
-      const derivedStatus: StudioApplicationReceipt['status'] =
-        verifiedGeometryPartIds.length > 0 ? 'partially_applied' : 'failed';
-      normalizedReceipt.status = derivedStatus;
+  // Verify per-part verifiedGeometryPartIds against every expected partId
+  if (verifiedGeometryPartIds.length !== expectedParts.length) {
+    const derivedStatus: StudioApplicationReceipt['status'] =
+      verifiedGeometryPartIds.length > 0 ? 'partially_applied' : 'failed';
+    normalizedReceipt.status = derivedStatus;
+    normalizedReceipt.verified = false;
+    return {
+      valid: false,
+      status: derivedStatus,
+      reason: `Solo ${verifiedGeometryPartIds.length} de ${expectedParts.length} pieza(s) tienen geometría EditableMesh verificada en Studio.`,
+      receipt: normalizedReceipt,
+    };
+  }
+
+  for (const p of expectedParts) {
+    const pid = p.partId!.trim();
+    if (!verifiedSet.has(pid)) {
+      normalizedReceipt.status = 'partially_applied';
       normalizedReceipt.verified = false;
       return {
         valid: false,
-        status: derivedStatus,
-        reason: `Solo ${verifiedGeometryPartIds.length} de ${expectedAsset.parts.length} pieza(s) tienen geometría EditableMesh verificada en Studio.`,
+        status: 'partially_applied',
+        reason: `La pieza '${p.name}' (${pid}) no figura en verifiedGeometryPartIds del recibo de Studio.`,
         receipt: normalizedReceipt,
       };
     }
-    const verifiedSet = new Set(verifiedGeometryPartIds);
-    for (const p of expectedAsset.parts) {
-      if (p.partId && !verifiedSet.has(p.partId)) {
-        normalizedReceipt.status = 'partially_applied';
-        normalizedReceipt.verified = false;
-        return {
-          valid: false,
-          status: 'partially_applied',
-          reason: `La pieza '${p.name}' (${p.partId}) no figura en verifiedGeometryPartIds del recibo de Studio.`,
-          receipt: normalizedReceipt,
-        };
-      }
-    }
   }
 
-  // 4. Verify model hash
-  if (!confirmedHash) {
+  // Verify appliedModelHash matches expectedModelHash
+  if (receiptAppliedHash !== trimmedExpectedHash) {
+    normalizedReceipt.status = 'failed';
+    normalizedReceipt.verified = false;
     return {
       valid: false,
       status: 'failed',
-      reason: 'La respuesta de Studio no incluye el hash canónico del modelo aplicado (appliedModelHash / modelHash).',
-      receipt: normalizedReceipt,
-    };
-  }
-
-  if (confirmedHash !== expectedModelHash) {
-    return {
-      valid: false,
-      status: 'failed',
-      reason: `El hash del modelo aplicado en Studio (${confirmedHash.slice(0, 8)}) no coincide con el hash enviado (${expectedModelHash.slice(0, 8)}).`,
-      receipt: normalizedReceipt,
-    };
-  }
-
-  // 5. Verify model name if provided
-  if (resObj.modelName && String(resObj.modelName) !== expectedAsset.name) {
-    return {
-      valid: false,
-      status: 'failed',
-      reason: `El nombre del modelo aplicado en Studio ('${resObj.modelName}') no coincide con '${expectedAsset.name}'.`,
+      reason: `El hash del modelo aplicado en Studio (${receiptAppliedHash.slice(0, 8)}) no coincide con el hash enviado (${trimmedExpectedHash.slice(0, 8)}).`,
       receipt: normalizedReceipt,
     };
   }
@@ -935,6 +1143,343 @@ export function verifyStudioApplicationReceipt(
   normalizedReceipt.status = 'completed';
   normalizedReceipt.verified = true;
   return { valid: true, status: 'completed', receipt: normalizedReceipt };
+}
+
+export interface StudioModelReconstructionComparison {
+  valid: boolean;
+  status: 'completed' | 'partially_applied' | 'failed';
+  verified: boolean;
+  reconstructedAsset: Forge3DAsset | null;
+  verifiedPartIds: string[];
+  failedPartIds: string[];
+  discrepancies: string[];
+  domainComparison: {
+    identityMatches: boolean;
+    geometryMatches: boolean;
+    normalsMatch: boolean;
+    uvsMatch: boolean;
+    materialsMatch: boolean;
+    transformsMatch: boolean;
+    hierarchyMatches: boolean;
+    propertiesMatch: boolean;
+    hashMatches: boolean;
+  };
+}
+
+/**
+ * Fase 5 — Consumes the output of `studio.reconstruct_model`, reconstructs the Forge3DAsset,
+ * and strictly compares the reconstructed Studio model against the original Forge model across
+ * all 9 domains: identity, geometry, normals, UVs, materials, transforms, hierarchy, properties, and hash.
+ * Differentiates complete (`completed`), partial (`partially_applied`), and failed (`failed`) reconstruction.
+ */
+export function reconcileReconstructedModelFromStudio(
+  originalAsset: Forge3DAsset,
+  studioReconstructionResponse: any
+): StudioModelReconstructionComparison {
+  const emptyDomains = {
+    identityMatches: false,
+    geometryMatches: false,
+    normalsMatch: false,
+    uvsMatch: false,
+    materialsMatch: false,
+    transformsMatch: false,
+    hierarchyMatches: false,
+    propertiesMatch: false,
+    hashMatches: false,
+  };
+
+  if (!originalAsset || typeof originalAsset !== 'object' || !Array.isArray(originalAsset.parts) || originalAsset.parts.length === 0) {
+    return {
+      valid: false,
+      status: 'failed',
+      verified: false,
+      reconstructedAsset: null,
+      verifiedPartIds: [],
+      failedPartIds: [],
+      discrepancies: ['El modelo original proporcionado para comparar es inválido o no tiene piezas.'],
+      domainComparison: emptyDomains,
+    };
+  }
+
+  const resObj =
+    studioReconstructionResponse &&
+    typeof studioReconstructionResponse === 'object' &&
+    studioReconstructionResponse.result &&
+    typeof studioReconstructionResponse.result === 'object'
+      ? studioReconstructionResponse.result
+      : studioReconstructionResponse;
+
+  if (!resObj || typeof resObj !== 'object') {
+    return {
+      valid: false,
+      status: 'failed',
+      verified: false,
+      reconstructedAsset: null,
+      verifiedPartIds: [],
+      failedPartIds: [],
+      discrepancies: ['La respuesta de studio.reconstruct_model está vacía o es inválida.'],
+      domainComparison: emptyDomains,
+    };
+  }
+
+  const stabilizedOriginalParts = ensureStablePartIds(originalAsset.parts, originalAsset.name);
+  const stabilizedOriginal: Forge3DAsset = {
+    ...originalAsset,
+    parts: stabilizedOriginalParts,
+  };
+  const expectedModelHash = computeAssetContentHash(stabilizedOriginal);
+
+  const rawParts: MeshPart3DSpec[] = Array.isArray(resObj.parts) ? resObj.parts : [];
+  const reportedVerifiedIds: string[] = Array.isArray(resObj.verifiedGeometryPartIds)
+    ? resObj.verifiedGeometryPartIds.map((x: any) => String(x || '').trim()).filter(Boolean)
+    : [];
+  const reportedFailedIds: string[] = Array.isArray(resObj.failedPartIds)
+    ? resObj.failedPartIds.map((x: any) => String(x || '').trim()).filter(Boolean)
+    : [];
+  const reportedErrors: string[] = Array.isArray(resObj.errors)
+    ? resObj.errors.map((x: any) => String(x || '').trim()).filter(Boolean)
+    : [];
+
+  const discrepancies: string[] = [...reportedErrors];
+  const verifiedPartIds: string[] = [];
+  const failedPartIdsSet = new Set<string>(reportedFailedIds);
+
+  if (rawParts.length === 0) {
+    for (const origPart of stabilizedOriginalParts) {
+      if (origPart.partId) failedPartIdsSet.add(origPart.partId);
+    }
+    if (discrepancies.length === 0) {
+      discrepancies.push('studio.reconstruct_model no devolvió ninguna pieza reconstruida.');
+    }
+    return {
+      valid: false,
+      status: 'failed',
+      verified: false,
+      reconstructedAsset: null,
+      verifiedPartIds: [],
+      failedPartIds: Array.from(failedPartIdsSet),
+      discrepancies,
+      domainComparison: emptyDomains,
+    };
+  }
+
+  let identityMatches = true;
+  let geometryMatches = true;
+  let normalsMatch = true;
+  let uvsMatch = true;
+  let materialsMatch = true;
+  let transformsMatch = true;
+  let hierarchyMatches = true;
+  let propertiesMatch = true;
+
+  const reconstructedModelName = typeof resObj.modelName === 'string' ? resObj.modelName.trim() : '';
+  if (!reconstructedModelName || reconstructedModelName !== stabilizedOriginal.name) {
+    identityMatches = false;
+    discrepancies.push(
+      `Identidad del modelo difiere: esperado '${stabilizedOriginal.name}', recibido '${reconstructedModelName || 'ausente'}'.`
+    );
+  }
+
+  const reportedVerifiedSet = new Set<string>(reportedVerifiedIds);
+  const reconPartsById = new Map<string, MeshPart3DSpec>();
+  for (const rp of rawParts) {
+    const pid = typeof rp?.partId === 'string' ? rp.partId.trim() : '';
+    if (!pid || reconPartsById.has(pid)) {
+      identityMatches = false;
+      discrepancies.push(`Pieza reconstruida '${rp?.name || 'SinNombre'}' tiene partId ausente o duplicado ('${pid}').`);
+    } else {
+      reconPartsById.set(pid, rp);
+    }
+  }
+
+  if (rawParts.length !== stabilizedOriginalParts.length) {
+    identityMatches = false;
+    discrepancies.push(
+      `Conteo de piezas reconstruidas (${rawParts.length}) difiere del original (${stabilizedOriginalParts.length}).`
+    );
+  }
+
+  for (const origPart of stabilizedOriginalParts) {
+    const pid = origPart.partId!;
+    const reconPart = reconPartsById.get(pid);
+    if (!reconPart) {
+      identityMatches = false;
+      geometryMatches = false;
+      failedPartIdsSet.add(pid);
+      discrepancies.push(`Pieza original '${origPart.name}' (${pid}) no fue encontrada en el modelo reconstruido.`);
+      continue;
+    }
+
+    let partOk = !failedPartIdsSet.has(pid);
+    if (reportedVerifiedIds.length > 0 && !reportedVerifiedSet.has(pid)) {
+      partOk = false;
+      failedPartIdsSet.add(pid);
+      discrepancies.push(`Pieza '${origPart.name}' (${pid}) no figura como verificada en verifiedGeometryPartIds.`);
+    }
+
+    // 1. Identity (partId & name)
+    if (reconPart.name !== origPart.name || reconPart.partId !== origPart.partId) {
+      identityMatches = false;
+      partOk = false;
+      discrepancies.push(`Identidad de pieza '${origPart.name}' (${pid}) alterada en reconstrucción.`);
+    }
+
+    // 2. Geometry (vertices & faces)
+    const origVerts = origPart.meshData?.vertices || [];
+    const origFaces = origPart.meshData?.faces || [];
+    const reconVerts = reconPart.meshData?.vertices || [];
+    const reconFaces = reconPart.meshData?.faces || [];
+    if (
+      toCanonicalJsonValue(origVerts) !== toCanonicalJsonValue(reconVerts) ||
+      toCanonicalJsonValue(origFaces) !== toCanonicalJsonValue(reconFaces)
+    ) {
+      geometryMatches = false;
+      partOk = false;
+      discrepancies.push(`Geometría (vertices/faces) de pieza '${origPart.name}' (${pid}) no coincide tras reconstrucción.`);
+    }
+
+    // 3. Normals
+    const origNormals = origPart.meshData?.normals;
+    const reconNormals = reconPart.meshData?.normals;
+    if (Array.isArray(origNormals) && origNormals.length > 0) {
+      if (!Array.isArray(reconNormals) || toCanonicalJsonValue(origNormals) !== toCanonicalJsonValue(reconNormals)) {
+        normalsMatch = false;
+        partOk = false;
+        discrepancies.push(`Normales de pieza '${origPart.name}' (${pid}) perdidas o alteradas tras reconstrucción.`);
+      }
+    }
+
+    // 4. UVs
+    const origUvs = origPart.meshData?.uvs;
+    const reconUvs = reconPart.meshData?.uvs;
+    if (Array.isArray(origUvs) && origUvs.length > 0) {
+      if (!Array.isArray(reconUvs) || toCanonicalJsonValue(origUvs) !== toCanonicalJsonValue(reconUvs)) {
+        uvsMatch = false;
+        partOk = false;
+        discrepancies.push(`Coordenadas UV de pieza '${origPart.name}' (${pid}) perdidas o alteradas tras reconstrucción.`);
+      }
+    }
+
+    // 5. Materials & PBR
+    if (partAppearanceHash(origPart) !== partAppearanceHash(reconPart)) {
+      materialsMatch = false;
+      partOk = false;
+      discrepancies.push(`Materiales o apariencia PBR de pieza '${origPart.name}' (${pid}) difieren tras reconstrucción.`);
+    }
+
+    // 6. Transforms (size, position, rotation, rotationMatrix)
+    if (
+      toCanonicalJsonValue(origPart.size) !== toCanonicalJsonValue(reconPart.size) ||
+      toCanonicalJsonValue(origPart.position) !== toCanonicalJsonValue(reconPart.position) ||
+      toCanonicalJsonValue(origPart.rotation) !== toCanonicalJsonValue(reconPart.rotation) ||
+      (origPart.rotationMatrix &&
+        reconPart.rotationMatrix &&
+        toCanonicalJsonValue(origPart.rotationMatrix) !== toCanonicalJsonValue(reconPart.rotationMatrix))
+    ) {
+      transformsMatch = false;
+      partOk = false;
+      discrepancies.push(`Transformaciones (size/position/rotation) de pieza '${origPart.name}' (${pid}) difieren.`);
+    }
+
+    // 7. Hierarchy
+    if (
+      (origPart.hierarchyPath || `Root/${origPart.name}`) !== (reconPart.hierarchyPath || `Root/${reconPart.name}`) ||
+      (origPart.parentName || 'Root') !== (reconPart.parentName || 'Root') ||
+      (origPart.parentId || 'fnode_Root') !== (reconPart.parentId || 'fnode_Root')
+    ) {
+      hierarchyMatches = false;
+      partOk = false;
+      discrepancies.push(`Jerarquía de pieza '${origPart.name}' (${pid}) difiere tras reconstrucción.`);
+    }
+
+    // 8. Physical properties
+    if (
+      Boolean(origPart.anchored ?? true) !== Boolean(reconPart.anchored ?? true) ||
+      Boolean(origPart.canCollide ?? true) !== Boolean(reconPart.canCollide ?? true) ||
+      (origPart.collisionFidelity || 'Hull') !== (reconPart.collisionFidelity || 'Hull')
+    ) {
+      propertiesMatch = false;
+      partOk = false;
+      discrepancies.push(`Propiedades físicas (anchored/canCollide/collisionFidelity) de pieza '${origPart.name}' (${pid}) difieren.`);
+    }
+
+    if (partOk) {
+      verifiedPartIds.push(pid);
+    } else {
+      failedPartIdsSet.add(pid);
+    }
+  }
+
+  const reconstructedAsset: Forge3DAsset = {
+    ...stabilizedOriginal,
+    name: reconstructedModelName || stabilizedOriginal.name,
+    parts: rawParts,
+  };
+
+  const geoReport = validateRobloxGeometry(reconstructedAsset);
+  if (!geoReport.isValid) {
+    geometryMatches = false;
+    for (const err of geoReport.errors) {
+      discrepancies.push(err);
+    }
+  }
+
+  const reconstructedCanonicalHash = computeAssetContentHash(reconstructedAsset);
+  const reportedAppliedHash = typeof resObj.appliedModelHash === 'string' ? resObj.appliedModelHash.trim() : '';
+  const hashMatches =
+    reconstructedCanonicalHash === expectedModelHash &&
+    (reportedAppliedHash === '' ||
+      reportedAppliedHash === expectedModelHash ||
+      reportedAppliedHash.startsWith('studio_readback_'));
+
+  if (!hashMatches) {
+    discrepancies.push(
+      `El hash canónico del modelo reconstruido (${reconstructedCanonicalHash.slice(0, 8)}) difiere del original (${expectedModelHash.slice(0, 8)}).`
+    );
+  }
+
+  const allDomainsMatch =
+    identityMatches &&
+    geometryMatches &&
+    normalsMatch &&
+    uvsMatch &&
+    materialsMatch &&
+    transformsMatch &&
+    hierarchyMatches &&
+    propertiesMatch &&
+    hashMatches &&
+    failedPartIdsSet.size === 0 &&
+    verifiedPartIds.length === stabilizedOriginalParts.length;
+
+  const anyPartOrDomainReconstructed =
+    verifiedPartIds.length > 0 || (reconPartsById.size > 0 && (identityMatches || geometryMatches));
+
+  const status: StudioModelReconstructionComparison['status'] = allDomainsMatch
+    ? 'completed'
+    : anyPartOrDomainReconstructed
+    ? 'partially_applied'
+    : 'failed';
+
+  return {
+    valid: allDomainsMatch,
+    status,
+    verified: allDomainsMatch,
+    reconstructedAsset,
+    verifiedPartIds,
+    failedPartIds: Array.from(failedPartIdsSet),
+    discrepancies,
+    domainComparison: {
+      identityMatches,
+      geometryMatches,
+      normalsMatch,
+      uvsMatch,
+      materialsMatch,
+      transformsMatch,
+      hierarchyMatches,
+      propertiesMatch,
+      hashMatches,
+    },
+  };
 }
 
 interface ForgeContextType {
@@ -1075,6 +1620,20 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Active Conflict state
   const [activeConflict, setActiveConflict] = useState<{ localAsset: Forge3DAsset; remoteAsset: Forge3DAsset } | null>(null);
   const isMountedRef = useRef<boolean>(true);
+  const pendingConfirmationsByTaskIdRef = useRef<
+    Map<
+      string,
+      {
+        taskId: string;
+        operationId: string;
+        modelName: string;
+        expectedModelHash: string;
+        expectedAsset: Forge3DAsset;
+        pendingDeletionPartIds: string[];
+        resolved: boolean;
+      }
+    >
+  >(new Map());
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -2123,6 +2682,17 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         );
 
         if (receiptVerification.status === 'awaiting_confirmation') {
+          if (taskId && receiptVerification.receipt) {
+            pendingConfirmationsByTaskIdRef.current.set(taskId, {
+              taskId,
+              operationId: receiptVerification.receipt.operationId,
+              modelName: assetToPush.name,
+              expectedModelHash,
+              expectedAsset: JSON.parse(JSON.stringify(persistedRojoAsset)),
+              pendingDeletionPartIds: [...receiptVerification.receipt.pendingDeletionPartIds],
+              resolved: false,
+            });
+          }
           const awaitingMsg =
             receiptVerification.reason ||
             `Operación pendiente de confirmación destructiva en Roblox Studio (ID: ${taskId || 'N/A'}).`;
@@ -2278,53 +2848,94 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   /**
    * Reconciles a Studio task receipt after an asynchronous action in Roblox Studio
    * (such as confirming or cancelling a pending destructive deletion).
+   * Supports multiple simultaneous pending tasks bound by taskId, operationId, modelName, and pendingDeletionPartIds,
+   * and rejects duplicate confirmations or responses belonging to another task.
    */
   const reconcileStudioTaskReceipt = useCallback(
     async (
       taskId: string
     ): Promise<{ success: boolean; status: StudioApplicationReceipt['status']; message: string }> => {
-      if (!activeAsset || !taskId) {
+      const trimmedTaskId = typeof taskId === 'string' ? taskId.trim() : '';
+      const boundRecord = trimmedTaskId ? pendingConfirmationsByTaskIdRef.current.get(trimmedTaskId) : undefined;
+
+      if (!trimmedTaskId || (!boundRecord && !activeAsset)) {
         return {
           success: false,
           status: 'failed',
-          message: 'No hay modelo activo o taskId para reconciliar con Roblox Studio.',
+          message: 'No hay modelo activo o taskId válido para reconciliar con Roblox Studio.',
         };
       }
 
-      const stabilizedActive: Forge3DAsset = {
-        ...activeAsset,
-        parts: ensureStablePartIds(activeAsset.parts || [], activeAsset.name),
-      };
-      const expectedModelHash = computeAssetContentHash(stabilizedActive);
+      if (boundRecord && boundRecord.resolved) {
+        const dupMsg = `La operación '${trimmedTaskId}' ya fue resuelta previamente (confirmada o cancelada) y no admite confirmación duplicada.`;
+        return {
+          success: false,
+          status: 'failed',
+          message: dupMsg,
+        };
+      }
+
+      const targetAsset = boundRecord
+        ? boundRecord.expectedAsset
+        : {
+            ...activeAsset!,
+            parts: ensureStablePartIds(activeAsset!.parts || [], activeAsset!.name),
+          };
+      const expectedModelHash = boundRecord
+        ? boundRecord.expectedModelHash
+        : computeAssetContentHash(targetAsset);
 
       try {
-        const res = await fetch(`/api/v1/bridge/task/${encodeURIComponent(taskId)}`);
+        const res = await fetch(`/api/v1/bridge/task/${encodeURIComponent(trimmedTaskId)}`);
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
         const taskResult = await res.json();
         const verification = verifyStudioApplicationReceipt(
           taskResult,
-          taskId,
-          stabilizedActive,
+          trimmedTaskId,
+          targetAsset,
           expectedModelHash
         );
 
-        if (verification.valid && verification.status === 'completed') {
-          savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(stabilizedActive));
-          savedAssetHashRef.current = expectedModelHash;
-          setPendingChanges(false);
-          try {
-            localStorage.removeItem('forge_active_draft');
-          } catch {}
-          setHasRecoverableDraft(false);
-          setDraftTimestamp(null);
+        // Additional check when boundRecord exists: verify removedPartIds / failedPartIds match bound pendingDeletionPartIds
+        if (boundRecord && verification.receipt) {
+          if (
+            verification.receipt.operationId !== boundRecord.operationId ||
+            verification.receipt.modelName !== boundRecord.modelName
+          ) {
+            return {
+              success: false,
+              status: 'failed',
+              message: `El recibo devuelto no corresponde a la operación vinculada ('${boundRecord.operationId}' / '${boundRecord.modelName}').`,
+            };
+          }
+        }
 
-          const msg = `Eliminación destructiva confirmada y verificada en Roblox Studio (${stabilizedActive.parts.length} piezas).`;
+        if (verification.valid && verification.status === 'completed') {
+          if (boundRecord) {
+            boundRecord.resolved = true;
+          }
+          // Only clear pendingChanges if no other simultaneous task is still awaiting confirmation for the active model
+          const hasOtherUnresolved = Array.from(pendingConfirmationsByTaskIdRef.current.values()).some(
+            (r) => !r.resolved
+          );
+          savedAssetSnapshotRef.current = JSON.parse(JSON.stringify(targetAsset));
+          savedAssetHashRef.current = expectedModelHash;
+          setPendingChanges(hasOtherUnresolved);
+          if (!hasOtherUnresolved) {
+            try {
+              localStorage.removeItem('forge_active_draft');
+            } catch {}
+            setHasRecoverableDraft(false);
+            setDraftTimestamp(null);
+          }
+
+          const msg = `Eliminación destructiva confirmada y verificada en Roblox Studio (${targetAsset.parts.length} piezas).`;
           setCurrentSyncStatus({
             state: 'applied_successfully',
             operation: 'push',
-            taskId,
+            taskId: trimmedTaskId,
             message: msg,
             timestamp: new Date().toLocaleTimeString(),
           });
@@ -2333,6 +2944,9 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
 
         if (verification.status === 'partially_applied') {
+          if (boundRecord) {
+            boundRecord.resolved = true;
+          }
           const msg =
             verification.reason ||
             'La operación destructiva fue cancelada o aplicada parcialmente en Roblox Studio. Persisten diferencias locales.';
@@ -2340,7 +2954,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setCurrentSyncStatus({
             state: 'applied_partially',
             operation: 'push',
-            taskId,
+            taskId: trimmedTaskId,
             message: msg,
             timestamp: new Date().toLocaleTimeString(),
           });
@@ -2360,13 +2974,13 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setCurrentSyncStatus({
           state: 'error',
           operation: 'push',
-          taskId,
+          taskId: trimmedTaskId,
           message: errMsg,
           timestamp: new Date().toLocaleTimeString(),
         });
         return { success: false, status: 'failed', message: errMsg };
       } catch (err: any) {
-        const errMsg = `No se pudo consultar el estado de la tarea ${taskId}: ${err?.message || 'Error de red'}`;
+        const errMsg = `No se pudo consultar el estado de la tarea ${trimmedTaskId}: ${err?.message || 'Error de red'}`;
         return { success: false, status: 'failed', message: errMsg };
       }
     },

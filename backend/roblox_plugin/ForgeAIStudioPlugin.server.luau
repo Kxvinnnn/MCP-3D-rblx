@@ -43,6 +43,7 @@ local FORGE_SECURITY_TOKEN = if #savedSecurityToken > 0 then savedSecurityToken 
 local pendingDestructiveOperations: {
     {
         taskId: string?,
+        operationId: string?,
         modelName: string?,
         partIdsToDelete: { string }?,
         description: string,
@@ -182,24 +183,53 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
     local cfEnum = (Enum.CollisionFidelity :: any)[cfModeName] or Enum.CollisionFidelity.Hull
 
     local meshData = partSpec.meshData
-    local vertices = if type(meshData) == "table" and type(meshData.vertices) == "table" then meshData.vertices else {}
-    local normals = if type(meshData) == "table" and type(meshData.normals) == "table" then meshData.normals else {}
-    local uvs = if type(meshData) == "table" and type(meshData.uvs) == "table" then meshData.uvs else {}
-    local faces = if type(meshData) == "table" and type(meshData.faces) == "table" then meshData.faces else {}
+    local rawVertices = if type(meshData) == "table" then meshData.vertices else nil
+    local rawNormals = if type(meshData) == "table" then meshData.normals else nil
+    local rawUvs = if type(meshData) == "table" then meshData.uvs else nil
+    local rawFaces = if type(meshData) == "table" then meshData.faces else nil
+
+    local vertices = if type(rawVertices) == "table" then rawVertices else {}
+    local normals = if type(rawNormals) == "table" then rawNormals else {}
+    local uvs = if type(rawUvs) == "table" then rawUvs else {}
+    local faces = if type(rawFaces) == "table" then rawFaces else {}
     local lastErrorReason: string? = nil
 
     if not hasValidDimensions then
         lastErrorReason = string.format("Dimensiones inválidas o no finitas para '%s'", partName)
+    elseif rawNormals ~= nil and type(rawNormals) ~= "table" then
+        lastErrorReason = string.format("Atributo meshData.normals inválido (no es tabla) para '%s'", partName)
+    elseif rawUvs ~= nil and type(rawUvs) ~= "table" then
+        lastErrorReason = string.format("Atributo meshData.uvs inválido (no es tabla) para '%s'", partName)
     end
 
     -- 1. Primary path: Construct real geometry from buffers via AssetService:CreateEditableMesh()
-    if hasValidDimensions and #vertices >= 3 and #faces >= 1 then
+    if hasValidDimensions and not lastErrorReason and #vertices >= 3 and #faces >= 1 then
         local editableMeshInstance: EditableMesh? = nil
+        local createdPartInstance: MeshPart? = nil
         local expectedTriCount = 0
         local addedTriCount = 0
         local addedVertexCount = 0
+        local hasNormals = (rawNormals ~= nil) and (#normals > 0)
+        local hasUvs = (rawUvs ~= nil) and (#uvs > 0)
 
         local okEditable, generatedOrErr = xpcall(function()
+            if hasNormals and #normals ~= #vertices then
+                error(string.format(
+                    "Cantidad de normales (%d) no coincide con la cantidad de vértices (%d) para '%s'",
+                    #normals,
+                    #vertices,
+                    partName
+                ))
+            end
+            if hasUvs and #uvs ~= #vertices then
+                error(string.format(
+                    "Cantidad de UVs (%d) no coincide con la cantidad de vértices (%d) para '%s'",
+                    #uvs,
+                    #vertices,
+                    partName
+                ))
+            end
+
             local editableMesh = AssetService:CreateEditableMesh()
             if not editableMesh then
                 error("AssetService:CreateEditableMesh() devolvió nil (verifica permisos/memoria de EditableMesh en Studio)")
@@ -222,40 +252,62 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
                 addedVertexCount += 1
             end
 
-            for i, n in ipairs(normals) do
-                if type(n) ~= "table" or #n < 3 or not isFiniteNumberLuau(n[1]) or not isFiniteNumberLuau(n[2]) or not isFiniteNumberLuau(n[3]) then
-                    error(string.format("Normal inválida en índice %d para '%s'", i, partName))
+            if hasNormals then
+                for i, n in ipairs(normals) do
+                    if type(n) ~= "table" or #n < 3 or not isFiniteNumberLuau(n[1]) or not isFiniteNumberLuau(n[2]) or not isFiniteNumberLuau(n[3]) then
+                        error(string.format("Normal inválida en índice %d para '%s'", i, partName))
+                    end
+                    local nx, ny, nz = tonumber(n[1]) or 0, tonumber(n[2]) or 0, tonumber(n[3]) or 0
+                    local magSq = nx * nx + ny * ny + nz * nz
+                    if magSq < 1e-12 then
+                        error(string.format("Normal de magnitud cero en índice %d para '%s'", i, partName))
+                    end
+                    local nid = editableMesh:AddNormal(Vector3.new(nx, ny, nz).Unit)
+                    if not nid then
+                        error(string.format("EditableMesh:AddNormal devolvió nil en índice %d para '%s'", i, partName))
+                    end
+                    normalIds[i] = nid
                 end
-                local nx, ny, nz = tonumber(n[1]) or 0, tonumber(n[2]) or 0, tonumber(n[3]) or 0
-                local magSq = nx * nx + ny * ny + nz * nz
-                if magSq < 1e-12 then
-                    error(string.format("Normal de magnitud cero en índice %d para '%s'", i, partName))
-                end
-                normalIds[i] = editableMesh:AddNormal(Vector3.new(nx, ny, nz).Unit)
             end
 
-            for i, uv in ipairs(uvs) do
-                if type(uv) ~= "table" or #uv < 2 or not isFiniteNumberLuau(uv[1]) or not isFiniteNumberLuau(uv[2]) then
-                    error(string.format("UV inválido en índice %d para '%s'", i, partName))
+            if hasUvs then
+                for i, uv in ipairs(uvs) do
+                    if type(uv) ~= "table" or #uv < 2 or not isFiniteNumberLuau(uv[1]) or not isFiniteNumberLuau(uv[2]) then
+                        error(string.format("UV inválido en índice %d para '%s'", i, partName))
+                    end
+                    local uvid = editableMesh:AddUV(Vector2.new(tonumber(uv[1]) or 0, tonumber(uv[2]) or 0))
+                    if not uvid then
+                        error(string.format("EditableMesh:AddUV devolvió nil en índice %d para '%s'", i, partName))
+                    end
+                    uvIds[i] = uvid
                 end
-                uvIds[i] = editableMesh:AddUV(Vector2.new(tonumber(uv[1]) or 0, tonumber(uv[2]) or 0))
             end
 
             for triIdx, tri in ipairs(faces) do
-                if type(tri) ~= "table" or #tri < 3 then
-                    error(string.format("Cara triangular mal formada en índice %d para '%s'", triIdx, partName))
+                if type(tri) ~= "table" or #tri ~= 3 then
+                    error(string.format("Cara triangular mal formada en índice %d para '%s' (requiere exactamente 3 índices)", triIdx, partName))
                 end
                 expectedTriCount += 1
-                -- JSON faces are 0-based indices; Luau vertexIds table is 1-based
-                local raw1, raw2, raw3 = tonumber(tri[1]), tonumber(tri[2]), tonumber(tri[3])
-                if not raw1 or not raw2 or not raw3 then
-                    error(string.format("Índices no numéricos en cara %d para '%s'", triIdx, partName))
+                -- Strict integer check: reject non-numbers, non-finite numbers, and fractional/decimal indices without math.floor coercion
+                local r1, r2, r3 = tri[1], tri[2], tri[3]
+                if type(r1) ~= "number" or type(r2) ~= "number" or type(r3) ~= "number"
+                    or not isFiniteNumberLuau(r1) or not isFiniteNumberLuau(r2) or not isFiniteNumberLuau(r3)
+                    or (r1 % 1 ~= 0) or (r2 % 1 ~= 0) or (r3 % 1 ~= 0)
+                then
+                    error(string.format("Índice no entero o no finito en cara %d para '%s'", triIdx, partName))
                 end
-                local i1 = math.floor(raw1) + 1
-                local i2 = math.floor(raw2) + 1
-                local i3 = math.floor(raw3) + 1
+                if r1 < 0 or r2 < 0 or r3 < 0 then
+                    error(string.format("Índice negativo en cara %d (%d,%d,%d) para '%s'", triIdx, r1, r2, r3, partName))
+                end
+                -- JSON faces are 0-based integer indices; Luau vertexIds table is 1-based
+                local i1 = r1 + 1
+                local i2 = r2 + 1
+                local i3 = r3 + 1
                 if i1 < 1 or i1 > #vertices or i2 < 1 or i2 > #vertices or i3 < 1 or i3 > #vertices then
-                    error(string.format("Índice fuera de rango en cara %d (%d,%d,%d vs %d vértices) para '%s'", triIdx, i1, i2, i3, #vertices, partName))
+                    error(string.format("Índice fuera de rango en cara %d (%d,%d,%d vs %d vértices) para '%s'", triIdx, r1, r2, r3, #vertices, partName))
+                end
+                if i1 == i2 or i2 == i3 or i1 == i3 then
+                    error(string.format("Cara degenerada con índices repetidos en cara %d (%d,%d,%d) para '%s'", triIdx, r1, r2, r3, partName))
                 end
                 local v1, v2, v3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]
                 if not v1 or not v2 or not v3 or v1 == v2 or v2 == v3 or v1 == v3 then
@@ -274,15 +326,35 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
                     error(string.format("EditableMesh:AddTriangle devolvió nil en cara %d para '%s'", triIdx, partName))
                 end
                 addedTriCount += 1
-                if normalIds[i1] and normalIds[i2] and normalIds[i3] then
-                    pcall(function()
+
+                if hasNormals then
+                    if not normalIds[i1] or not normalIds[i2] or not normalIds[i3] then
+                        error(string.format("IDs de normales faltantes al asignar cara %d para '%s'", triIdx, partName))
+                    end
+                    if type((editableMesh :: any).SetFaceNormals) ~= "function" then
+                        error(string.format("EditableMesh:SetFaceNormals no está disponible para '%s'", partName))
+                    end
+                    local okNorm, normErr = pcall(function()
                         editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] })
                     end)
+                    if not okNorm then
+                        error(string.format("EditableMesh:SetFaceNormals falló en cara %d para '%s': %s", triIdx, partName, tostring(normErr)))
+                    end
                 end
-                if uvIds[i1] and uvIds[i2] and uvIds[i3] then
-                    pcall(function()
+
+                if hasUvs then
+                    if not uvIds[i1] or not uvIds[i2] or not uvIds[i3] then
+                        error(string.format("IDs de UV faltantes al asignar cara %d para '%s'", triIdx, partName))
+                    end
+                    if type((editableMesh :: any).SetFaceUVs) ~= "function" then
+                        error(string.format("EditableMesh:SetFaceUVs no está disponible para '%s'", partName))
+                    end
+                    local okUv, uvErr = pcall(function()
                         editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] })
                     end)
+                    if not okUv then
+                        error(string.format("EditableMesh:SetFaceUVs falló en cara %d para '%s': %s", triIdx, partName, tostring(uvErr)))
+                    end
                 end
             end
 
@@ -304,25 +376,48 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
                 ))
             end
 
-            local okGetVerts, meshVerts = pcall(function()
+            -- Mandatory post-construction readback for GetVertices() and GetTriangles()
+            if type((editableMesh :: any).GetVertices) ~= "function" then
+                error(string.format("Error de lectura: EditableMesh:GetVertices() no está disponible en '%s'", partName))
+            end
+            local okGetVerts, meshVertsOrErr = pcall(function()
                 return (editableMesh :: any):GetVertices()
             end)
-            if okGetVerts and type(meshVerts) == "table" and #meshVerts ~= #vertices then
+            if not okGetVerts or type(meshVertsOrErr) ~= "table" then
                 error(string.format(
-                    "EditableMesh:GetVertices() devolvió %d vértices de %d esperados en '%s'",
-                    #meshVerts,
-                    #vertices,
-                    partName
+                    "Error de lectura en EditableMesh:GetVertices() para '%s': %s",
+                    partName,
+                    tostring(meshVertsOrErr)
+                ))
+            end
+            if #meshVertsOrErr ~= #vertices then
+                error(string.format(
+                    "Cantidad incorrecta en EditableMesh:GetVertices() para '%s': devolvió %d vértices de %d esperados",
+                    partName,
+                    #meshVertsOrErr,
+                    #vertices
                 ))
             end
 
-            local meshTriangles = editableMesh:GetTriangles()
-            if type(meshTriangles) == "table" and #meshTriangles ~= expectedTriCount then
+            if type((editableMesh :: any).GetTriangles) ~= "function" then
+                error(string.format("Error de lectura: EditableMesh:GetTriangles() no está disponible en '%s'", partName))
+            end
+            local okGetTris, meshTrianglesOrErr = pcall(function()
+                return (editableMesh :: any):GetTriangles()
+            end)
+            if not okGetTris or type(meshTrianglesOrErr) ~= "table" then
                 error(string.format(
-                    "EditableMesh:GetTriangles() devolvió %d triángulos de %d esperados en '%s'",
-                    #meshTriangles,
-                    expectedTriCount,
-                    partName
+                    "Error de lectura en EditableMesh:GetTriangles() para '%s': %s",
+                    partName,
+                    tostring(meshTrianglesOrErr)
+                ))
+            end
+            if #meshTrianglesOrErr ~= expectedTriCount then
+                error(string.format(
+                    "Cantidad incorrecta en EditableMesh:GetTriangles() para '%s': devolvió %d triángulos de %d esperados",
+                    partName,
+                    #meshTrianglesOrErr,
+                    expectedTriCount
                 ))
             end
 
@@ -334,10 +429,21 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
             if not createdPart then
                 error("AssetService:CreateMeshPartAsync() devolvió nil para '" .. partName .. "'")
             end
+            createdPartInstance = createdPart
+
+            createdPart.Name = partName
+            createdPart.Size = targetSize
+            createdPart:SetAttribute("GeometrySource", "EditableMeshBuffer")
+            createdPart:SetAttribute("ForgeGeometryVerified", true)
+            createdPart:SetAttribute("ForgeNormalsVerified", hasNormals)
+            createdPart:SetAttribute("ForgeUVsVerified", hasUvs)
+            createdPart:SetAttribute("VertexCount", #vertices)
+            createdPart:SetAttribute("TriangleCount", addedTriCount)
+            createdPart:SetAttribute("ExpectedTriangleCount", expectedTriCount)
             return createdPart
         end, debug.traceback)
 
-        -- Always release EditableMesh resource now that CreateMeshPartAsync has finished or failed
+        -- Always release EditableMesh resource in all execution paths (success, validation error, CreateMeshPartAsync error, or attribute error)
         if editableMeshInstance then
             pcall(function()
                 editableMeshInstance:Destroy()
@@ -346,16 +452,14 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
         end
 
         if okEditable and generatedOrErr and typeof(generatedOrErr) == "Instance" and generatedOrErr:IsA("MeshPart") then
-            local generatedMeshPart = generatedOrErr :: MeshPart
-            generatedMeshPart.Name = partName
-            generatedMeshPart.Size = targetSize
-            generatedMeshPart:SetAttribute("GeometrySource", "EditableMeshBuffer")
-            generatedMeshPart:SetAttribute("ForgeGeometryVerified", true)
-            generatedMeshPart:SetAttribute("VertexCount", #vertices)
-            generatedMeshPart:SetAttribute("TriangleCount", addedTriCount)
-            generatedMeshPart:SetAttribute("ExpectedTriangleCount", expectedTriCount)
-            return generatedMeshPart, true, nil
+            return generatedOrErr :: MeshPart, true, nil
         else
+            if createdPartInstance then
+                pcall(function()
+                    createdPartInstance:Destroy()
+                end)
+                createdPartInstance = nil
+            end
             if typeof(generatedOrErr) == "Instance" then
                 pcall(function()
                     (generatedOrErr :: Instance):Destroy()
@@ -694,7 +798,7 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
         if type(f) == "table" and #f >= 3 then
             table.insert(
                 geomTokens,
-                string.format("f:%d,%d,%d", math.floor(tonumber(f[1]) or 0), math.floor(tonumber(f[2]) or 0), math.floor(tonumber(f[3]) or 0))
+                string.format("f:%s,%s,%s", tostring(tonumber(f[1]) or 0), tostring(tonumber(f[2]) or 0), tostring(tonumber(f[3]) or 0))
             )
         end
     end
@@ -1096,6 +1200,8 @@ local function construct3DModelFromSpec(
     }
 end
 
+local serializeStudioPartsFromInstances: (collectedParts: { BasePart }, rootModel: Model?) -> { [number]: { [string]: any } }
+
 -- Reconstructs EditableMesh geometry for a single imported .RBXMX model in Edit Mode or Play Mode
 local function reconstructSingleModelInPlace(model: Model): (boolean, number, number, {
     modelName: string,
@@ -1103,6 +1209,8 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
     failedPartIds: { string },
     totalVertices: number,
     totalTriangles: number,
+    appliedModelHash: string,
+    parts: { [number]: { [string]: any } },
     errors: { string },
 })
     local verifiedPartIds: { string } = {}
@@ -1110,6 +1218,28 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
     local totalVertices = 0
     local totalTriangles = 0
     local errors: { string } = {}
+
+    local function collectSerializedReconstructedState(): ({ [number]: { [string]: any } }, string)
+        local baseParts: { BasePart } = {}
+        for _, desc in ipairs(model:GetDescendants()) do
+            if desc:IsA("BasePart") then
+                table.insert(baseParts, desc)
+            end
+        end
+        local serialized = if serializeStudioPartsFromInstances then serializeStudioPartsFromInstances(baseParts, model) else {}
+        local tokens: { string } = {}
+        for _, entry in ipairs(serialized) do
+            local pid = tostring(entry.partId or "")
+            local ch = tostring(entry.combinedHash or "")
+            table.insert(tokens, pid .. ":" .. ch)
+        end
+        table.sort(tokens)
+        local attrHash = tostring(model:GetAttribute("ForgeSyncedModelHash") or "")
+        local computedHash = if #attrHash > 0 and #failedPartIds == 0
+            then attrHash
+            else ("studio_readback_" .. computeLuauContentHash(model.Name .. "|" .. table.concat(tokens, "|")))
+        return serialized, computedHash
+    end
 
     local reconstructorModule = model:FindFirstChild("ForgeStudioReconstructor")
     if reconstructorModule and reconstructorModule:IsA("ModuleScript") then
@@ -1147,6 +1277,7 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                         end
                     end
                 end
+                local serializedParts, appliedHash = collectSerializedReconstructedState()
                 if verCount > 0 and allVerified and #failedPartIds == 0 then
                     model:SetAttribute("ForgeEditableMeshReconstructed", true)
                     model:SetAttribute("ForgeReconstructionVerified", true)
@@ -1156,6 +1287,8 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                         failedPartIds = failedPartIds,
                         totalVertices = totalVertices,
                         totalTriangles = totalTriangles,
+                        appliedModelHash = appliedHash,
+                        parts = serializedParts,
                         errors = errors,
                     }
                 elseif verCount > 0 then
@@ -1167,6 +1300,8 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
                         failedPartIds = failedPartIds,
                         totalVertices = totalVertices,
                         totalTriangles = totalTriangles,
+                        appliedModelHash = appliedHash,
+                        parts = serializedParts,
                         errors = errors,
                     }
                 end
@@ -1242,12 +1377,15 @@ local function reconstructSingleModelInPlace(model: Model): (boolean, number, nu
     model:SetAttribute("ForgeReconstructionVerified", allSucceeded)
     model:SetAttribute("ForgeVerifiedPartCount", verifiedParts)
     model:SetAttribute("ForgeFailedPartCount", failedParts)
+    local serializedParts, appliedHash = collectSerializedReconstructedState()
     return allSucceeded, verifiedParts, failedParts, {
         modelName = model.Name,
         verifiedPartIds = verifiedPartIds,
         failedPartIds = failedPartIds,
         totalVertices = totalVertices,
         totalTriangles = totalTriangles,
+        appliedModelHash = appliedHash,
+        parts = serializedParts,
         errors = errors,
     }
 end
@@ -1263,6 +1401,10 @@ local function reconstructEditableMeshModelsInStudio(): (string, {
     failedPartIds: { string },
     totalVertices: number,
     totalTriangles: number,
+    modelName: string?,
+    appliedModelHash: string?,
+    parts: { [number]: { [string]: any } },
+    reconstructedModels: { [number]: { [string]: any } },
     errors: { string },
 })
     local recordId = ChangeHistoryService:TryBeginRecording("ForgeAI Reconstruct RBXMX EditableMesh")
@@ -1291,9 +1433,32 @@ local function reconstructEditableMeshModelsInStudio(): (string, {
     local totalVertices = 0
     local totalTriangles = 0
     local allErrors: { string } = {}
+    local primaryModelName: string? = nil
+    local primaryAppliedHash: string? = nil
+    local allSerializedParts: { [number]: { [string]: any } } = {}
+    local reconstructedModels: { [number]: { [string]: any } } = {}
 
     for _, model in ipairs(candidates) do
         local allOk, verCount, failCount, details = reconstructSingleModelInPlace(model)
+        if not primaryModelName then
+            primaryModelName = details.modelName
+            primaryAppliedHash = details.appliedModelHash
+        end
+        for _, pEntry in ipairs(details.parts or {}) do
+            table.insert(allSerializedParts, pEntry)
+        end
+        table.insert(reconstructedModels, {
+            modelName = details.modelName,
+            verified = allOk,
+            status = if allOk then "completed" elseif verCount > 0 then "partially_applied" else "failed",
+            appliedModelHash = details.appliedModelHash,
+            verifiedGeometryPartIds = details.verifiedPartIds,
+            failedPartIds = details.failedPartIds,
+            totalVertices = details.totalVertices,
+            totalTriangles = details.totalTriangles,
+            parts = details.parts,
+            errors = details.errors,
+        })
         reconstructedParts += verCount
         failedPartsTotal += failCount
         totalVertices += details.totalVertices
@@ -1347,6 +1512,10 @@ local function reconstructEditableMeshModelsInStudio(): (string, {
         failedPartIds = allFailedPartIds,
         totalVertices = totalVertices,
         totalTriangles = totalTriangles,
+        modelName = primaryModelName,
+        appliedModelHash = primaryAppliedHash,
+        parts = allSerializedParts,
+        reconstructedModels = reconstructedModels,
         errors = allErrors,
     }
 end
@@ -1453,7 +1622,7 @@ end
 
 -- Helper to serialize BaseParts from a Studio Model or Selection with ForgePartId,
 -- model-relative CFrame & 9-component rotationMatrix, nested hierarchy, external MeshPart preservation, and PBR
-local function serializeStudioPartsFromInstances(collectedParts: { BasePart }, rootModel: Model?): { [number]: { [string]: any } }
+serializeStudioPartsFromInstances = function(collectedParts: { BasePart }, rootModel: Model?): { [number]: { [string]: any } }
     local serializedParts = {}
     local originCFrame = resolveModelSyncOriginCFrame(rootModel, collectedParts)
 
@@ -1771,6 +1940,7 @@ local function buildStudioApplicationReceiptLuau(params: {
         pendingDeletionPartIds = params.pendingDeletionPartIds,
         failedPartIds = failedPartIdsCopy,
         verifiedGeometryPartIds = params.verifiedGeometryPartIds,
+        parts = readbackSerialized,
         warnings = warningsCopy,
         errors = errorsCopy,
         pendingDestructiveConfirmations = #pendingDestructiveOperations,
@@ -2025,7 +2195,7 @@ local function applyIncrementalModelUpdateInStudio(
     end
     local candidatesForDeletion: { Instance } = {}
     for pid, partInst in pairs(existingByPartId) do
-        -- Fase 5: Never delete by name when an explicit ForgePartId exists; only match by exact partId
+        -- Fase 3: Never authorize destructive deletion based solely on part Name; require explicit ForgePartId
         local shouldQueueDelete = false
         if deleteSet[pid] then
             shouldQueueDelete = true
@@ -2033,8 +2203,18 @@ local function applyIncrementalModelUpdateInStudio(
             shouldQueueDelete = true
         end
         if shouldQueueDelete then
-            table.insert(candidatesForDeletion, partInst)
-            table.insert(pendingDeletionPartIds, pid)
+            if hasExplicitPartIdAttr[pid] then
+                table.insert(candidatesForDeletion, partInst)
+                table.insert(pendingDeletionPartIds, pid)
+            else
+                table.insert(
+                    warnings,
+                    string.format(
+                        "Pieza '%s' en Studio carece de ForgePartId explícito; se rechaza eliminación basada únicamente en el nombre.",
+                        partInst.Name
+                    )
+                )
+            end
         end
     end
     table.sort(pendingDeletionPartIds)
@@ -2043,13 +2223,14 @@ local function applyIncrementalModelUpdateInStudio(
     local expHash = tostring(expectedModelHash or "")
 
     if #candidatesForDeletion > 0 then
-        -- Fase 5 & 6: Bind destructive operation strictly to taskId, modelName, and pendingDeletionPartIds
+        -- Fase 3 & 5: Bind destructive operation strictly to taskId, operationId, modelName, and partIdsToDelete
         table.insert(pendingDestructiveOperations, {
             taskId = if #opTaskId > 0 then opTaskId else nil,
+            operationId = if #opTaskId > 0 then opTaskId else nil,
             modelName = targetModel.Name,
             partIdsToDelete = pendingDeletionPartIds,
             description = string.format(
-                "Eliminar %d pieza(s) [%s] en modelo '%s' (Tarea: %s)",
+                "Eliminar %d pieza(s) [%s] en modelo '%s' (Tarea/Op: %s)",
                 #candidatesForDeletion,
                 table.concat(pendingDeletionPartIds, ", "),
                 targetModel.Name,
@@ -2058,13 +2239,24 @@ local function applyIncrementalModelUpdateInStudio(
             instancesToDelete = candidatesForDeletion,
             onCompleted = function(confirmed: boolean)
                 local postRemovedIds: { string } = if confirmed then pendingDeletionPartIds else {}
+                local postFailedIds: { string } = {}
+                for _, fid in ipairs(failedPartIds) do
+                    table.insert(postFailedIds, fid)
+                end
+                local postErrors: { string } = {}
+                for _, e in ipairs(errors) do
+                    table.insert(postErrors, e)
+                end
                 local postWarnings: { string } = {}
                 for _, w in ipairs(warnings) do
                     table.insert(postWarnings, w)
                 end
                 if not confirmed then
+                    for _, cancelledPid in ipairs(pendingDeletionPartIds) do
+                        table.insert(postFailedIds, cancelledPid)
+                    end
                     table.insert(
-                        postWarnings,
+                        postErrors,
                         string.format(
                             "Eliminación de %d pieza(s) [%s] cancelada por el usuario en Roblox Studio.",
                             #pendingDeletionPartIds,
@@ -2082,10 +2274,10 @@ local function applyIncrementalModelUpdateInStudio(
                     updatedPartIds = updatedPartIds,
                     removedPartIds = postRemovedIds,
                     pendingDeletionPartIds = {},
-                    failedPartIds = failedPartIds,
+                    failedPartIds = postFailedIds,
                     verifiedGeometryPartIds = verifiedGeometryPartIds,
                     warnings = postWarnings,
-                    errors = errors,
+                    errors = postErrors,
                 })
                 if #opTaskId > 0 then
                     requestLocalBridge("/local/plugin/result", "POST", {
@@ -2725,17 +2917,38 @@ local function refreshDestructiveConfirmationUI()
     if #pendingDestructiveOperations > 0 then
         local top = pendingDestructiveOperations[1]
         confirmFrame.Visible = true
-        confirmLabel.Text = "⚠️ Confirmar: " .. tostring(top.description)
+        local pidsText = if type(top.partIdsToDelete) == "table" and #top.partIdsToDelete > 0
+            then table.concat(top.partIdsToDelete, ", ")
+            else "ninguna"
+        confirmLabel.Text = string.format(
+            "⚠️ Confirmar [%s | Modelo: %s | Piezas: %s]: %s (%d en cola)",
+            tostring(top.operationId or top.taskId or "local"),
+            tostring(top.modelName or "Model"),
+            pidsText,
+            tostring(top.description),
+            #pendingDestructiveOperations
+        )
     else
         confirmFrame.Visible = false
     end
 end
 
-local function resolvePendingDestructiveOperation(targetTaskId: string?, confirmed: boolean): (boolean, number, string?)
+local function resolvePendingDestructiveOperation(
+    targetTaskId: string?,
+    confirmed: boolean,
+    targetOperationId: string?,
+    targetModelName: string?
+): (boolean, number, string?)
     local matchIdx: number? = nil
     if type(targetTaskId) == "string" and #targetTaskId > 0 then
         for i, entry in ipairs(pendingDestructiveOperations) do
             if entry.taskId == targetTaskId then
+                if targetOperationId and #targetOperationId > 0 and entry.operationId ~= targetOperationId then
+                    return false, 0, nil
+                end
+                if targetModelName and #targetModelName > 0 and entry.modelName ~= targetModelName then
+                    return false, 0, nil
+                end
                 matchIdx = i
                 break
             end
@@ -2756,22 +2969,42 @@ local function resolvePendingDestructiveOperation(targetTaskId: string?, confirm
     end
 
     local allowedPartIds: { [string]: boolean } = {}
+    local allowedCount = 0
     if type(op.partIdsToDelete) == "table" then
         for _, pid in ipairs(op.partIdsToDelete) do
-            allowedPartIds[tostring(pid)] = true
+            local cleanPid = tostring(pid)
+            if #cleanPid > 0 then
+                allowedPartIds[cleanPid] = true
+                allowedCount += 1
+            end
         end
     end
 
     local removed = 0
     if confirmed then
+        -- Fase 3: Require non-empty explicit partIdsToDelete and never delete by part Name alone
+        if allowedCount == 0 then
+            outputLog.Text = "⛔ Eliminación rechazada: la operación no especifica partIdsToDelete explícitos."
+            if op.onCompleted then
+                op.onCompleted(false)
+            end
+            refreshDestructiveConfirmationUI()
+            return false, 0, op.taskId
+        end
+
         local recId = ChangeHistoryService:TryBeginRecording("ForgeAI Confirmed Destructive Action")
         for _, inst in ipairs(op.instancesToDelete) do
             if inst and inst.Parent then
                 local instPidAttr = inst:GetAttribute("ForgePartId")
-                local instPid = if type(instPidAttr) == "string" and #instPidAttr > 0
+                local instPidVal = inst:FindFirstChild("ForgePartId")
+                local explicitInstPid = if type(instPidAttr) == "string" and #instPidAttr > 0
                     then instPidAttr
-                    else ("fpart_" .. string.gsub(inst.Name, "[^%w_]", "_"))
-                if next(allowedPartIds) == nil or allowedPartIds[instPid] then
+                    elseif instPidVal and instPidVal:IsA("StringValue") and #instPidVal.Value > 0
+                    then instPidVal.Value
+                    else ""
+                local rootMod = findRootForgeModel(inst)
+                local modelMatches = (not op.modelName) or (rootMod ~= nil and rootMod.Name == op.modelName)
+                if #explicitInstPid > 0 and allowedPartIds[explicitInstPid] and modelMatches then
                     inst:Destroy()
                     removed += 1
                 end
@@ -2793,11 +3026,11 @@ local function resolvePendingDestructiveOperation(targetTaskId: string?, confirm
 end
 
 btnApproveDelete.MouseButton1Click:Connect(function()
-    resolvePendingDestructiveOperation(nil, true)
+    resolvePendingDestructiveOperation(nil, true, nil, nil)
 end)
 
 btnRejectDelete.MouseButton1Click:Connect(function()
-    resolvePendingDestructiveOperation(nil, false)
+    resolvePendingDestructiveOperation(nil, false, nil, nil)
 end)
 
 local function inspectCurrentStudioSelection(): {
@@ -2909,6 +3142,10 @@ local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
                     status = status,
                     verified = allVerified,
                     summary = summary,
+                    modelName = reconDetails.modelName,
+                    appliedModelHash = reconDetails.appliedModelHash,
+                    expectedPartCount = reconDetails.reconstructedParts + reconDetails.failedPartsTotal,
+                    actualPartCount = #reconDetails.parts,
                     modelsFound = reconDetails.modelsFound,
                     fullyVerifiedModels = reconDetails.fullyVerifiedModels,
                     partialOrFailedModels = reconDetails.partialOrFailedModels,
@@ -2916,6 +3153,9 @@ local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
                     failedPartsTotal = reconDetails.failedPartsTotal,
                     verifiedGeometryPartIds = reconDetails.verifiedPartIds,
                     failedPartIds = reconDetails.failedPartIds,
+                    pendingDeletionPartIds = {},
+                    parts = reconDetails.parts,
+                    reconstructedModels = reconDetails.reconstructedModels,
                     totalVertices = reconDetails.totalVertices,
                     totalTriangles = reconDetails.totalTriangles,
                     warnings = {},

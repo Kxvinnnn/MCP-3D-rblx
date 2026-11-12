@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   validateRobloxGeometry,
   triangulatePolygonFace3D,
   countValidTrianglesInFace,
+  verifyAndBuildEditableMeshStructure,
+  EditableMeshConstructionAdapter,
 } from '../src/utils/robloxGeometryValidator.ts';
 import { Forge3DAsset } from '../src/utils/roblox3DEngine.ts';
 
@@ -339,5 +343,416 @@ test('10. Detección y rechazo estricto de polígonos auto-intersectantes (bowti
   assert.equal(report.isValid, false, 'validateRobloxGeometry debe invalidar modelos con caras auto-intersectantes');
   assert.equal(report.hasMalformedFaces, true);
 });
+
+function createMockEditableMeshAdapter(overrides?: {
+  onSetFaceNormals?: () => boolean | void;
+  onSetFaceUVs?: () => boolean | void;
+  onGetVertices?: (addedVertices: Array<string | number>) => Array<string | number>;
+  onGetTriangles?: (addedTriangles: Array<string | number>) => Array<string | number>;
+  omitGetVertices?: boolean;
+  omitGetTriangles?: boolean;
+  onCreateMeshPartAsync?: () => void;
+  onSetPartAttribute?: (name: string, val: unknown) => void;
+}): {
+  adapter: EditableMeshConstructionAdapter;
+  getStats: () => {
+    editableDestroyedCount: number;
+    partDestroyedCount: number;
+    faceNormalsAssigned: number;
+    faceUVsAssigned: number;
+  };
+} {
+  let editableDestroyedCount = 0;
+  let partDestroyedCount = 0;
+  let faceNormalsAssigned = 0;
+  let faceUVsAssigned = 0;
+
+  const adapter: EditableMeshConstructionAdapter = {
+    createEditableMesh: () => {
+      const vIds: Array<string | number> = [];
+      const tIds: Array<string | number> = [];
+      let nSeq = 0;
+      let uvSeq = 0;
+
+      const handle: any = {
+        addVertex: (_x: number, _y: number, _z: number) => {
+          const id = `v_${vIds.length + 1}`;
+          vIds.push(id);
+          return id;
+        },
+        addNormal: (_nx: number, _ny: number, _nz: number) => {
+          nSeq += 1;
+          return `n_${nSeq}`;
+        },
+        addUV: (_u: number, _v: number) => {
+          uvSeq += 1;
+          return `uv_${uvSeq}`;
+        },
+        addTriangle: (_v1: string | number, _v2: string | number, _v3: string | number) => {
+          const id = `f_${tIds.length + 1}`;
+          tIds.push(id);
+          return id;
+        },
+        setFaceNormals: (_fId: string | number, _nIds: [string | number, string | number, string | number]) => {
+          if (overrides?.onSetFaceNormals) {
+            return overrides.onSetFaceNormals();
+          }
+          faceNormalsAssigned += 1;
+          return true;
+        },
+        setFaceUVs: (_fId: string | number, _uvIds: [string | number, string | number, string | number]) => {
+          if (overrides?.onSetFaceUVs) {
+            return overrides.onSetFaceUVs();
+          }
+          faceUVsAssigned += 1;
+          return true;
+        },
+        destroy: () => {
+          editableDestroyedCount += 1;
+        },
+      };
+
+      if (!overrides?.omitGetVertices) {
+        handle.getVertices = () => {
+          if (overrides?.onGetVertices) {
+            return overrides.onGetVertices(vIds);
+          }
+          return [...vIds];
+        };
+      }
+
+      if (!overrides?.omitGetTriangles) {
+        handle.getTriangles = () => {
+          if (overrides?.onGetTriangles) {
+            return overrides.onGetTriangles(tIds);
+          }
+          return [...tIds];
+        };
+      }
+
+      return handle;
+    },
+    createMeshPartAsync: () => {
+      if (overrides?.onCreateMeshPartAsync) {
+        overrides.onCreateMeshPartAsync();
+      }
+      return {
+        setAttribute: (name: string, val: unknown) => {
+          if (overrides?.onSetPartAttribute) {
+            overrides.onSetPartAttribute(name, val);
+          }
+        },
+        destroy: () => {
+          partDestroyedCount += 1;
+        },
+      };
+    },
+  };
+
+  return {
+    adapter,
+    getStats: () => ({
+      editableDestroyedCount,
+      partDestroyedCount,
+      faceNormalsAssigned,
+      faceUVsAssigned,
+    }),
+  };
+}
+
+test('11. Fase 1 & 6 — Endurecimiento de EditableMesh: índices decimales/negativos/fuera de rango, normales, UVs, fallos de SetFaceNormals/SetFaceUVs, readback GetVertices/GetTriangles y limpieza garantizada', () => {
+  const validSpecBase = {
+    name: 'HardenedMeshPart',
+    partId: 'part_hardened_01',
+    collisionFidelity: 'Hull' as const,
+    meshData: {
+      vertices: [
+        [0, 0, 0],
+        [2, 0, 0],
+        [0, 2, 0],
+      ],
+      faces: [[0, 1, 2]],
+      normals: [
+        [0, 0, 1],
+        [0, 0, 1],
+        [0, 0, 1],
+      ],
+      uvs: [
+        [0, 0],
+        [1, 0],
+        [0, 1],
+      ],
+    },
+  };
+
+  // 11.1 Construcción exitosa completa con normales, UVs y readback verificado
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter();
+    const res = verifyAndBuildEditableMeshStructure(validSpecBase, adapter);
+    assert.equal(res.verified, true);
+    assert.equal(res.readbackStatus, 'verified');
+    assert.equal(res.normalsStatus, 'verified');
+    assert.equal(res.uvsStatus, 'verified');
+    assert.equal(res.editableMeshDestroyed, true, 'EditableMesh temporal debe destruirse tras CreateMeshPartAsync');
+    assert.equal(res.orphanMeshPartDestroyed, false);
+    assert.equal(getStats().editableDestroyedCount, 1);
+    assert.equal(getStats().faceNormalsAssigned, 1);
+    assert.equal(getStats().faceUVsAssigned, 1);
+  }
+
+  // 11.2 Índices decimales (sin truncar con Math.floor) deben ser rechazados
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter();
+    const res = verifyAndBuildEditableMeshStructure(
+      {
+        ...validSpecBase,
+        meshData: {
+          ...validSpecBase.meshData,
+          faces: [[0, 1.5, 2]],
+        },
+      },
+      adapter
+    );
+    assert.equal(res.verified, false, 'Índice decimal 1.5 debe rechazarse, jamás truncarse con Math.floor');
+    assert.equal(res.stageFailed, 'face_index_validation');
+    assert.equal(res.editableMeshDestroyed, true);
+    assert.equal(getStats().editableDestroyedCount, 1);
+  }
+
+  // 11.3 Índices negativos deben ser rechazados
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter();
+    const res = verifyAndBuildEditableMeshStructure(
+      {
+        ...validSpecBase,
+        meshData: {
+          ...validSpecBase.meshData,
+          faces: [[0, -1, 2]],
+        },
+      },
+      adapter
+    );
+    assert.equal(res.verified, false);
+    assert.equal(res.stageFailed, 'face_index_validation');
+    assert.equal(res.editableMeshDestroyed, true);
+    assert.equal(getStats().editableDestroyedCount, 1);
+  }
+
+  // 11.4 Índices fuera de rango deben ser rechazados
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter();
+    const res = verifyAndBuildEditableMeshStructure(
+      {
+        ...validSpecBase,
+        meshData: {
+          ...validSpecBase.meshData,
+          faces: [[0, 1, 99]],
+        },
+      },
+      adapter
+    );
+    assert.equal(res.verified, false);
+    assert.equal(res.stageFailed, 'face_index_validation');
+    assert.equal(res.editableMeshDestroyed, true);
+    assert.equal(getStats().editableDestroyedCount, 1);
+  }
+
+  // 11.5 Normales inválidas (magnitud cero, NaN o conteo incompleto) deben rechazarse, diferenciadas de normales ausentes
+  {
+    const { adapter: adapterAbsent } = createMockEditableMeshAdapter();
+    const resAbsent = verifyAndBuildEditableMeshStructure(
+      {
+        ...validSpecBase,
+        meshData: {
+          vertices: validSpecBase.meshData.vertices,
+          faces: validSpecBase.meshData.faces,
+          // normals y uvs ausentes
+        },
+      },
+      adapterAbsent
+    );
+    assert.equal(resAbsent.verified, true);
+    assert.equal(resAbsent.normalsStatus, 'absent');
+    assert.equal(resAbsent.uvsStatus, 'absent');
+
+    const { adapter: adapterZeroNorm, getStats } = createMockEditableMeshAdapter();
+    const resZeroNorm = verifyAndBuildEditableMeshStructure(
+      {
+        ...validSpecBase,
+        meshData: {
+          ...validSpecBase.meshData,
+          normals: [
+            [0, 0, 0], // Magnitud cero -> inválida
+            [0, 0, 1],
+            [0, 0, 1],
+          ],
+        },
+      },
+      adapterZeroNorm
+    );
+    assert.equal(resZeroNorm.verified, false);
+    assert.equal(resZeroNorm.stageFailed, 'normal_validation');
+    assert.equal(resZeroNorm.normalsStatus, 'invalid');
+    assert.equal(getStats().editableDestroyedCount, 1);
+  }
+
+  // 11.6 UVs inválidas (conteo incompleto o valores no finitos) deben rechazarse
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter();
+    const resBadUv = verifyAndBuildEditableMeshStructure(
+      {
+        ...validSpecBase,
+        meshData: {
+          ...validSpecBase.meshData,
+          uvs: [
+            [0, 0],
+            [NaN, 1],
+            [0, 1],
+          ],
+        },
+      },
+      adapter
+    );
+    assert.equal(resBadUv.verified, false);
+    assert.equal(resBadUv.stageFailed, 'uv_validation');
+    assert.equal(resBadUv.uvsStatus, 'invalid');
+    assert.equal(getStats().editableDestroyedCount, 1);
+  }
+
+  // 11.7 Fallo en SetFaceNormals NO debe tragarse silenciosamente: debe fallar la pieza y destruir EditableMesh
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter({
+      onSetFaceNormals: () => {
+        throw new Error('Roblox EditableMesh:SetFaceNormals internal error');
+      },
+    });
+    const res = verifyAndBuildEditableMeshStructure(validSpecBase, adapter);
+    assert.equal(res.verified, false);
+    assert.equal(res.stageFailed, 'set_face_normals');
+    assert.equal(res.normalsStatus, 'assignment_failed');
+    assert.equal(res.editableMeshDestroyed, true);
+    assert.equal(getStats().editableDestroyedCount, 1);
+  }
+
+  // 11.8 Fallo en SetFaceUVs NO debe tragarse silenciosamente: debe fallar la pieza y destruir EditableMesh
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter({
+      onSetFaceUVs: () => {
+        throw new Error('Roblox EditableMesh:SetFaceUVs internal error');
+      },
+    });
+    const res = verifyAndBuildEditableMeshStructure(validSpecBase, adapter);
+    assert.equal(res.verified, false);
+    assert.equal(res.stageFailed, 'set_face_uvs');
+    assert.equal(res.uvsStatus, 'assignment_failed');
+    assert.equal(res.editableMeshDestroyed, true);
+    assert.equal(getStats().editableDestroyedCount, 1);
+  }
+
+  // 11.9 Fallo en GetVertices (error de lectura vs conteo distinto) nunca marca la pieza como verificada
+  {
+    const { adapter: adapterErr, getStats: statsErr } = createMockEditableMeshAdapter({
+      onGetVertices: () => {
+        throw new Error('GetVertices failed');
+      },
+    });
+    const resErr = verifyAndBuildEditableMeshStructure(validSpecBase, adapterErr);
+    assert.equal(resErr.verified, false);
+    assert.equal(resErr.stageFailed, 'readback_vertices');
+    assert.equal(resErr.readbackStatus, 'vertex_read_error');
+    assert.equal(statsErr().editableDestroyedCount, 1);
+
+    const { adapter: adapterMismatch, getStats: statsMismatch } = createMockEditableMeshAdapter({
+      onGetVertices: (vIds) => vIds.slice(0, 2), // 2 en lugar de 3
+    });
+    const resMismatch = verifyAndBuildEditableMeshStructure(validSpecBase, adapterMismatch);
+    assert.equal(resMismatch.verified, false);
+    assert.equal(resMismatch.stageFailed, 'readback_vertices');
+    assert.equal(resMismatch.readbackStatus, 'vertex_count_mismatch');
+    assert.equal(statsMismatch().editableDestroyedCount, 1);
+  }
+
+  // 11.10 Fallo en GetTriangles (error de lectura vs conteo distinto) nunca marca la pieza como verificada
+  {
+    const { adapter: adapterErr, getStats: statsErr } = createMockEditableMeshAdapter({
+      onGetTriangles: () => {
+        throw new Error('GetTriangles failed');
+      },
+    });
+    const resErr = verifyAndBuildEditableMeshStructure(validSpecBase, adapterErr);
+    assert.equal(resErr.verified, false);
+    assert.equal(resErr.stageFailed, 'readback_triangles');
+    assert.equal(resErr.readbackStatus, 'triangle_read_error');
+    assert.equal(statsErr().editableDestroyedCount, 1);
+
+    const { adapter: adapterMismatch, getStats: statsMismatch } = createMockEditableMeshAdapter({
+      onGetTriangles: () => [], // 0 en lugar de 1
+    });
+    const resMismatch = verifyAndBuildEditableMeshStructure(validSpecBase, adapterMismatch);
+    assert.equal(resMismatch.verified, false);
+    assert.equal(resMismatch.stageFailed, 'readback_triangles');
+    assert.equal(resMismatch.readbackStatus, 'triangle_count_mismatch');
+    assert.equal(statsMismatch().editableDestroyedCount, 1);
+  }
+
+  // 11.11 Fallo post-CreateMeshPartAsync (al asignar atributos): debe destruir tanto EditableMesh como el MeshPart huérfano
+  {
+    const { adapter, getStats } = createMockEditableMeshAdapter({
+      onSetPartAttribute: () => {
+        throw new Error('Attribute write failure on MeshPart');
+      },
+    });
+    const res = verifyAndBuildEditableMeshStructure(validSpecBase, adapter);
+    assert.equal(res.verified, false);
+    assert.equal(res.stageFailed, 'part_attributes');
+    assert.equal(res.editableMeshDestroyed, true);
+    assert.equal(res.orphanMeshPartDestroyed, true);
+    assert.equal(res.meshPart, null);
+    assert.equal(getStats().editableDestroyedCount, 1);
+    assert.equal(getStats().partDestroyedCount, 1, 'El MeshPart parcialmente creado debe destruirse para no quedar huérfano');
+  }
+});
+
+test('12. Fase 1 & 3 — Verificación estructural del código Luau del plugin (ForgeAIStudioPlugin.server.luau)', () => {
+  const luauPath = path.resolve(process.cwd(), 'backend/roblox_plugin/ForgeAIStudioPlugin.server.luau');
+  const luauSource = fs.readFileSync(luauPath, 'utf-8');
+
+  // 1. No debe truncar índices de cara con math.floor(tonumber(f[1]))
+  assert.equal(
+    luauSource.includes('math.floor(tonumber(f[1])'),
+    false,
+    'ForgeAIStudioPlugin.server.luau no debe truncar índices de triángulos con math.floor'
+  );
+  assert.ok(
+    luauSource.includes('(r1 % 1 ~= 0) or (r2 % 1 ~= 0) or (r3 % 1 ~= 0)'),
+    'Debe verificar explícitamente que los índices de cara sean enteros finitos (r % 1 == 0)'
+  );
+
+  // 2. Debe inspeccionar el resultado de SetFaceNormals y SetFaceUVs
+  assert.ok(
+    luauSource.includes('local okNorm, normErr = pcall(function()') &&
+      luauSource.includes('if not okNorm then'),
+    'Debe inspeccionar el resultado de SetFaceNormals y lanzar error si falla'
+  );
+  assert.ok(
+    luauSource.includes('local okUv, uvErr = pcall(function()') &&
+      luauSource.includes('if not okUv then'),
+    'Debe inspeccionar el resultado de SetFaceUVs y lanzar error si falla'
+  );
+
+  // 3. Debe exigir GetVertices y GetTriangles en el readback obligatorio y destruir createdPartInstance ante error
+  assert.ok(
+    luauSource.includes('EditableMesh:GetVertices() no está disponible') &&
+      luauSource.includes('EditableMesh:GetTriangles() no está disponible'),
+    'Debe exigir lectura posterior obligatoria GetVertices() y GetTriangles()'
+  );
+  assert.ok(
+    luauSource.includes('if createdPartInstance then') &&
+      luauSource.includes('createdPartInstance:Destroy()'),
+    'Debe destruir cualquier MeshPart parcialmente creado si ocurre un error posterior'
+  );
+});
+
+
 
 

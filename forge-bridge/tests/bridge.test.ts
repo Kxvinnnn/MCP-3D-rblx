@@ -22,6 +22,7 @@ import express from 'express';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import {
   BRIDGE_PROTOCOL_VERSION,
   BridgeMessageEnvelope,
@@ -33,6 +34,11 @@ import {
   validateAndSanitizeLuauContent,
 } from '../src/security.js';
 import { createForgeLocalBridgeApp } from '../src/server.js';
+import {
+  TaskExecutionCoordinator,
+  InMemoryTaskStateStoreAdapter,
+  JsonFileTaskStateStoreAdapter,
+} from '../src/studioQueue.js';
 
 const SHARED_SECRET = 'test-shared-secret-2026-hmac-key';
 const PLUGIN_TOKEN = 'test-local-plugin-token-2026';
@@ -1056,6 +1062,7 @@ test('Fase 2 & 5 — Propagación E2E de estados awaiting_studio_confirmation, p
           expectedPartCount: 1,
           actualPartCount: 2,
           pendingDeletionPartIds: ['part_to_delete_01'],
+          failedPartIds: [],
           verifiedGeometryPartIds: ['part_kept_01'],
         },
       }),
@@ -1092,6 +1099,7 @@ test('Fase 2 & 5 — Propagación E2E de estados awaiting_studio_confirmation, p
           actualPartCount: 1,
           removedPartIds: ['part_to_delete_01'],
           pendingDeletionPartIds: [],
+          failedPartIds: [],
           verifiedGeometryPartIds: ['part_kept_01'],
         },
       }),
@@ -1116,4 +1124,319 @@ test('Fase 2 & 5 — Propagación E2E de estados awaiting_studio_confirmation, p
     await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
   }
 });
+
+test('Fase 3 & 4 — Confirmaciones destructivas simultáneas, respuestas duplicadas/tardías/cruzadas y recuperación tras reinicio con TaskStateStoreAdapter', async () => {
+  const tmpStateFile = path.join(os.tmpdir(), `forge_task_state_test_${Date.now()}.json`);
+  const fileAdapter = new JsonFileTaskStateStoreAdapter(tmpStateFile);
+
+  const buildStudioEnvelope = (taskId: string, modelName: string, modelHash: string): BridgeMessageEnvelope => ({
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    taskId,
+    sessionId: 'sess_sim_test',
+    correlationId: `corr_${taskId}`,
+    operation: 'studio.apply_modifications',
+    payload: {
+      name: modelName,
+      expected_part_count: 1,
+      model_hash: modelHash,
+    },
+    timestamp: new Date().toISOString(),
+  });
+
+  try {
+    // 1. Iniciar primer coordinador con persistencia en archivo JSON
+    const coord1 = new TaskExecutionCoordinator({
+      stateStore: fileAdapter,
+      confirmationExpirationMs: 5000,
+    });
+
+    const taskAId = 'task_sim_del_A';
+    const taskBId = 'task_sim_del_B';
+
+    // Encolar dos operaciones destructivas simultáneas (Task A y Task B)
+    const pTaskA = coord1.enqueueForStudioPlugin(
+      buildStudioEnvelope(taskAId, 'SimultaneousModelA', 'hash_A_final'),
+      'secret_sim_test',
+      4000
+    );
+
+    const pTaskB = coord1.enqueueForStudioPlugin(
+      buildStudioEnvelope(taskBId, 'SimultaneousModelB', 'hash_B_final'),
+      'secret_sim_test',
+      4000
+    );
+
+    const dispatched = coord1.dequeueNextForStudioPlugin();
+    assert.equal(dispatched.length, 2, 'Deben despacharse las 2 tareas simultáneas');
+
+    // Ambas responden inicialmente awaiting_studio_confirmation con sus respectivos partIdsToDelete
+    const initA = coord1.submitStudioPluginResult({
+      taskId: taskAId,
+      status: 'awaiting_studio_confirmation',
+      result: {
+        taskId: taskAId,
+        operationId: taskAId,
+        status: 'awaiting_confirmation',
+        verified: false,
+        modelName: 'SimultaneousModelA',
+        expectedPartCount: 1,
+        actualPartCount: 2,
+        expectedModelHash: 'hash_A_final',
+        appliedModelHash: 'hash_A_pre',
+        verifiedGeometryPartIds: ['part_A_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: ['part_A_del_1'],
+      },
+    });
+    assert.equal(initA, true);
+
+    const initB = coord1.submitStudioPluginResult({
+      taskId: taskBId,
+      status: 'awaiting_studio_confirmation',
+      result: {
+        taskId: taskBId,
+        operationId: taskBId,
+        status: 'awaiting_confirmation',
+        verified: false,
+        modelName: 'SimultaneousModelB',
+        expectedPartCount: 1,
+        actualPartCount: 2,
+        expectedModelHash: 'hash_B_final',
+        appliedModelHash: 'hash_B_pre',
+        verifiedGeometryPartIds: ['part_B_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: ['part_B_del_1'],
+      },
+    });
+    assert.equal(initB, true);
+
+    const resInitialA = await pTaskA;
+    const resInitialB = await pTaskB;
+    assert.equal(resInitialA.status, 'awaiting_studio_confirmation');
+    assert.equal(resInitialB.status, 'awaiting_studio_confirmation');
+    assert.equal(coord1.getAllAwaitingConfirmations().length, 2);
+
+    // 2. Simular desconexión y REINICIO del coordinador/Bridge cargando el estado desde JsonFileTaskStateStoreAdapter
+    coord1.shutdown();
+    const coordAfterRestart = new TaskExecutionCoordinator({
+      stateStore: new JsonFileTaskStateStoreAdapter(tmpStateFile),
+      confirmationExpirationMs: 5000,
+    });
+
+    const recoveredPending = coordAfterRestart.getAllAwaitingConfirmations();
+    assert.equal(recoveredPending.length, 2, 'Tras reiniciar, debe recuperar las 2 confirmaciones pendientes del store');
+
+    // 3. Intentar enviar una respuesta con operationId o modelName perteneciente a OTRA tarea -> debe ser RECHAZADA
+    const crossTaskAttempt = coordAfterRestart.submitStudioPluginResult({
+      taskId: taskAId,
+      status: 'completed',
+      result: {
+        taskId: taskAId,
+        operationId: taskBId, // operationId cruzado de la Tarea B
+        status: 'completed',
+        verified: true,
+        modelName: 'SimultaneousModelA',
+        expectedPartCount: 1,
+        actualPartCount: 1,
+        expectedModelHash: 'hash_A_final',
+        appliedModelHash: 'hash_A_final',
+        verifiedGeometryPartIds: ['part_A_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: [],
+        removedPartIds: ['part_A_del_1'],
+      },
+    });
+    assert.equal(crossTaskAttempt, false, 'Debe rechazar una respuesta cuyo operationId pertenece a otra tarea');
+
+    // Intentar eliminar una pieza que NO estaba autorizada en partIdsToDelete -> debe ser RECHAZADA
+    const unauthorizedPartDeleteAttempt = coordAfterRestart.submitStudioPluginResult({
+      taskId: taskAId,
+      status: 'completed',
+      result: {
+        taskId: taskAId,
+        operationId: taskAId,
+        status: 'completed',
+        verified: true,
+        modelName: 'SimultaneousModelA',
+        expectedPartCount: 1,
+        actualPartCount: 1,
+        expectedModelHash: 'hash_A_final',
+        appliedModelHash: 'hash_A_final',
+        verifiedGeometryPartIds: ['part_A_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: [],
+        removedPartIds: ['part_UNEXPECTED_999'],
+      },
+    });
+    assert.equal(
+      unauthorizedPartDeleteAttempt,
+      false,
+      'Debe rechazar una confirmación cuyas piezas eliminadas no coinciden exactamente con partIdsToDelete'
+    );
+
+    // 4. Confirmar la primera tarea (Task A) -> ACEPTADA
+    const confirmA = coordAfterRestart.submitStudioPluginResult({
+      taskId: taskAId,
+      status: 'completed',
+      result: {
+        taskId: taskAId,
+        operationId: taskAId,
+        status: 'completed',
+        verified: true,
+        modelName: 'SimultaneousModelA',
+        expectedPartCount: 1,
+        actualPartCount: 1,
+        expectedModelHash: 'hash_A_final',
+        appliedModelHash: 'hash_A_final',
+        verifiedGeometryPartIds: ['part_A_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: [],
+        removedPartIds: ['part_A_del_1'],
+      },
+    });
+    assert.equal(confirmA, true, 'Debe aceptar la confirmación legítima de la primera tarea (Task A)');
+    assert.equal(coordAfterRestart.getCompletedTaskResult(taskAId)?.status, 'completed');
+
+    // 5. Enviar respuesta DUPLICADA para Task A -> RECHAZADA
+    const duplicateConfirmA = coordAfterRestart.submitStudioPluginResult({
+      taskId: taskAId,
+      status: 'completed',
+      result: {
+        taskId: taskAId,
+        operationId: taskAId,
+        status: 'completed',
+        verified: true,
+        modelName: 'SimultaneousModelA',
+        expectedPartCount: 1,
+        actualPartCount: 1,
+        expectedModelHash: 'hash_A_final',
+        appliedModelHash: 'hash_A_final',
+        verifiedGeometryPartIds: ['part_A_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: [],
+        removedPartIds: ['part_A_del_1'],
+      },
+    });
+    assert.equal(duplicateConfirmA, false, 'Debe rechazar una confirmación duplicada para Task A');
+
+    // 6. Cancelar la segunda tarea (Task B) -> ACEPTADA como partially_applied
+    const cancelB = coordAfterRestart.submitStudioPluginResult({
+      taskId: taskBId,
+      status: 'partially_applied',
+      result: {
+        taskId: taskBId,
+        operationId: taskBId,
+        status: 'partially_applied',
+        verified: false,
+        modelName: 'SimultaneousModelB',
+        expectedPartCount: 1,
+        actualPartCount: 2,
+        expectedModelHash: 'hash_B_final',
+        appliedModelHash: 'hash_B_pre',
+        verifiedGeometryPartIds: ['part_B_keep'],
+        failedPartIds: ['part_B_del_1'],
+        pendingDeletionPartIds: [],
+        removedPartIds: [],
+        errors: ['Eliminación destructiva cancelada por el usuario'],
+      },
+    });
+    assert.equal(cancelB, true, 'Debe aceptar la cancelación de la segunda tarea (Task B)');
+    assert.equal(coordAfterRestart.getCompletedTaskResult(taskBId)?.status, 'partially_applied');
+
+    // 7. Intentar confirmar la segunda tarea (Task B) DESPUÉS de haberla cancelado -> RECHAZADA
+    const confirmBAfterCancel = coordAfterRestart.submitStudioPluginResult({
+      taskId: taskBId,
+      status: 'completed',
+      result: {
+        taskId: taskBId,
+        operationId: taskBId,
+        status: 'completed',
+        verified: true,
+        modelName: 'SimultaneousModelB',
+        expectedPartCount: 1,
+        actualPartCount: 1,
+        expectedModelHash: 'hash_B_final',
+        appliedModelHash: 'hash_B_final',
+        verifiedGeometryPartIds: ['part_B_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: [],
+        removedPartIds: ['part_B_del_1'],
+      },
+    });
+    assert.equal(
+      confirmBAfterCancel,
+      false,
+      'Debe rechazar cualquier intento de confirmar Task B después de haber sido cancelada'
+    );
+
+    // 8. Verificar expiración de confirmaciones tardías (confirmationExpirationMs corto) y registro de historial
+    const memAdapter = new InMemoryTaskStateStoreAdapter();
+    const coordShortExpiry = new TaskExecutionCoordinator({
+      stateStore: memAdapter,
+      confirmationExpirationMs: 50, // 50ms (will clamp to min 500ms or check directly)
+    });
+
+    const taskCId = 'task_sim_exp_C';
+    const pTaskC = coordShortExpiry.enqueueForStudioPlugin(
+      buildStudioEnvelope(taskCId, 'ExpiringModelC', 'hash_C_final'),
+      'secret_exp_test',
+      2000
+    );
+    coordShortExpiry.dequeueNextForStudioPlugin();
+
+    coordShortExpiry.submitStudioPluginResult({
+      taskId: taskCId,
+      status: 'awaiting_studio_confirmation',
+      result: {
+        taskId: taskCId,
+        operationId: taskCId,
+        status: 'awaiting_confirmation',
+        verified: false,
+        modelName: 'ExpiringModelC',
+        expectedPartCount: 1,
+        actualPartCount: 2,
+        expectedModelHash: 'hash_C_final',
+        appliedModelHash: 'hash_C_pre',
+        verifiedGeometryPartIds: ['part_C_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: ['part_C_del'],
+      },
+    });
+    await pTaskC;
+
+    // Esperar a que expire el plazo de confirmación (>500ms)
+    await new Promise((r) => setTimeout(r, 550));
+
+    const lateConfirmC = coordShortExpiry.submitStudioPluginResult({
+      taskId: taskCId,
+      status: 'completed',
+      result: {
+        taskId: taskCId,
+        operationId: taskCId,
+        status: 'completed',
+        verified: true,
+        modelName: 'ExpiringModelC',
+        expectedPartCount: 1,
+        actualPartCount: 1,
+        expectedModelHash: 'hash_C_final',
+        appliedModelHash: 'hash_C_final',
+        verifiedGeometryPartIds: ['part_C_keep'],
+        failedPartIds: [],
+        pendingDeletionPartIds: [],
+        removedPartIds: ['part_C_del'],
+      },
+    });
+    assert.equal(lateConfirmC, false, 'Debe rechazar una confirmación tardía cuya ventana expiresAt ya venció');
+    assert.equal(coordShortExpiry.getAwaitingConfirmationRecord(taskCId)?.status, 'expired');
+
+    // Verificar que el historial de resultados se mantiene en el TaskStateStoreAdapter
+    assert.ok(coordAfterRestart.getTaskResultHistory().length >= 4, 'El coordinador debe conservar el historial de transiciones');
+  } finally {
+    if (fs.existsSync(tmpStateFile)) {
+      fs.unlinkSync(tmpStateFile);
+    }
+  }
+});
+
+
 

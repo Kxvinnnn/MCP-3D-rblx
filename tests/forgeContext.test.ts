@@ -926,12 +926,18 @@ test('8. Verificación exhaustiva de persistencia (verifyPersistedAssetContent) 
           taskId: 'task-completed-verified',
           status: 'completed',
           result: {
-            status: 'ok',
-            verified: true,
+            taskId: 'task-completed-verified',
             operationId: 'task-completed-verified',
+            status: 'completed',
+            verified: true,
             modelName: payload.name,
-            appliedPartCount: payload.parts.length,
-            modelHash: payload.model_hash,
+            expectedPartCount: payload.parts.length,
+            actualPartCount: payload.parts.length,
+            expectedModelHash: payload.model_hash,
+            appliedModelHash: payload.model_hash,
+            verifiedGeometryPartIds: payload.parts.map((p: any) => p.partId),
+            failedPartIds: [],
+            pendingDeletionPartIds: [],
           },
         }),
       };
@@ -1031,12 +1037,18 @@ test('9. Ciclo E2E completo: Crear modelo -> Asignar IDs persistentes -> Editar 
           taskId: 'task-e2e-sync-1',
           status: 'completed',
           result: {
-            status: 'ok',
-            verified: true,
+            taskId: 'task-e2e-sync-1',
             operationId: 'task-e2e-sync-1',
+            status: 'completed',
+            verified: true,
             modelName: body.payload.name,
-            appliedPartCount: body.payload.parts.length,
-            modelHash: body.payload.model_hash,
+            expectedPartCount: body.payload.parts.length,
+            actualPartCount: body.payload.parts.length,
+            expectedModelHash: body.payload.model_hash,
+            appliedModelHash: body.payload.model_hash,
+            verifiedGeometryPartIds: body.payload.parts.map((p: any) => p.partId),
+            failedPartIds: [],
+            pendingDeletionPartIds: [],
           },
         }),
       };
@@ -1189,6 +1201,7 @@ test('10. Fase 2, 3 & 5 — Recibo estructurado StudioApplicationReceipt: aplica
 
   const origFetch = globalThis.fetch;
   let mockTaskEndpointResponse: any = null;
+  let nextEnqueueTaskId = 'task-destructive-del-99';
 
   globalThis.fetch = (async (url: string, init?: any) => {
     if (url.includes('/api/v1/assets/rebuild-luau')) {
@@ -1201,15 +1214,16 @@ test('10. Fase 2, 3 & 5 — Recibo estructurado StudioApplicationReceipt: aplica
     }
     if (url.includes('/api/v1/bridge/enqueue')) {
       const body = JSON.parse(init.body);
+      const currentTaskId = nextEnqueueTaskId;
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          taskId: 'task-destructive-del-99',
+          taskId: currentTaskId,
           status: 'awaiting_studio_confirmation',
           result: {
-            operationId: 'task-destructive-del-99',
-            taskId: 'task-destructive-del-99',
+            operationId: currentTaskId,
+            taskId: currentTaskId,
             status: 'awaiting_confirmation',
             verified: false,
             modelName: body.payload.name,
@@ -1229,7 +1243,7 @@ test('10. Fase 2, 3 & 5 — Recibo estructurado StudioApplicationReceipt: aplica
         }),
       };
     }
-    if (url.includes('/api/v1/bridge/task/task-destructive-del-99')) {
+    if (url.includes('/api/v1/bridge/task/')) {
       return {
         ok: true,
         status: 200,
@@ -1272,7 +1286,7 @@ test('10. Fase 2, 3 & 5 — Recibo estructurado StudioApplicationReceipt: aplica
       removedPartIds: [],
       pendingDeletionPartIds: [],
       failedPartIds: ['part_cannon_fixed'],
-      verifiedGeometryPartIds: ['part_base_fixed', 'part_cannon_fixed'],
+      verifiedGeometryPartIds: ['part_base_fixed'],
       warnings: [],
       errors: ['Eliminación destructiva cancelada por el usuario en Roblox Studio.'],
     },
@@ -1290,7 +1304,7 @@ test('10. Fase 2, 3 & 5 — Recibo estructurado StudioApplicationReceipt: aplica
     'Si el usuario cancela la eliminación en Studio, pendingChanges debe seguir en true reflejando la divergencia'
   );
 
-  // Paso 3: Usuario CONFIRMA la eliminación en Roblox Studio -> el recibo pasa a completed con appliedModelHash verificado
+  // Paso 2B: Intentar reconciliar de nuevo la tarea ya cancelada ('task-destructive-del-99') debe ser RECHAZADO
   const finalHashAfterDelete = computeAssetContentHash(contextValue.activeAsset);
   mockTaskEndpointResponse = {
     taskId: 'task-destructive-del-99',
@@ -1317,7 +1331,43 @@ test('10. Fase 2, 3 & 5 — Recibo estructurado StudioApplicationReceipt: aplica
   };
 
   await act(async () => {
-    const recConfirm = await contextValue.reconcileStudioTaskReceipt('task-destructive-del-99');
+    const recReplay = await contextValue.reconcileStudioTaskReceipt('task-destructive-del-99');
+    assert.equal(recReplay.success, false, 'No debe aceptar confirmar una tarea que ya fue cancelada/resuelta previamente');
+  });
+
+  // Paso 3: Nuevo intento pushToStudio ('task-destructive-del-100') -> Usuario CONFIRMA la eliminación en Roblox Studio -> completed
+  nextEnqueueTaskId = 'task-destructive-del-100';
+  await act(async () => {
+    const pushRes2 = await contextValue.pushToStudio();
+    assert.equal(pushRes2.taskId, 'task-destructive-del-100');
+  });
+
+  mockTaskEndpointResponse = {
+    taskId: 'task-destructive-del-100',
+    status: 'completed',
+    result: {
+      operationId: 'task-destructive-del-100',
+      taskId: 'task-destructive-del-100',
+      status: 'completed',
+      verified: true,
+      modelName: assetAfterDelete.name,
+      expectedModelHash: finalHashAfterDelete,
+      appliedModelHash: finalHashAfterDelete,
+      expectedPartCount: 1,
+      actualPartCount: 1,
+      addedPartIds: [],
+      updatedPartIds: [],
+      removedPartIds: ['part_cannon_fixed'],
+      pendingDeletionPartIds: [],
+      failedPartIds: [],
+      verifiedGeometryPartIds: ['part_base_fixed'],
+      warnings: [],
+      errors: [],
+    },
+  };
+
+  await act(async () => {
+    const recConfirm = await contextValue.reconcileStudioTaskReceipt('task-destructive-del-100');
     assert.equal(recConfirm.success, true);
     assert.equal(recConfirm.status, 'completed');
   });
@@ -1450,5 +1500,433 @@ test('11. Fase 7 — Verificación exhaustiva de persistencia (verifyPersistedAs
     'verifyPersistedAssetContent debe rechazar una subdivisión _SubN si se alteran las coordenadas 3D de un triángulo aunque coincida el total de caras'
   );
 });
+
+test('12. Fase 2 — Endurecimiento estricto de verifyStudioApplicationReceipt: rechazo de campos ausentes, IDs contradictorios, IDs duplicados y piezas sin partId explícito', async () => {
+  const { verifyStudioApplicationReceipt } = await import('../src/context/ForgeContext.tsx');
+  const asset = createSampleAsset('StrictReceiptModel');
+  const expectedHash = computeAssetContentHash(asset);
+
+  const buildValidReceipt = () => ({
+    taskId: 'task-strict-01',
+    status: 'completed',
+    result: {
+      taskId: 'task-strict-01',
+      operationId: 'task-strict-01',
+      status: 'completed',
+      verified: true,
+      modelName: asset.name,
+      expectedPartCount: 2,
+      actualPartCount: 2,
+      expectedModelHash: expectedHash,
+      appliedModelHash: expectedHash,
+      verifiedGeometryPartIds: ['part_base_fixed', 'part_cannon_fixed'] as string[],
+      failedPartIds: [] as string[],
+      pendingDeletionPartIds: [] as string[],
+    },
+  });
+
+  // 12A. Recibo completo y consistente -> valid = true
+  const validRes = verifyStudioApplicationReceipt(buildValidReceipt(), 'task-strict-01', asset, expectedHash);
+  assert.equal(validRes.valid, true);
+  assert.equal(validRes.status, 'completed');
+
+  // 12B. Contradicción entre taskResult.taskId y result.taskId -> rechazado
+  const mismatchTaskIdReceipt = buildValidReceipt();
+  mismatchTaskIdReceipt.result.taskId = 'other-task-999';
+  const mismatchTaskIdRes = verifyStudioApplicationReceipt(mismatchTaskIdReceipt, 'task-strict-01', asset, expectedHash);
+  assert.equal(mismatchTaskIdRes.valid, false);
+  assert.match(String(mismatchTaskIdRes.reason || ''), /Contradicción de taskId/i);
+
+  // 12C. Contradicción entre operationId y expectedTaskId -> rechazado
+  const mismatchOpReceipt = buildValidReceipt();
+  mismatchOpReceipt.result.operationId = 'wrong-op-id';
+  const mismatchOpRes = verifyStudioApplicationReceipt(mismatchOpReceipt, 'task-strict-01', asset, expectedHash);
+  assert.equal(mismatchOpRes.valid, false);
+  assert.match(String(mismatchOpRes.reason || ''), /operationId/i);
+
+  // 12D. Falta expectedPartCount o expectedModelHash (sin fallback a legacy fields) -> rechazado
+  const missingExpectedCount = buildValidReceipt();
+  delete (missingExpectedCount.result as any).expectedPartCount;
+  assert.equal(verifyStudioApplicationReceipt(missingExpectedCount, 'task-strict-01', asset, expectedHash).valid, false);
+
+  const missingExpectedHash = buildValidReceipt();
+  delete (missingExpectedHash.result as any).expectedModelHash;
+  assert.equal(verifyStudioApplicationReceipt(missingExpectedHash, 'task-strict-01', asset, expectedHash).valid, false);
+
+  // 12E. IDs duplicados en verifiedGeometryPartIds -> rechazado
+  const dupVerifiedReceipt = buildValidReceipt();
+  dupVerifiedReceipt.result.verifiedGeometryPartIds = ['part_base_fixed', 'part_base_fixed', 'part_cannon_fixed'];
+  const dupVerifiedRes = verifyStudioApplicationReceipt(dupVerifiedReceipt, 'task-strict-01', asset, expectedHash);
+  assert.equal(dupVerifiedRes.valid, false);
+  assert.match(String(dupVerifiedRes.reason || ''), /duplicado/i);
+
+  // 12F. Contradicción: misma pieza en verifiedGeometryPartIds y failedPartIds -> rechazado
+  const contradictoryPartReceipt = buildValidReceipt();
+  contradictoryPartReceipt.result.failedPartIds = ['part_base_fixed'];
+  const contradictoryPartRes = verifyStudioApplicationReceipt(contradictoryPartReceipt, 'task-strict-01', asset, expectedHash);
+  assert.equal(contradictoryPartRes.valid, false);
+  assert.match(String(contradictoryPartRes.reason || ''), /simultáneamente en verifiedGeometryPartIds y failedPartIds/i);
+
+  // 12G. Política de partId: si el modelo esperado tiene una pieza sin partId explícito -> rechazado
+  const assetMissingPartId: Forge3DAsset = {
+    ...asset,
+    parts: [
+      { ...asset.parts[0], partId: '' },
+      asset.parts[1],
+    ],
+  };
+  const missingPartIdRes = verifyStudioApplicationReceipt(buildValidReceipt(), 'task-strict-01', assetMissingPartId, expectedHash);
+  assert.equal(missingPartIdRes.valid, false);
+  assert.match(String(missingPartIdRes.reason || ''), /carece de partId explícito/i);
+});
+
+test('13. Fase 3 — Múltiples confirmaciones destructivas simultáneas en ForgeContext: confirmar primera, cancelar segunda, rechazar confirmación posterior de segunda y rechazar respuesta de otra tarea', async () => {
+  let contextValue: any = null;
+  function MultiConfirmInspector() {
+    contextValue = useForge();
+    return React.createElement('div', null, contextValue.activeAsset?.name);
+  }
+
+  const container = domWindow.document.createElement('div');
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(React.createElement(ForgeProvider, null, React.createElement(MultiConfirmInspector)));
+  });
+
+  const initialAsset: Forge3DAsset = {
+    ...createSampleAsset('MultiDeleteTank'),
+    parts: [
+      { ...createSampleAsset().parts[0], partId: 'part_1', name: 'Hull' },
+      { ...createSampleAsset().parts[1], partId: 'part_2', name: 'LeftTrack' },
+      { ...createSampleAsset().parts[1], partId: 'part_3', name: 'RightTrack', position: [2, 1, 0] },
+    ],
+  };
+
+  await act(async () => {
+    contextValue.setActiveAsset(initialAsset);
+  });
+
+  const origFetch = globalThis.fetch;
+  let nextEnqueueTaskId = 'task-multi-del-1';
+  const taskResponses: Record<string, any> = {};
+
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (url.includes('/api/v1/assets/rebuild-luau')) {
+      const sent = JSON.parse(init.body).asset;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ asset: sent }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/enqueue')) {
+      const body = JSON.parse(init.body);
+      const tId = nextEnqueueTaskId;
+      const removedIds = (body.payload.incremental_diff?.removed || []).map((r: any) => r.partId);
+      const keptIds = body.payload.parts.map((p: any) => p.partId);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          taskId: tId,
+          status: 'awaiting_studio_confirmation',
+          result: {
+            taskId: tId,
+            operationId: tId,
+            status: 'awaiting_confirmation',
+            verified: false,
+            modelName: body.payload.name,
+            expectedPartCount: keptIds.length,
+            actualPartCount: keptIds.length + removedIds.length,
+            expectedModelHash: body.payload.model_hash,
+            appliedModelHash: 'hash_pending_studio',
+            verifiedGeometryPartIds: keptIds,
+            failedPartIds: [],
+            pendingDeletionPartIds: removedIds,
+          },
+        }),
+      };
+    }
+    if (url.includes('/api/v1/bridge/task/')) {
+      const taskIdParam = decodeURIComponent(url.split('/api/v1/bridge/task/')[1]);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => taskResponses[taskIdParam],
+      };
+    }
+    return origFetch(url);
+  }) as any;
+
+  // Operación 1: Eliminar part_3 -> genera task-multi-del-1 en espera
+  const assetOp1: Forge3DAsset = {
+    ...contextValue.activeAsset,
+    parts: contextValue.activeAsset.parts.slice(0, 2),
+  };
+  await act(async () => {
+    contextValue.applyAssetChange(assetOp1, 'Eliminar RightTrack');
+  });
+  nextEnqueueTaskId = 'task-multi-del-1';
+  await act(async () => {
+    const res1 = await contextValue.pushToStudio();
+    assert.equal(res1.taskId, 'task-multi-del-1');
+  });
+  const hashOp1 = computeAssetContentHash(contextValue.activeAsset);
+
+  // Operación 2: Eliminar part_2 -> genera task-multi-del-2 en espera simultáneamente
+  const assetOp2: Forge3DAsset = {
+    ...contextValue.activeAsset,
+    parts: contextValue.activeAsset.parts.slice(0, 1),
+  };
+  await act(async () => {
+    contextValue.applyAssetChange(assetOp2, 'Eliminar LeftTrack');
+  });
+  nextEnqueueTaskId = 'task-multi-del-2';
+  await act(async () => {
+    const res2 = await contextValue.pushToStudio();
+    assert.equal(res2.taskId, 'task-multi-del-2');
+  });
+  const hashOp2 = computeAssetContentHash(contextValue.activeAsset);
+
+  // 13A. Confirmar la primera tarea ('task-multi-del-1')
+  taskResponses['task-multi-del-1'] = {
+    taskId: 'task-multi-del-1',
+    status: 'completed',
+    result: {
+      taskId: 'task-multi-del-1',
+      operationId: 'task-multi-del-1',
+      status: 'completed',
+      verified: true,
+      modelName: initialAsset.name,
+      expectedPartCount: 2,
+      actualPartCount: 2,
+      expectedModelHash: hashOp1,
+      appliedModelHash: hashOp1,
+      verifiedGeometryPartIds: ['part_1', 'part_2'],
+      failedPartIds: [],
+      pendingDeletionPartIds: [],
+      removedPartIds: ['part_3'],
+    },
+  };
+  await act(async () => {
+    const rec1 = await contextValue.reconcileStudioTaskReceipt('task-multi-del-1');
+    assert.equal(rec1.success, true, 'Debe aceptar la confirmación de la primera tarea pendiente');
+    assert.equal(rec1.status, 'completed');
+  });
+  assert.equal(
+    contextValue.pendingChanges,
+    true,
+    'Como todavía queda task-multi-del-2 pendiente, pendingChanges debe continuar en true'
+  );
+
+  // 13B. Respuesta duplicada para 'task-multi-del-1' -> debe ser rechazada
+  await act(async () => {
+    const rec1Dup = await contextValue.reconcileStudioTaskReceipt('task-multi-del-1');
+    assert.equal(rec1Dup.success, false, 'Debe rechazar una respuesta duplicada para una tarea ya resuelta');
+  });
+
+  // 13C. Cancelar la segunda tarea ('task-multi-del-2')
+  taskResponses['task-multi-del-2'] = {
+    taskId: 'task-multi-del-2',
+    status: 'partially_applied',
+    result: {
+      taskId: 'task-multi-del-2',
+      operationId: 'task-multi-del-2',
+      status: 'partially_applied',
+      verified: false,
+      modelName: initialAsset.name,
+      expectedPartCount: 1,
+      actualPartCount: 2,
+      expectedModelHash: hashOp2,
+      appliedModelHash: hashOp1,
+      verifiedGeometryPartIds: ['part_1'],
+      failedPartIds: ['part_2'],
+      pendingDeletionPartIds: [],
+      removedPartIds: [],
+      errors: ['Eliminación cancelada por el usuario'],
+    },
+  };
+  await act(async () => {
+    const rec2Cancel = await contextValue.reconcileStudioTaskReceipt('task-multi-del-2');
+    assert.equal(rec2Cancel.success, false);
+    assert.equal(rec2Cancel.status, 'partially_applied');
+  });
+
+  // 13D. Intentar confirmar la segunda tarea ('task-multi-del-2') después de haberla cancelado -> debe ser rechazado
+  taskResponses['task-multi-del-2'] = {
+    taskId: 'task-multi-del-2',
+    status: 'completed',
+    result: {
+      taskId: 'task-multi-del-2',
+      operationId: 'task-multi-del-2',
+      status: 'completed',
+      verified: true,
+      modelName: initialAsset.name,
+      expectedPartCount: 1,
+      actualPartCount: 1,
+      expectedModelHash: hashOp2,
+      appliedModelHash: hashOp2,
+      verifiedGeometryPartIds: ['part_1'],
+      failedPartIds: [],
+      pendingDeletionPartIds: [],
+      removedPartIds: ['part_2'],
+    },
+  };
+  await act(async () => {
+    const rec2AfterCancel = await contextValue.reconcileStudioTaskReceipt('task-multi-del-2');
+    assert.equal(
+      rec2AfterCancel.success,
+      false,
+      'No debe permitir confirmar una segunda operación que ya fue cancelada previamente'
+    );
+  });
+
+  // 13E. Respuesta perteneciente a otra tarea inexistente ('task-foreign-999') -> rechazada
+  await act(async () => {
+    const recForeign = await contextValue.reconcileStudioTaskReceipt('task-foreign-999');
+    assert.equal(recForeign.success, false);
+  });
+
+  globalThis.fetch = origFetch;
+  await act(async () => {
+    root.unmount();
+  });
+});
+
+test('14. Fase 5 — Reconstrucción real de modelos desde Roblox Studio (reconcileReconstructedModelFromStudio): comparación de los 9 dominios y diferenciación entre reconstrucción completa, parcial y fallida', async () => {
+  const { reconcileReconstructedModelFromStudio } = await import('../src/context/ForgeContext.tsx');
+
+  const originalAsset: Forge3DAsset = {
+    ...createSampleAsset('ReconstructedCyberDrone'),
+    parts: [
+      {
+        partId: 'part_core_01',
+        name: 'CoreBody',
+        shape: 'MeshPart',
+        size: [4, 2, 4],
+        position: [0, 5, 0],
+        rotation: [0, 45, 0],
+        color: [80, 160, 250],
+        material: 'Neon',
+        roughness: 0.25,
+        metalness: 0.75,
+        transparency: 0.1,
+        canCollide: true,
+        anchored: true,
+        collisionFidelity: 'PreciseConvexDecomposition',
+        parentId: 'group_root',
+        parentName: 'DroneGroup',
+        hierarchyPath: 'Workspace/ReconstructedCyberDrone/DroneGroup/CoreBody',
+        meshData: {
+          vertices: [
+            [0, 0, 0],
+            [2, 0, 0],
+            [0, 2, 0],
+          ],
+          faces: [[0, 1, 2]],
+          normals: [
+            [0, 0, 1],
+            [0, 0, 1],
+            [0, 0, 1],
+          ],
+          uvs: [
+            [0, 0],
+            [1, 0],
+            [0, 1],
+          ],
+        },
+      },
+      {
+        partId: 'part_rotor_02',
+        name: 'LeftRotor',
+        shape: 'Cylinder',
+        size: [2, 0.5, 2],
+        position: [-3, 6, 0],
+        rotation: [0, 0, 0],
+        color: [40, 40, 40],
+        material: 'Metal',
+        roughness: 0.4,
+        metalness: 0.9,
+        transparency: 0,
+        canCollide: false,
+        anchored: true,
+        collisionFidelity: 'Box',
+        parentId: 'group_root',
+        parentName: 'DroneGroup',
+        hierarchyPath: 'Workspace/ReconstructedCyberDrone/DroneGroup/LeftRotor',
+      },
+    ],
+  };
+  const expectedHash = computeAssetContentHash(originalAsset);
+
+  // 14A. Reconstrucción COMPLETA (los 9 dominios coinciden: identidad, geometría, normales, UVs, materiales, transformaciones, jerarquía, propiedades y hash)
+  const completeResponse = {
+    taskId: 'task-recon-complete',
+    status: 'completed',
+    result: {
+      taskId: 'task-recon-complete',
+      operationId: 'task-recon-complete',
+      status: 'completed',
+      verified: true,
+      modelName: originalAsset.name,
+      expectedPartCount: 2,
+      actualPartCount: 2,
+      expectedModelHash: expectedHash,
+      appliedModelHash: expectedHash,
+      verifiedGeometryPartIds: ['part_core_01', 'part_rotor_02'],
+      failedPartIds: [],
+      pendingDeletionPartIds: [],
+      parts: JSON.parse(JSON.stringify(originalAsset.parts)),
+    },
+  };
+
+  const fullRecon = reconcileReconstructedModelFromStudio(originalAsset, completeResponse);
+  assert.equal(fullRecon.valid, true, `Debe validar reconstrucción completa. Discrepancias: ${fullRecon.discrepancies.join('; ')}`);
+  assert.equal(fullRecon.status, 'completed');
+  assert.equal(fullRecon.reconstructedAsset?.parts.length, 2);
+
+  // 14B. Reconstrucción PARCIAL (una pieza reconstruida con normales o jerarquía alteradas, o una pieza en failedPartIds)
+  const partialResponse = JSON.parse(JSON.stringify(completeResponse));
+  partialResponse.result.parts[0].meshData.normals[0] = [0, 1, 0]; // Normal alterada
+  partialResponse.result.parts[1].hierarchyPath = 'Workspace/WrongHierarchy/LeftRotor'; // Jerarquía alterada
+
+  const partialRecon = reconcileReconstructedModelFromStudio(originalAsset, partialResponse);
+  assert.equal(partialRecon.valid, false);
+  assert.equal(
+    partialRecon.status,
+    'partially_applied',
+    'Si se reconstruyeron piezas pero hay discrepancias de normales o jerarquía, debe reportarse como partially_applied'
+  );
+  assert.ok(partialRecon.discrepancies.some((d) => d.includes('Normales')));
+  assert.ok(partialRecon.discrepancies.some((d) => d.includes('Jerarquía')));
+
+  // 14C. Reconstrucción FALLIDA (ninguna pieza reconstruida o modelo vacío)
+  const failedResponse = {
+    taskId: 'task-recon-failed',
+    status: 'failed',
+    result: {
+      taskId: 'task-recon-failed',
+      operationId: 'task-recon-failed',
+      status: 'failed',
+      verified: false,
+      modelName: originalAsset.name,
+      expectedPartCount: 2,
+      actualPartCount: 0,
+      expectedModelHash: expectedHash,
+      appliedModelHash: '',
+      verifiedGeometryPartIds: [],
+      failedPartIds: ['part_core_01', 'part_rotor_02'],
+      pendingDeletionPartIds: [],
+      parts: [],
+    },
+  };
+
+  const failedRecon = reconcileReconstructedModelFromStudio(originalAsset, failedResponse);
+  assert.equal(failedRecon.valid, false);
+  assert.equal(failedRecon.status, 'failed');
+  assert.equal(failedRecon.reconstructedAsset, null);
+});
+
 
 

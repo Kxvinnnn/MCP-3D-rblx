@@ -712,3 +712,878 @@ export function validateRobloxGeometry(
 
   return report;
 }
+
+export interface EditableMeshInstanceHandle {
+  addVertex: (x: number, y: number, z: number) => string | number;
+  addNormal?: (nx: number, ny: number, nz: number) => string | number;
+  addUV?: (u: number, v: number) => string | number;
+  addTriangle: (v1: string | number, v2: string | number, v3: string | number) => string | number;
+  setFaceNormals?: (faceId: string | number, normalIds: [string | number, string | number, string | number]) => boolean | void;
+  setFaceUVs?: (faceId: string | number, uvIds: [string | number, string | number, string | number]) => boolean | void;
+  getVertices?: () => Array<string | number>;
+  getTriangles?: () => Array<string | number>;
+  destroy: () => void;
+}
+
+export interface CreatedMeshPartInstanceHandle {
+  setAttribute: (name: string, value: unknown) => void;
+  destroy: () => void;
+}
+
+export interface EditableMeshConstructionAdapter {
+  createEditableMesh: () => EditableMeshInstanceHandle;
+  createMeshPartAsync: (editableMesh: EditableMeshInstanceHandle, collisionFidelity: string) => CreatedMeshPartInstanceHandle;
+}
+
+export type EditableMeshReadbackStatus =
+  | 'not_reached'
+  | 'verified'
+  | 'vertex_count_mismatch'
+  | 'triangle_count_mismatch'
+  | 'vertex_read_error'
+  | 'triangle_read_error';
+
+export interface EditableMeshVerificationResult {
+  verified: boolean;
+  error?: string;
+  stageFailed?:
+    | 'input_validation'
+    | 'vertex_validation'
+    | 'normal_validation'
+    | 'uv_validation'
+    | 'face_index_validation'
+    | 'face_degeneracy_validation'
+    | 'set_face_normals'
+    | 'set_face_uvs'
+    | 'readback_vertices'
+    | 'readback_triangles'
+    | 'create_mesh_part'
+    | 'part_attributes';
+  readbackStatus: EditableMeshReadbackStatus;
+  vertexCount: number;
+  triangleCount: number;
+  normalsStatus: 'absent' | 'verified' | 'invalid' | 'assignment_failed';
+  uvsStatus: 'absent' | 'verified' | 'invalid' | 'assignment_failed';
+  editableMeshDestroyed: boolean;
+  orphanMeshPartDestroyed: boolean;
+  meshPart: CreatedMeshPartInstanceHandle | null;
+}
+
+/**
+ * Executes the strict 5-stage EditableMesh construction, validation, readback, and cleanup pipeline
+ * matching the Luau plugin contract (`createEditableMeshPartFromSpec` in `ForgeAIStudioPlugin.server.luau`):
+ * 1. Rejects non-integer, negative, out-of-range, repeated, or degenerate triangle indices (zero floor coercion).
+ * 2. Validates all normals & magnitudes when present, and verifies `SetFaceNormals` per face.
+ * 3. Differentiates absent vs invalid UVs, validates all UVs when present, and verifies `SetFaceUVs` per face.
+ * 4. Requires mandatory `GetVertices()` and `GetTriangles()` post-construction readback, differentiating
+ *    read success, count mismatch, and read error.
+ * 5. Guarantees `EditableMesh.destroy()` and cleanup of any partially created `MeshPart` on all error paths.
+ */
+export function verifyAndBuildEditableMeshStructure(
+  partSpec: Pick<MeshPart3DSpec, 'name' | 'partId' | 'collisionFidelity' | 'meshData'>,
+  adapter: EditableMeshConstructionAdapter
+): EditableMeshVerificationResult {
+  let editableMeshInstance: EditableMeshInstanceHandle | null = null;
+  let createdPartInstance: CreatedMeshPartInstanceHandle | null = null;
+  let editableMeshDestroyed = false;
+  let orphanMeshPartDestroyed = false;
+  let readbackStatus: EditableMeshReadbackStatus = 'not_reached';
+  let normalsStatus: EditableMeshVerificationResult['normalsStatus'] = 'absent';
+  let uvsStatus: EditableMeshVerificationResult['uvsStatus'] = 'absent';
+
+  const cleanupEditableMesh = () => {
+    if (editableMeshInstance && !editableMeshDestroyed) {
+      try {
+        editableMeshInstance.destroy();
+      } catch {
+        // Ignore cleanup exception
+      }
+      editableMeshDestroyed = true;
+    }
+  };
+
+  const cleanupOrphanPart = () => {
+    if (createdPartInstance && !orphanMeshPartDestroyed) {
+      try {
+        createdPartInstance.destroy();
+      } catch {
+        // Ignore cleanup exception
+      }
+      orphanMeshPartDestroyed = true;
+      createdPartInstance = null;
+    }
+  };
+
+  try {
+    const meshData = partSpec?.meshData;
+    if (!meshData || typeof meshData !== 'object') {
+      return {
+        verified: false,
+        error: 'meshData ausente o inválido.',
+        stageFailed: 'input_validation',
+        readbackStatus,
+        vertexCount: 0,
+        triangleCount: 0,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed: true,
+        orphanMeshPartDestroyed: false,
+        meshPart: null,
+      };
+    }
+
+    const vertices = (meshData as any).vertices;
+    const faces = (meshData as any).faces;
+    if (!Array.isArray(vertices) || !Array.isArray(faces) || vertices.length < 3 || faces.length < 1) {
+      return {
+        verified: false,
+        error: 'meshData.vertices o meshData.faces vacíos o inválidos.',
+        stageFailed: 'input_validation',
+        readbackStatus,
+        vertexCount: 0,
+        triangleCount: 0,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed: true,
+        orphanMeshPartDestroyed: false,
+        meshPart: null,
+      };
+    }
+
+    editableMeshInstance = adapter.createEditableMesh();
+
+    // Stage 1: Vertex validation and insertion
+    const vertIds: Array<string | number> = [];
+    for (let vIdx = 0; vIdx < vertices.length; vIdx++) {
+      const v = vertices[vIdx];
+      if (
+        !Array.isArray(v) ||
+        v.length < 3 ||
+        typeof v[0] !== 'number' ||
+        typeof v[1] !== 'number' ||
+        typeof v[2] !== 'number' ||
+        !Number.isFinite(v[0]) ||
+        !Number.isFinite(v[1]) ||
+        !Number.isFinite(v[2])
+      ) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `Coordenadas de vértice no finitas o inválidas en índice #${vIdx}.`,
+          stageFailed: 'vertex_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      const vId = editableMeshInstance.addVertex(v[0], v[1], v[2]);
+      if (vId === null || vId === undefined) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `AddVertex devolvió nil en vértice #${vIdx}.`,
+          stageFailed: 'vertex_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      vertIds.push(vId);
+    }
+
+    // Stage 2: Normals validation (differentiate absent vs invalid)
+    const rawNormals = (meshData as any).normals;
+    const normIds: Array<string | number> = [];
+    let hasNormals = false;
+    if (rawNormals !== undefined && rawNormals !== null) {
+      if (!Array.isArray(rawNormals)) {
+        normalsStatus = 'invalid';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: 'meshData.normals debe ser una tabla/array cuando está presente.',
+          stageFailed: 'normal_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      if (rawNormals.length === 0) {
+        normalsStatus = 'invalid';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: 'meshData.normals está presente pero vacío (0 normales).',
+          stageFailed: 'normal_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      if (rawNormals.length < vertices.length) {
+        normalsStatus = 'invalid';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `meshData.normals incompleto (${rawNormals.length} normales para ${vertices.length} vértices).`,
+          stageFailed: 'normal_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      if (typeof editableMeshInstance.addNormal !== 'function') {
+        normalsStatus = 'assignment_failed';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: 'EditableMesh no soporta AddNormal en este entorno.',
+          stageFailed: 'normal_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      hasNormals = true;
+      for (let nIdx = 0; nIdx < rawNormals.length; nIdx++) {
+        const n = rawNormals[nIdx];
+        if (
+          !Array.isArray(n) ||
+          n.length < 3 ||
+          typeof n[0] !== 'number' ||
+          typeof n[1] !== 'number' ||
+          typeof n[2] !== 'number' ||
+          !Number.isFinite(n[0]) ||
+          !Number.isFinite(n[1]) ||
+          !Number.isFinite(n[2])
+        ) {
+          normalsStatus = 'invalid';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `Normal inválida o no finita en índice #${nIdx}.`,
+            stageFailed: 'normal_validation',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+        const mag = Math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (mag <= 1e-6) {
+          normalsStatus = 'invalid';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `Normal con magnitud cero o degenerada en índice #${nIdx}.`,
+            stageFailed: 'normal_validation',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+        const nId = editableMeshInstance.addNormal(n[0] / mag, n[1] / mag, n[2] / mag);
+        if (nId === null || nId === undefined) {
+          normalsStatus = 'assignment_failed';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `AddNormal devolvió nil en normal #${nIdx}.`,
+            stageFailed: 'normal_validation',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+        normIds.push(nId);
+      }
+    }
+
+    // Stage 3: UVs validation (differentiate absent vs invalid)
+    const rawUvs = (meshData as any).uvs;
+    const uvIds: Array<string | number> = [];
+    let hasUvs = false;
+    if (rawUvs !== undefined && rawUvs !== null) {
+      if (!Array.isArray(rawUvs)) {
+        uvsStatus = 'invalid';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: 'meshData.uvs debe ser una tabla/array cuando está presente.',
+          stageFailed: 'uv_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      if (rawUvs.length === 0) {
+        uvsStatus = 'invalid';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: 'meshData.uvs está presente pero vacío (0 coordenadas UV).',
+          stageFailed: 'uv_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      if (rawUvs.length < vertices.length) {
+        uvsStatus = 'invalid';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `meshData.uvs incompleto (${rawUvs.length} UVs para ${vertices.length} vértices).`,
+          stageFailed: 'uv_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      if (typeof editableMeshInstance.addUV !== 'function') {
+        uvsStatus = 'assignment_failed';
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: 'EditableMesh no soporta AddUV en este entorno.',
+          stageFailed: 'uv_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      hasUvs = true;
+      for (let uIdx = 0; uIdx < rawUvs.length; uIdx++) {
+        const uv = rawUvs[uIdx];
+        if (
+          !Array.isArray(uv) ||
+          uv.length < 2 ||
+          typeof uv[0] !== 'number' ||
+          typeof uv[1] !== 'number' ||
+          !Number.isFinite(uv[0]) ||
+          !Number.isFinite(uv[1])
+        ) {
+          uvsStatus = 'invalid';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `Coordenada UV inválida o no finita en índice #${uIdx}.`,
+            stageFailed: 'uv_validation',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+        const uvId = editableMeshInstance.addUV(uv[0], 1.0 - uv[1]);
+        if (uvId === null || uvId === undefined) {
+          uvsStatus = 'assignment_failed';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `AddUV devolvió nil en UV #${uIdx}.`,
+            stageFailed: 'uv_validation',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+        uvIds.push(uvId);
+      }
+    }
+
+    // Stage 4: Strict triangle index validation, non-degeneracy check, and SetFaceNormals / SetFaceUVs verification
+    const maxV = vertIds.length;
+    let addedFacesCount = 0;
+    for (let fIdx = 0; fIdx < faces.length; fIdx++) {
+      const f = faces[fIdx];
+      if (!Array.isArray(f) || f.length < 3) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `Cara #${fIdx} mal formada (requiere al menos 3 índices).`,
+          stageFailed: 'face_index_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+
+      const r1 = f[0];
+      const r2 = f[1];
+      const r3 = f[2];
+      // Strict integer check without Math.floor coercion
+      if (
+        typeof r1 !== 'number' ||
+        typeof r2 !== 'number' ||
+        typeof r3 !== 'number' ||
+        !Number.isFinite(r1) ||
+        !Number.isFinite(r2) ||
+        !Number.isFinite(r3) ||
+        !Number.isInteger(r1) ||
+        !Number.isInteger(r2) ||
+        !Number.isInteger(r3) ||
+        r1 < 0 ||
+        r2 < 0 ||
+        r3 < 0
+      ) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `Cara #${fIdx} contiene índices no enteros, negativos o no finitos (${String(r1)}, ${String(r2)}, ${String(r3)}).`,
+          stageFailed: 'face_index_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+
+      if (r1 >= maxV || r2 >= maxV || r3 >= maxV) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `Cara #${fIdx} contiene índices fuera de rango (${r1}, ${r2}, ${r3} vs ${maxV} vértices).`,
+          stageFailed: 'face_index_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+
+      if (r1 === r2 || r2 === r3 || r1 === r3) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `Cara #${fIdx} degenerada con vértices repetidos (${r1}, ${r2}, ${r3}).`,
+          stageFailed: 'face_degeneracy_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+
+      if (!isTriangleNonDegenerate3D(vertices[r1], vertices[r2], vertices[r3])) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `Cara #${fIdx} geométricamente degenerada (área colineal o nula).`,
+          stageFailed: 'face_degeneracy_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+
+      const faceId = editableMeshInstance.addTriangle(vertIds[r1], vertIds[r2], vertIds[r3]);
+      if (faceId === null || faceId === undefined) {
+        cleanupEditableMesh();
+        return {
+          verified: false,
+          error: `AddTriangle devolvió nil en cara #${fIdx}.`,
+          stageFailed: 'face_degeneracy_validation',
+          readbackStatus,
+          vertexCount: 0,
+          triangleCount: 0,
+          normalsStatus,
+          uvsStatus,
+          editableMeshDestroyed,
+          orphanMeshPartDestroyed,
+          meshPart: null,
+        };
+      }
+      addedFacesCount += 1;
+
+      if (hasNormals) {
+        if (typeof editableMeshInstance.setFaceNormals !== 'function') {
+          normalsStatus = 'assignment_failed';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `SetFaceNormals no está disponible al asignar normales en cara #${fIdx}.`,
+            stageFailed: 'set_face_normals',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+        try {
+          const okNorm = editableMeshInstance.setFaceNormals(faceId, [normIds[r1], normIds[r2], normIds[r3]]);
+          if (okNorm === false) {
+            throw new Error('SetFaceNormals returned false');
+          }
+        } catch (err: any) {
+          normalsStatus = 'assignment_failed';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `SetFaceNormals falló en cara #${fIdx}: ${String(err?.message || err)}`,
+            stageFailed: 'set_face_normals',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+      }
+
+      if (hasUvs) {
+        if (typeof editableMeshInstance.setFaceUVs !== 'function') {
+          uvsStatus = 'assignment_failed';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `SetFaceUVs no está disponible al asignar UVs en cara #${fIdx}.`,
+            stageFailed: 'set_face_uvs',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+        try {
+          const okUv = editableMeshInstance.setFaceUVs(faceId, [uvIds[r1], uvIds[r2], uvIds[r3]]);
+          if (okUv === false) {
+            throw new Error('SetFaceUVs returned false');
+          }
+        } catch (err: any) {
+          uvsStatus = 'assignment_failed';
+          cleanupEditableMesh();
+          return {
+            verified: false,
+            error: `SetFaceUVs falló en cara #${fIdx}: ${String(err?.message || err)}`,
+            stageFailed: 'set_face_uvs',
+            readbackStatus,
+            vertexCount: 0,
+            triangleCount: 0,
+            normalsStatus,
+            uvsStatus,
+            editableMeshDestroyed,
+            orphanMeshPartDestroyed,
+            meshPart: null,
+          };
+        }
+      }
+    }
+
+    if (hasNormals) {
+      normalsStatus = 'verified';
+    }
+    if (hasUvs) {
+      uvsStatus = 'verified';
+    }
+
+    // Stage 5: Mandatory post-construction readback (GetVertices & GetTriangles)
+    if (typeof editableMeshInstance.getVertices !== 'function') {
+      readbackStatus = 'vertex_read_error';
+      cleanupEditableMesh();
+      return {
+        verified: false,
+        error: 'Lectura posterior obligatoria GetVertices() no disponible en EditableMesh.',
+        stageFailed: 'readback_vertices',
+        readbackStatus,
+        vertexCount: 0,
+        triangleCount: 0,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    let readVertices: Array<string | number>;
+    try {
+      readVertices = editableMeshInstance.getVertices();
+      if (!Array.isArray(readVertices)) {
+        throw new Error('GetVertices() no devolvió una tabla/array.');
+      }
+    } catch (err: any) {
+      readbackStatus = 'vertex_read_error';
+      cleanupEditableMesh();
+      return {
+        verified: false,
+        error: `Fallo al ejecutar lectura posterior obligatoria GetVertices(): ${String(err?.message || err)}`,
+        stageFailed: 'readback_vertices',
+        readbackStatus,
+        vertexCount: 0,
+        triangleCount: 0,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    if (readVertices.length !== vertIds.length) {
+      readbackStatus = 'vertex_count_mismatch';
+      cleanupEditableMesh();
+      return {
+        verified: false,
+        error: `Discrepancia en lectura GetVertices(): esperados ${vertIds.length}, leídos ${readVertices.length}.`,
+        stageFailed: 'readback_vertices',
+        readbackStatus,
+        vertexCount: readVertices.length,
+        triangleCount: 0,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    if (typeof editableMeshInstance.getTriangles !== 'function') {
+      readbackStatus = 'triangle_read_error';
+      cleanupEditableMesh();
+      return {
+        verified: false,
+        error: 'Lectura posterior obligatoria GetTriangles() no disponible en EditableMesh.',
+        stageFailed: 'readback_triangles',
+        readbackStatus,
+        vertexCount: readVertices.length,
+        triangleCount: 0,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    let readTriangles: Array<string | number>;
+    try {
+      readTriangles = editableMeshInstance.getTriangles();
+      if (!Array.isArray(readTriangles)) {
+        throw new Error('GetTriangles() no devolvió una tabla/array.');
+      }
+    } catch (err: any) {
+      readbackStatus = 'triangle_read_error';
+      cleanupEditableMesh();
+      return {
+        verified: false,
+        error: `Fallo al ejecutar lectura posterior obligatoria GetTriangles(): ${String(err?.message || err)}`,
+        stageFailed: 'readback_triangles',
+        readbackStatus,
+        vertexCount: readVertices.length,
+        triangleCount: 0,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    if (readTriangles.length !== addedFacesCount) {
+      readbackStatus = 'triangle_count_mismatch';
+      cleanupEditableMesh();
+      return {
+        verified: false,
+        error: `Discrepancia en lectura GetTriangles(): esperados ${addedFacesCount}, leídos ${readTriangles.length}.`,
+        stageFailed: 'readback_triangles',
+        readbackStatus,
+        vertexCount: readVertices.length,
+        triangleCount: readTriangles.length,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    readbackStatus = 'verified';
+
+    // Stage 6: Create MeshPart and assign verification attributes with guaranteed cleanup
+    try {
+      createdPartInstance = adapter.createMeshPartAsync(
+        editableMeshInstance,
+        partSpec.collisionFidelity || 'Hull'
+      );
+      if (!createdPartInstance) {
+        throw new Error('CreateMeshPartAsync devolvió nil.');
+      }
+    } catch (err: any) {
+      cleanupEditableMesh();
+      return {
+        verified: false,
+        error: `Fallo en CreateMeshPartAsync: ${String(err?.message || err)}`,
+        stageFailed: 'create_mesh_part',
+        readbackStatus,
+        vertexCount: readVertices.length,
+        triangleCount: readTriangles.length,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    // Always destroy the temporary EditableMesh once CreateMeshPartAsync completes
+    cleanupEditableMesh();
+
+    try {
+      createdPartInstance.setAttribute('GeometrySource', 'EditableMeshBuffers');
+      createdPartInstance.setAttribute('ForgeGeometryVerified', true);
+      createdPartInstance.setAttribute('VertexCount', vertIds.length);
+      createdPartInstance.setAttribute('TriangleCount', addedFacesCount);
+    } catch (err: any) {
+      cleanupOrphanPart();
+      return {
+        verified: false,
+        error: `Fallo al asignar atributos en MeshPart: ${String(err?.message || err)}`,
+        stageFailed: 'part_attributes',
+        readbackStatus,
+        vertexCount: readVertices.length,
+        triangleCount: readTriangles.length,
+        normalsStatus,
+        uvsStatus,
+        editableMeshDestroyed,
+        orphanMeshPartDestroyed,
+        meshPart: null,
+      };
+    }
+
+    return {
+      verified: true,
+      readbackStatus,
+      vertexCount: vertIds.length,
+      triangleCount: addedFacesCount,
+      normalsStatus,
+      uvsStatus,
+      editableMeshDestroyed,
+      orphanMeshPartDestroyed,
+      meshPart: createdPartInstance,
+    };
+  } catch (err: any) {
+    cleanupEditableMesh();
+    cleanupOrphanPart();
+    return {
+      verified: false,
+      error: String(err?.message || err || 'Error inesperado en EditableMesh'),
+      stageFailed: 'input_validation',
+      readbackStatus,
+      vertexCount: 0,
+      triangleCount: 0,
+      normalsStatus,
+      uvsStatus,
+      editableMeshDestroyed,
+      orphanMeshPartDestroyed,
+      meshPart: null,
+    };
+  }
+}
+
