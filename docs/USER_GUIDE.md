@@ -1,6 +1,6 @@
-# FORGE AI STUDIO — GUÍA OFICIAL DE USUARIO
+# FORGE AI STUDIO v2.3.0 — GUÍA OFICIAL DE USUARIO
 
-Bienvenido a **Forge AI Studio**, la suite profesional de creación, edición, texturizado PBR y sincronización bidireccional de modelos 3D para **Roblox Studio**.
+Bienvenido a **NIGHTMARE FORGE / Forge AI Studio v2.3.0**, la suite de creación procedural/IA, edición, texturizado PBR y sincronización bidireccional de modelos 3D para **Roblox Studio**.
 
 ---
 
@@ -8,18 +8,19 @@ Bienvenido a **Forge AI Studio**, la suite profesional de creación, edición, t
 
 ### ¿Qué es Forge AI Studio?
 Forge AI Studio te permite:
-- Generar modelos 3D listos para Roblox a partir de descripciones de texto o imágenes de referencia.
+- Generar modelos 3D listos para Roblox **100% en local mediante el Motor 1 Procedural** (con 8 categorías, semillas reproducibles `seed`, 14 parámetros para árboles 3D y mallas cerradas LOD 0/1/2), o combinarlo con texto/imagen mediante IA (`GEMINI_API_KEY` opcional).
 - Editar la geometría de cada pieza (`MeshPart`) con herramientas no destructivas de **EditableMesh**.
-- Aplicar materiales realistas **SurfaceAppearance** con 4 canales PBR completos (Color, Normales, Rugosidad y Metalicidad).
+- Aplicar materiales realistas **SurfaceAppearance** con 4 canales PBR completos (Color, Normales, Rugosidad y Metalicidad), distinguiendo claramente texturas guardadas localmente (`local_saved`) de texturas publicadas en la nube (`cloud_published`).
 - Transferir tus modelos directamente al Workspace de Roblox Studio mediante el **Puente Local (127.0.0.1:48720)** y **Rojo 7.x**.
 
 ### Requisitos previos
-1. **Roblox Studio** instalado en tu PC Windows.
-2. El archivo de plugin `ForgeAIStudioPlugin.server.luau` colocado en la carpeta de plugins locales de Roblox Studio.
-3. El servicio **Forge Local Bridge** ejecutándose en tu PC en el puerto loopback `48720`:
-   ```bash
-   npm run bridge
+1. **Roblox Studio** instalado en tu PC Windows (con **Allow HTTP Requests** habilitado en `Game Settings > Security`).
+2. El archivo de plugin `ForgeAIStudioPlugin.server.luau` v2.3.0 colocado en `%LocalAppData%\Roblox\Plugins\` con el token configurado en `FORGE_PLUGIN_LOCAL_TOKEN`.
+3. El servicio **Forge Local Bridge** ejecutándose en tu PC en el puerto loopback `127.0.0.1:48720`:
+   ```powershell
+   npm --prefix forge-bridge start
    ```
+   *(O en Windows mediante `powershell -ExecutionPolicy Bypass -File .\forge-bridge\scripts\start-bridge.ps1`).*
 
 ---
 
@@ -119,7 +120,7 @@ Flujo guiado en 5 pasos sencillos:
 | Problema | Causa probable | Solución |
 | :--- | :--- | :--- |
 | **Roblox Studio aparece como "Esperando Plugin"** | El plugin no está activo en Studio o HTTP Requests está deshabilitado. | 1. En Roblox Studio, ve a **Game Settings > Security** y activa **Allow HTTP Requests**.<br>2. Verifica que el script `ForgeAIStudioPlugin.server.luau` esté activo. |
-| **Puente Local aparece como "En espera"** | El proceso de Node.js no se ha iniciado en tu PC Windows. | Abre una terminal en tu proyecto y ejecuta `npm run bridge`. Debe indicar que está escuchando en `127.0.0.1:48720`. |
+| **Puente Local aparece como "En espera"** | El proceso de Node.js no se ha iniciado en tu PC Windows. | Abre una terminal en la raíz del proyecto y ejecuta `npm --prefix forge-bridge start` (o `.\forge-bridge\scripts\start-bridge.ps1`). Debe indicar que está escuchando en `127.0.0.1:48720`. |
 | **Aparece un aviso de "Cambios pendientes sin guardar"** | Modificaste una pieza y seleccionaste otro modelo antes de guardar. | Puedes pulsar **Guardar y abrir** para conservar tus cambios en disco, o **Descartar cambios** si deseas desecharlos. |
 | **Un modelo tiene más de 10,000 polígonos** | Supera el límite de importación estándar de un único MeshPart de Roblox. | En la pestaña **Editar**, pulsa **Diezmar / Optimizar** o **Separar partes lógicas** para dividirlo automáticamente en piezas menores a 10k tris. |
 

@@ -410,7 +410,7 @@ function MainStudioContent() {
           </div>
 
           <div className="flex items-center gap-4 text-slate-400 font-mono text-[11px]">
-            <span>Plugin v2.2.0</span>
+            <span>Plugin v2.3.0</span>
             <span>•</span>
             <span>Rojo 7.x</span>
             <span>•</span>

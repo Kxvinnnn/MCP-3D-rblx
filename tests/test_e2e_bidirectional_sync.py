@@ -380,8 +380,10 @@ def test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy():
         old_rojo_path = backend_main.RUNTIME_CONFIG["rojo_project_path"]
         backend_main.RUNTIME_CONFIG["rojo_project_path"] = tmp_dir
         try:
+            tok = backend_main.RUNTIME_CONFIG["forge_local_token"]
             backend_main.configure_rojo_path(
-                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True)
+                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True),
+                x_forge_token=tok,
             )
 
             chassis_mesh = synthesize_procedural_mesh_data("Block", [6.0, 1.5, 10.0]).model_dump()
@@ -458,7 +460,8 @@ def test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy():
 
             # Step 1 & 2: Export 5-file Roblox package (.luau, .rbxmx, .gltf, .obj, .mtl)
             exp_data = backend_main.export_roblox_package(
-                {"asset": initial_asset, "save_to_rojo": True, "save_to_library": True}
+                {"asset": initial_asset, "save_to_rojo": True, "save_to_library": True},
+                x_forge_token=tok,
             )
             assert exp_data["all_five_exist"] is True
             saved_asset = exp_data["asset"]
@@ -516,7 +519,7 @@ def test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy():
                 "model_name": "CyberHoverTank",
                 "parts": studio_parts_after_spawn,
                 "sync_scope": "full_model",
-            })
+            }, x_forge_token=tok)
             diff_1 = cmp_data_1["diff"]
             assert diff_1["in_sync"] is True, f"Expected in_sync=True after camera offset spawn, got: {diff_1}"
             assert len(diff_1["modified_parts"]) == 0
@@ -537,7 +540,7 @@ def test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy():
                 "model_name": "CyberHoverTank",
                 "parts": studio_parts_with_1_edit,
                 "sync_scope": "full_model",
-            })
+            }, x_forge_token=tok)
             diff_2 = cmp_data_2["diff"]
             assert diff_2["in_sync"] is False
             assert len(diff_2["modified_parts"]) == 1
@@ -554,7 +557,7 @@ def test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy():
                 "model_name": "CyberHoverTank",
                 "parts": [cannon_push_without_buffers],
                 "sync_scope": "selection",
-            })
+            }, x_forge_token=tok)
             assert push_data["success"] is True
             assert push_data["updated_part_count"] == 3
 
@@ -570,7 +573,7 @@ def test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy():
                 "model_name": "CyberHoverTank",
                 "parts": studio_parts_with_1_edit,
                 "sync_scope": "full_model",
-            })
+            }, x_forge_token=tok)
             diff_3 = cmp_data_3["diff"]
             assert diff_3["in_sync"] is True, f"Expected in_sync=True after studio-push, got: {diff_3}"
             assert len(diff_3["modified_parts"]) == 0
@@ -593,8 +596,10 @@ def test_3_external_meshparts_never_replaced_with_cube_and_safety_guards():
         old_rojo_path = backend_main.RUNTIME_CONFIG["rojo_project_path"]
         backend_main.RUNTIME_CONFIG["rojo_project_path"] = tmp_dir
         try:
+            tok = backend_main.RUNTIME_CONFIG["forge_local_token"]
             backend_main.configure_rojo_path(
-                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True)
+                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True),
+                x_forge_token=tok,
             )
 
             # 1. Push external MeshParts from Studio without EditableMesh buffers
@@ -632,7 +637,7 @@ def test_3_external_meshparts_never_replaced_with_cube_and_safety_guards():
                         "metalness": 0.0,
                     },
                 ],
-            })
+            }, x_forge_token=tok)
             assert ext_data["success"] is True
             ext_parts = {p["name"]: p for p in ext_data["asset"]["parts"]}
 
@@ -691,7 +696,7 @@ console.log(JSON.stringify({
                     {"partId": "ext-part-cloud-1", "name": "DupA", "size": [2, 2, 2], "position": [0, 1, 0], "rotation": [0, 0, 0]},
                     {"partId": "ext-part-cloud-1", "name": "DupB", "size": [2, 2, 2], "position": [2, 1, 0], "rotation": [0, 0, 0]},
                 ],
-            })
+            }, x_forge_token=tok)
             assert dup_json["success"] is False
             assert dup_json["status"] == "duplicate_part_ids"
             assert "ext-part-cloud-1" in dup_json["duplicate_studio_part_ids"]
@@ -705,7 +710,7 @@ console.log(JSON.stringify({
                 "model_name": "ExternalStudioAsset",
                 "sync_scope": "selection",
                 "parts": [forge_v2_part],
-            })
+            }, x_forge_token=tok)
             assert forge_v2_res["success"] is True
 
             # Now Studio pushes a change to PublishedRockMesh's position based on the older baseline_sha
@@ -718,7 +723,7 @@ console.log(JSON.stringify({
                 "conflict_policy": "reject",
                 "baseline_snapshot_sha256": baseline_sha,
                 "parts": [studio_conflicting_part],
-            })
+            }, x_forge_token=tok)
             assert reject_json["success"] is False
             assert reject_json["status"] == "conflict_detected"
             assert len(reject_json["conflicts"]) == 1
@@ -730,7 +735,7 @@ console.log(JSON.stringify({
                 "conflict_policy": "smart_merge",
                 "baseline_snapshot_sha256": baseline_sha,
                 "parts": [studio_conflicting_part],
-            })
+            }, x_forge_token=tok)
             assert smart_json["success"] is True
             merged_rock = {p["name"]: p for p in smart_json["asset"]["parts"]}["PublishedRockMesh"]
             assert merged_rock["position"] == [10.0, 5.0, -4.0], "Smart merge should apply Studio's changed position"
@@ -742,7 +747,7 @@ console.log(JSON.stringify({
                 "sync_scope": "explicit_delete",
                 "explicit_delete_ids": ["ext-part-unreadable-2"],
                 "parts": [],
-            })
+            }, x_forge_token=tok)
             assert del_json["success"] is True
             remaining_names = [p["name"] for p in del_json["asset"]["parts"]]
             assert remaining_names == ["PublishedRockMesh"]
@@ -961,8 +966,10 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
         old_rojo_path = backend_main.RUNTIME_CONFIG["rojo_project_path"]
         backend_main.RUNTIME_CONFIG["rojo_project_path"] = tmp_dir
         try:
+            tok = backend_main.RUNTIME_CONFIG["forge_local_token"]
             backend_main.configure_rojo_path(
-                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True)
+                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True),
+                x_forge_token=tok,
             )
 
             # Build meshes for the 5-MeshPart model
@@ -1107,7 +1114,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "asset": initial_asset,
                 "save_to_rojo": True,
                 "save_to_library": True,
-            })
+            }, x_forge_token=tok)
             assert exp_v1["all_five_exist"] is True
             assert exp_v1["asset"]["version"] == 1
 
@@ -1127,7 +1134,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "metalness": 0.88,
                 "target_asset_id": exp_v1["asset"]["id"],
                 "target_part_name": "MainHullChassis",
-            })
+            }, x_forge_token=tok)
             assert pbr_res["success"] is True
             assert pbr_res["status"] == "cloud_published"
             assert len(pbr_res["verified_cloud_ids"]) == 4
@@ -1139,7 +1146,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "asset": current_asset,
                 "save_to_rojo": True,
                 "save_to_library": True,
-            })
+            }, x_forge_token=tok)
             saved_v2 = exp_v2["asset"]
 
             # Step D: Construct the model in Studio with a camera offset CFrame (`ForgeSyncOriginCFrame`)
@@ -1165,7 +1172,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "model_name": model_name,
                 "parts": studio_spawned_parts,
                 "sync_scope": "full_model",
-            })
+            }, x_forge_token=tok)
             assert cmp_initial["diff"]["in_sync"] is True, f"Step E failed: {cmp_initial['diff']}"
             assert cmp_initial["diff"]["unchanged_count"] == 5
 
@@ -1223,7 +1230,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "parts": edited_studio_parts,
                 "sync_scope": "full_model",
                 "explicit_delete_ids": ["fpart-10000005-aaaa4bbb-8ccc00000005"],
-            })
+            }, x_forge_token=tok)
             diff_edited = cmp_edited["diff"]
             assert diff_edited["in_sync"] is False
             assert diff_edited["unchanged_count"] == 1  # MainHullChassis is untouched
@@ -1255,7 +1262,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "sync_scope": "full_model",
                 "explicit_delete_ids": ["fpart-10000005-aaaa4bbb-8ccc00000005"],
                 "conflict_policy": "smart_merge",
-            })
+            }, x_forge_token=tok)
             assert push_res["success"] is True
             synced_asset = push_res["asset"]
             assert len(synced_asset["parts"]) == 5  # 5 original - 1 deleted + 1 added = 5
@@ -1281,7 +1288,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "model_name": model_name,
                 "parts": edited_studio_parts,
                 "sync_scope": "full_model",
-            })
+            }, x_forge_token=tok)
             assert cmp_after_push["diff"]["in_sync"] is True, f"Step J failed: {cmp_after_push['diff']}"
             assert cmp_after_push["diff"]["unchanged_count"] == 5
 
@@ -1290,7 +1297,7 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
                 "asset_id": synced_asset["id"],
                 "asset_name": model_name,
                 "restore_version": 1,
-            })
+            }, x_forge_token=tok)
             assert restore_res["success"] is True
             restored_asset = restore_res["asset"]
             restored_names = {p["name"] for p in restored_asset["parts"]}
@@ -1306,6 +1313,80 @@ def test_5_master_plan_end_to_end_five_meshpart_scenario():
             backend_main.RUNTIME_CONFIG["rojo_project_path"] = old_rojo_path
 
 
+def test_6_backend_security_and_destructive_guards():
+    """
+    Etapa 3: Verifies FastAPI backend startup security validation,
+    fail-closed token/bridge checks, and explicit confirmation on delete_asset.
+    """
+    # 1. Production without token fails
+    try:
+        backend_main.validate_backend_security_config(security_token="", bridge_shared_secret="", node_env="production")
+        assert False, "Expected production startup failure when secrets are empty"
+    except RuntimeError as exc:
+        assert "production" in str(exc).lower()
+
+    # 2. Production with example placeholder fails
+    try:
+        backend_main.validate_backend_security_config(
+            security_token="forge-local-dev-token-2026",
+            bridge_shared_secret="forge-local-dev-token-2026",
+            node_env="production",
+        )
+        assert False, "Expected production startup failure with placeholder secret"
+    except RuntimeError as exc:
+        assert "placeholder" in str(exc).lower()
+
+    # 3. Production with valid >= 16 char secrets succeeds
+    ok_cfg = backend_main.validate_backend_security_config(
+        security_token="prod-valid-secret-token-1234567890",
+        bridge_shared_secret="prod-valid-bridge-secret-1234567890",
+        node_env="production",
+    )
+    assert ok_cfg["is_production"] is True
+
+    # 4 & 5. Protected routes reject missing or invalid token with 401
+    for bad_tok in (None, "", "wrong-token"):
+        try:
+            backend_main.bridge_get_status(x_forge_token=bad_tok)
+            assert False, "Expected 401 on unauthorized bridge_get_status"
+        except backend_main.HTTPException as err:
+            assert err.status_code == 401
+
+    tok = backend_main.RUNTIME_CONFIG["forge_local_token"]
+    assert isinstance(backend_main.bridge_get_status(x_forge_token=tok), dict)
+
+    # 7 & 8. Destructive delete without auth -> 401, without confirm -> 400, with auth + confirm -> 200
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        old_rojo_path = backend_main.RUNTIME_CONFIG["rojo_project_path"]
+        backend_main.RUNTIME_CONFIG["rojo_project_path"] = tmp_dir
+        try:
+            backend_main.configure_rojo_path(
+                backend_main.RojoConfigRequest(rojo_project_path=tmp_dir, initialize_if_missing=True),
+                x_forge_token=tok,
+            )
+            initial_count = len(backend_main.load_assets_library())
+            backend_main.add_asset({"id": "asset-del-1", "name": "TempDelAsset", "parts": []}, x_forge_token=tok)
+            assert len(backend_main.load_assets_library()) == initial_count + 1
+            try:
+                backend_main.delete_asset("asset-del-1", confirm=True, x_forge_token="bad-token")
+                assert False, "Expected 401 on unauthorized delete"
+            except backend_main.HTTPException as err:
+                assert err.status_code == 401
+
+            try:
+                backend_main.delete_asset("asset-del-1", confirm=None, x_forge_token=tok)
+                assert False, "Expected 400 on unconfirmed delete"
+            except backend_main.HTTPException as err:
+                assert err.status_code == 400
+
+            del_ok = backend_main.delete_asset("asset-del-1", confirm=True, x_forge_token=tok)
+            assert del_ok["deleted_ok"] is True
+            assert del_ok["remaining"] == initial_count
+            assert backend_main.get_asset_engine().get_asset("asset-del-1") is None
+        finally:
+            backend_main.RUNTIME_CONFIG["rojo_project_path"] = old_rojo_path
+
+
 if __name__ == "__main__":
     test_1_canonical_hash_parity_and_middle_vertex_sensitivity()
     print("PASS: test_1_canonical_hash_parity_and_middle_vertex_sensitivity")
@@ -1317,5 +1398,7 @@ if __name__ == "__main__":
     print("PASS: test_4_shared_equivalence_vectors_and_png_validation")
     test_5_master_plan_end_to_end_five_meshpart_scenario()
     print("PASS: test_5_master_plan_end_to_end_five_meshpart_scenario")
+    test_6_backend_security_and_destructive_guards()
+    print("PASS: test_6_backend_security_and_destructive_guards")
     print("ALL E2E BIDIRECTIONAL SYNC TESTS PASSED!")
 

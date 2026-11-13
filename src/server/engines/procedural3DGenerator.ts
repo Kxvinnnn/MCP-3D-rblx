@@ -21,6 +21,7 @@
  * - Funciona 100% en modo local/offline sin requerir `GEMINI_API_KEY` ni servicios de pago.
  */
 
+import crypto from 'crypto';
 import {
   buildStrictLuauFromEditedParts,
   computeFnv1a32Hex,
@@ -42,19 +43,25 @@ export type ForgeAssetCategory = (typeof FORGE_ASSET_CATEGORIES)[number];
 
 export type CanopyShapeType = 'spherical' | 'conical' | 'layered' | 'weeping';
 export type LeafDistributionType = 'dense' | 'balanced' | 'sparse' | 'clustered';
+export type BranchDistributionType = 'tiered' | 'whorled' | 'alternating' | 'canopy_top';
 
 export interface TreeProceduralParams {
   seed?: string | number;
   height?: number;
   trunkThickness?: number;
   branchCount?: number;
+  branchLength?: number;
+  branchDistribution?: BranchDistributionType;
   leafDistribution?: LeafDistributionType;
   canopyShape?: CanopyShapeType;
+  canopySize?: number;
+  foliageCount?: number;
   trunkMaterial?: string;
   leafMaterial?: string;
   trunkColor?: string;
   leafColor?: string;
   variation?: number;
+  leafVariation?: number;
 }
 
 export interface Procedural3DGenerationRequest {
@@ -112,35 +119,43 @@ function hexToRgbNormalized(hex: string): [number, number, number] {
   return [round4(r), round4(g), round4(b)];
 }
 
-/**
- * Construye una malla troncocónica/cilíndrica cerrada con perturbación orgánica determinista.
- * Útil para troncos de árboles, ramas, columnas, barriles y postes.
- */
-export function buildTaperedCylinderMesh(params: {
-  modelName: string;
-  partName: string;
+interface RawProceduralGeometry {
+  vertices: [number, number, number][];
+  normals: [number, number, number][];
+  uvs: [number, number][];
+  faces: [number, number, number][];
+}
+
+function modulateHexColor(hex: string, factor: number): string {
+  const clean = String(hex || '#2d6a4f').replace('#', '').trim();
+  const num = parseInt(clean.length === 6 ? clean : '2d6a4f', 16);
+  const r = Math.round(clamp(((num >> 16) & 255) * factor, 0, 255));
+  const g = Math.round(clamp(((num >> 8) & 255) * factor, 0, 255));
+  const b = Math.round(clamp((num & 255) * factor, 0, 255));
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+function buildCylinderBuffers(params: {
   size: [number, number, number];
   bottomScaleRatio: number;
   topScaleRatio: number;
   radialSegments: number;
   heightSegments: number;
   jitterAmount: number;
-  colorHex: string;
   rng: () => number;
-}) {
+}): RawProceduralGeometry {
   const [sx, sy, sz] = params.size;
   const rxBase = Math.max(0.15, sx * 0.5);
   const rzBase = Math.max(0.15, sz * 0.5);
   const halfY = Math.max(0.15, sy * 0.5);
-  const radial = clamp(Math.round(params.radialSegments), 5, 16);
-  const rings = clamp(Math.round(params.heightSegments), 2, 8);
+  const radial = clamp(Math.round(params.radialSegments), 4, 16);
+  const rings = clamp(Math.round(params.heightSegments), 1, 8);
 
   const vertices: [number, number, number][] = [];
   const normals: [number, number, number][] = [];
   const uvs: [number, number][] = [];
   const faces: [number, number, number][] = [];
 
-  // Anillos laterales desde abajo (-halfY) hasta arriba (+halfY)
   for (let r = 0; r <= rings; r++) {
     const vRatio = r / rings;
     const y = round4(-halfY + vRatio * sy);
@@ -166,7 +181,6 @@ export function buildTaperedCylinderMesh(params: {
     }
   }
 
-  // Caras laterales
   for (let r = 0; r < rings; r++) {
     for (let s = 0; s < radial; s++) {
       const nextS = (s + 1) % radial;
@@ -179,7 +193,6 @@ export function buildTaperedCylinderMesh(params: {
     }
   }
 
-  // Centro inferior y superior para cerrar la malla (manifold)
   const bottomCenterIdx = vertices.length;
   vertices.push([0, round4(-halfY), 0]);
   normals.push([0, -1, 0]);
@@ -197,52 +210,83 @@ export function buildTaperedCylinderMesh(params: {
     faces.push([topCenterIdx, topRingOffset + s, topRingOffset + nextS]);
   }
 
-  return finalizeProceduralMeshData(
-    params.modelName,
-    params.partName,
-    vertices,
-    normals,
-    uvs,
-    faces,
-    params.colorHex
-  );
+  return { vertices, normals, uvs, faces };
 }
 
 /**
- * Construye una malla de copa/follaje o roca facetada mediante esfera/domo subdividido con deformación orgánica determinista.
+ * Construye una malla troncocónica/cilíndrica cerrada con perturbación orgánica determinista
+ * y niveles LOD 1 y LOD 2 igualmente cerrados (watertight, cero caras rotas).
  */
-export function buildOrganicCanopyOrRockMesh(params: {
+export function buildTaperedCylinderMesh(params: {
   modelName: string;
   partName: string;
+  size: [number, number, number];
+  bottomScaleRatio: number;
+  topScaleRatio: number;
+  radialSegments: number;
+  heightSegments: number;
+  jitterAmount: number;
+  colorHex: string;
+  rng: () => number;
+}) {
+  const lod0 = buildCylinderBuffers(params);
+  const lod1Rng = createSeededRng(`${params.modelName}:${params.partName}:cyl-lod1`);
+  const lod2Rng = createSeededRng(`${params.modelName}:${params.partName}:cyl-lod2`);
+
+  const lod1 = buildCylinderBuffers({
+    ...params,
+    radialSegments: Math.max(5, Math.ceil(params.radialSegments * 0.65)),
+    heightSegments: Math.max(1, Math.ceil(params.heightSegments * 0.5)),
+    rng: lod1Rng,
+  });
+  const lod2 = buildCylinderBuffers({
+    ...params,
+    radialSegments: Math.max(4, Math.floor(params.radialSegments * 0.5)),
+    heightSegments: 1,
+    jitterAmount: params.jitterAmount * 0.5,
+    rng: lod2Rng,
+  });
+
+  return finalizeProceduralMeshData(
+    params.modelName,
+    params.partName,
+    lod0.vertices,
+    lod0.normals,
+    lod0.uvs,
+    lod0.faces,
+    params.colorHex,
+    lod1,
+    lod2
+  );
+}
+
+function buildOrganicCanopyOrRockBuffers(params: {
   size: [number, number, number];
   shapeStyle: 'spherical' | 'conical' | 'layered' | 'weeping' | 'faceted_rock';
   radialSegments: number;
   latSegments: number;
   jitterAmount: number;
-  colorHex: string;
   rng: () => number;
-}) {
+}): RawProceduralGeometry {
   const [sx, sy, sz] = params.size;
   const rx = Math.max(0.25, sx * 0.5);
   const ry = Math.max(0.25, sy * 0.5);
   const rz = Math.max(0.25, sz * 0.5);
-  const lonSegs = clamp(Math.round(params.radialSegments), 6, 16);
-  const latSegs = clamp(Math.round(params.latSegments), 4, 12);
+  const lonSegs = clamp(Math.round(params.radialSegments), 4, 16);
+  const latSegs = clamp(Math.round(params.latSegments), 2, 12);
 
   const vertices: [number, number, number][] = [];
   const normals: [number, number, number][] = [];
   const uvs: [number, number][] = [];
   const faces: [number, number, number][] = [];
 
-  // Polo inferior (índice 0)
   vertices.push([0, round4(-ry), 0]);
   normals.push([0, -1, 0]);
   uvs.push([0.5, 0]);
 
-  // Anillos intermedios
   for (let lat = 1; lat < latSegs; lat++) {
-    const t = lat / latSegs; // 0..1 de abajo a arriba
-    const phi = (t - 0.5) * Math.PI; // -pi/2 .. +pi/2
+    const t = lat / latSegs;
+    const phi = (t - 0.5) * Math.PI;
     let ringY = Math.sin(phi) * ry;
     let ringRadiusFactor = Math.cos(phi);
 
@@ -256,7 +300,6 @@ export function buildOrganicCanopyOrRockMesh(params: {
       ringRadiusFactor *= t < 0.45 ? 1.15 : 0.88;
       ringY -= (1 - t) * ry * 0.12;
     } else if (params.shapeStyle === 'faceted_rock') {
-      // Aplanar ligeramente la base de la roca para asentarla mejor
       if (t < 0.25) {
         ringY = Math.max(-ry * 0.92, ringY);
         ringRadiusFactor *= 1.08;
@@ -268,7 +311,9 @@ export function buildOrganicCanopyOrRockMesh(params: {
       const theta = u * Math.PI * 2;
       const jitter = 1 + (params.rng() - 0.5) * 2 * clamp(params.jitterAmount, 0, 0.38);
       const vx = round4(Math.cos(theta) * rx * ringRadiusFactor * jitter);
-      const vy = round4(clamp(ringY * (1 + (params.rng() - 0.5) * params.jitterAmount * 0.4), -ry, ry));
+      const vy = round4(
+        clamp(ringY * (1 + (params.rng() - 0.5) * params.jitterAmount * 0.4), -ry, ry)
+      );
       const vz = round4(Math.sin(theta) * rz * ringRadiusFactor * jitter);
 
       vertices.push([vx, vy, vz]);
@@ -278,19 +323,16 @@ export function buildOrganicCanopyOrRockMesh(params: {
     }
   }
 
-  // Polo superior
   const topPoleIdx = vertices.length;
   vertices.push([0, round4(ry), 0]);
   normals.push([0, 1, 0]);
   uvs.push([0.5, 1]);
 
-  // Conectar polo inferior al primer anillo
   for (let lon = 0; lon < lonSegs; lon++) {
     const nextLon = (lon + 1) % lonSegs;
     faces.push([0, 1 + nextLon, 1 + lon]);
   }
 
-  // Conectar anillos intermedios
   for (let lat = 0; lat < latSegs - 2; lat++) {
     const rowA = 1 + lat * lonSegs;
     const rowB = rowA + lonSegs;
@@ -305,26 +347,104 @@ export function buildOrganicCanopyOrRockMesh(params: {
     }
   }
 
-  // Conectar último anillo al polo superior
   const lastRingStart = 1 + (latSegs - 2) * lonSegs;
   for (let lon = 0; lon < lonSegs; lon++) {
     const nextLon = (lon + 1) % lonSegs;
     faces.push([topPoleIdx, lastRingStart + lon, lastRingStart + nextLon]);
   }
 
-  return finalizeProceduralMeshData(
-    params.modelName,
-    params.partName,
-    vertices,
-    normals,
-    uvs,
-    faces,
-    params.colorHex
-  );
+  return { vertices, normals, uvs, faces };
 }
 
 /**
- * Construye una caja biselada (chamfered box) cerrada para estructuras, mobiliario y props.
+ * Construye una malla de copa/follaje o roca facetada mediante esfera/domo subdividido con deformación orgánica determinista
+ * y variantes cerradas reales para LOD 1 y LOD 2.
+ */
+export function buildOrganicCanopyOrRockMesh(params: {
+  modelName: string;
+  partName: string;
+  size: [number, number, number];
+  shapeStyle: 'spherical' | 'conical' | 'layered' | 'weeping' | 'faceted_rock';
+  radialSegments: number;
+  latSegments: number;
+  jitterAmount: number;
+  colorHex: string;
+  rng: () => number;
+}) {
+  const lod0 = buildOrganicCanopyOrRockBuffers(params);
+  const lod1Rng = createSeededRng(`${params.modelName}:${params.partName}:canopy-lod1`);
+  const lod2Rng = createSeededRng(`${params.modelName}:${params.partName}:canopy-lod2`);
+
+  const lod1 = buildOrganicCanopyOrRockBuffers({
+    ...params,
+    radialSegments: Math.max(5, Math.ceil(params.radialSegments * 0.65)),
+    latSegments: Math.max(3, Math.ceil(params.latSegments * 0.65)),
+    rng: lod1Rng,
+  });
+  const lod2 = buildOrganicCanopyOrRockBuffers({
+    ...params,
+    radialSegments: Math.max(4, Math.floor(params.radialSegments * 0.5)),
+    latSegments: Math.max(2, Math.floor(params.latSegments * 0.5)),
+    jitterAmount: params.jitterAmount * 0.5,
+    rng: lod2Rng,
+  });
+
+  return finalizeProceduralMeshData(
+    params.modelName,
+    params.partName,
+    lod0.vertices,
+    lod0.normals,
+    lod0.uvs,
+    lod0.faces,
+    params.colorHex,
+    lod1,
+    lod2
+  );
+}
+
+function buildSimpleBoxBuffers(size: [number, number, number]): RawProceduralGeometry {
+  const [sx, sy, sz] = size;
+  const hx = Math.max(0.1, sx * 0.5);
+  const hy = Math.max(0.1, sy * 0.5);
+  const hz = Math.max(0.1, sz * 0.5);
+  const vertices: [number, number, number][] = [
+    [round4(-hx), round4(-hy), round4(-hz)],
+    [round4(hx), round4(-hy), round4(-hz)],
+    [round4(hx), round4(-hy), round4(hz)],
+    [round4(-hx), round4(-hy), round4(hz)],
+    [round4(-hx), round4(hy), round4(-hz)],
+    [round4(hx), round4(hy), round4(-hz)],
+    [round4(hx), round4(hy), round4(hz)],
+    [round4(-hx), round4(hy), round4(hz)],
+  ];
+  const normals: [number, number, number][] = vertices.map(([vx, vy, vz]) => {
+    const len = Math.hypot(vx, vy, vz) || 1;
+    return [round4(vx / len), round4(vy / len), round4(vz / len)];
+  });
+  const uvs: [number, number][] = vertices.map(([_vx, vy], i) => [
+    round4((i % 4) / 3),
+    vy < 0 ? 0 : 1,
+  ]);
+  const faces: [number, number, number][] = [
+    [0, 2, 1],
+    [0, 3, 2],
+    [4, 5, 6],
+    [4, 6, 7],
+    [0, 1, 5],
+    [0, 5, 4],
+    [1, 2, 6],
+    [1, 6, 5],
+    [2, 3, 7],
+    [2, 7, 6],
+    [3, 0, 4],
+    [3, 4, 7],
+  ];
+  return { vertices, normals, uvs, faces };
+}
+
+/**
+ * Construye una caja biselada (chamfered box) cerrada para estructuras, mobiliario y props,
+ * con variantes LOD 1 y LOD 2 cerradas y válidas.
  */
 export function buildBeveledBoxMesh(params: {
   modelName: string;
@@ -340,22 +460,18 @@ export function buildBeveledBoxMesh(params: {
   const b = clamp(params.bevelRatio, 0.02, 0.25);
 
   const vertices: [number, number, number][] = [
-    // Anillo inferior biselado (0..3)
     [round4(-hx * (1 - b)), round4(-hy), round4(-hz * (1 - b))],
     [round4(hx * (1 - b)), round4(-hy), round4(-hz * (1 - b))],
     [round4(hx * (1 - b)), round4(-hy), round4(hz * (1 - b))],
     [round4(-hx * (1 - b)), round4(-hy), round4(hz * (1 - b))],
-    // Cuerpo medio inferior (4..7)
     [round4(-hx), round4(-hy * (1 - b)), round4(-hz)],
     [round4(hx), round4(-hy * (1 - b)), round4(-hz)],
     [round4(hx), round4(-hy * (1 - b)), round4(hz)],
     [round4(-hx), round4(-hy * (1 - b)), round4(hz)],
-    // Cuerpo medio superior (8..11)
     [round4(-hx), round4(hy * (1 - b)), round4(-hz)],
     [round4(hx), round4(hy * (1 - b)), round4(-hz)],
     [round4(hx), round4(hy * (1 - b)), round4(hz)],
     [round4(-hx), round4(hy * (1 - b)), round4(hz)],
-    // Anillo superior biselado (12..15)
     [round4(-hx * (1 - b)), round4(hy), round4(-hz * (1 - b))],
     [round4(hx * (1 - b)), round4(hy), round4(-hz * (1 - b))],
     [round4(hx * (1 - b)), round4(hy), round4(hz * (1 - b))],
@@ -373,10 +489,8 @@ export function buildBeveledBoxMesh(params: {
   ]);
 
   const faces: [number, number, number][] = [
-    // Base inferior
     [0, 2, 1],
     [0, 3, 2],
-    // Tapa superior
     [12, 13, 14],
     [12, 14, 15],
   ];
@@ -392,6 +506,43 @@ export function buildBeveledBoxMesh(params: {
     }
   }
 
+  // LOD 1: prisma de 12 vértices con tapa superior biselada (20 triángulos cerrados)
+  const lod1Verts: [number, number, number][] = [
+    ...vertices.slice(4, 8),
+    ...vertices.slice(8, 12),
+    ...vertices.slice(12, 16),
+  ];
+  const lod1Norms: [number, number, number][] = lod1Verts.map(([vx, vy, vz]) => {
+    const len = Math.hypot(vx, vy, vz) || 1;
+    return [round4(vx / len), round4(vy / len), round4(vz / len)];
+  });
+  const lod1Uvs: [number, number][] = lod1Verts.map(([_vx, vy], i) => [
+    round4((i % 4) / 3),
+    round4((vy + hy) / Math.max(0.2, sy)),
+  ]);
+  const lod1Faces: [number, number, number][] = [
+    [0, 2, 1],
+    [0, 3, 2],
+    [8, 9, 10],
+    [8, 10, 11],
+  ];
+  for (let r = 0; r < 2; r++) {
+    const rA = r * 4;
+    const rB = (r + 1) * 4;
+    for (let s = 0; s < 4; s++) {
+      const nextS = (s + 1) % 4;
+      lod1Faces.push([rA + s, rA + nextS, rB + nextS]);
+      lod1Faces.push([rA + s, rB + nextS, rB + s]);
+    }
+  }
+  const lod1: RawProceduralGeometry = {
+    vertices: lod1Verts,
+    normals: lod1Norms,
+    uvs: lod1Uvs,
+    faces: lod1Faces,
+  };
+  const lod2 = buildSimpleBoxBuffers(params.size);
+
   return finalizeProceduralMeshData(
     params.modelName,
     params.partName,
@@ -399,7 +550,9 @@ export function buildBeveledBoxMesh(params: {
     normals,
     uvs,
     faces,
-    params.colorHex
+    params.colorHex,
+    lod1,
+    lod2
   );
 }
 
@@ -410,7 +563,9 @@ function finalizeProceduralMeshData(
   normals: [number, number, number][],
   uvs: [number, number][],
   faces: [number, number, number][],
-  colorHex: string
+  colorHex: string,
+  lod1Geom?: RawProceduralGeometry,
+  lod2Geom?: RawProceduralGeometry
 ) {
   const rgb = hexToRgbNormalized(colorHex);
   const vertexColors: [number, number, number][] = vertices.map((_, idx) => {
@@ -422,17 +577,30 @@ function finalizeProceduralMeshData(
     ];
   });
 
-  const sig = `${modelName}:${partName}:v${vertices.length}:f${faces.length}`;
-  const hashDec = parseInt(computeFnv1a32Hex(sig), 16) || 9100000000;
-  const validNumericId = 9000000000 + (hashDec % 899999999);
-  const assetUri = `rbxassetid://${validNumericId}`;
+  const geometrySignature = JSON.stringify({
+    modelName,
+    partName,
+    vertices,
+    normals,
+    uvs,
+    faces,
+  });
+  const partGeometryHash = crypto
+    .createHash('sha256')
+    .update(geometrySignature, 'utf-8')
+    .digest('hex');
 
-  const lod1Faces = faces.filter((_, idx) => idx % 2 === 0);
-  const lod2Faces = faces.filter((_, idx) => idx % 3 === 0);
+  const safeLod1 = lod1Geom || { vertices, normals, uvs, faces };
+  const safeLod2 = lod2Geom || safeLod1;
+  const baseCount = Math.max(1, faces.length);
 
   return {
-    meshId: assetUri,
-    assetId: assetUri,
+    meshId: '',
+    assetId: '',
+    robloxAssetId: null,
+    assetUri: null,
+    geometrySource: 'EditableMeshBuffers' as const,
+    geometryHash: partGeometryHash,
     sourceFormat: 'PROC',
     vertices,
     normals,
@@ -440,18 +608,35 @@ function finalizeProceduralMeshData(
     vertexColors,
     faces,
     lodLevels: [
-      { level: 0, ratio: 1.0, triangleCount: faces.length, faces },
+      {
+        level: 0,
+        ratio: 1.0,
+        vertexCount: vertices.length,
+        triangleCount: faces.length,
+        vertices,
+        normals,
+        uvs,
+        faces,
+      },
       {
         level: 1,
-        ratio: 0.5,
-        triangleCount: Math.max(4, lod1Faces.length),
-        faces: lod1Faces.length >= 4 ? lod1Faces : faces,
+        ratio: round4(safeLod1.faces.length / baseCount),
+        vertexCount: safeLod1.vertices.length,
+        triangleCount: safeLod1.faces.length,
+        vertices: safeLod1.vertices,
+        normals: safeLod1.normals,
+        uvs: safeLod1.uvs,
+        faces: safeLod1.faces,
       },
       {
         level: 2,
-        ratio: 0.25,
-        triangleCount: Math.max(4, lod2Faces.length),
-        faces: lod2Faces.length >= 4 ? lod2Faces : faces,
+        ratio: round4(safeLod2.faces.length / baseCount),
+        vertexCount: safeLod2.vertices.length,
+        triangleCount: safeLod2.faces.length,
+        vertices: safeLod2.vertices,
+        normals: safeLod2.normals,
+        uvs: safeLod2.uvs,
+        faces: safeLod2.faces,
       },
     ],
   };
@@ -516,6 +701,17 @@ export function generateParameterizedTree3DParts(
   const height = clamp(Number(params.height ?? 14), 4, 45);
   const trunkThickness = clamp(Number(params.trunkThickness ?? 1.6), 0.4, 6.0);
   const branchCount = clamp(Math.round(Number(params.branchCount ?? 4)), 1, 12);
+  const explicitBranchLength =
+    params.branchLength !== undefined && Number.isFinite(Number(params.branchLength)) && Number(params.branchLength) > 0
+      ? clamp(Number(params.branchLength), 1.0, Math.max(12, height * 0.75))
+      : null;
+  const branchDistribution: BranchDistributionType =
+    params.branchDistribution === 'whorled' ||
+    params.branchDistribution === 'alternating' ||
+    params.branchDistribution === 'canopy_top' ||
+    params.branchDistribution === 'tiered'
+      ? params.branchDistribution
+      : 'tiered';
   const leafDistribution: LeafDistributionType =
     params.leafDistribution === 'dense' ||
     params.leafDistribution === 'balanced' ||
@@ -530,12 +726,18 @@ export function generateParameterizedTree3DParts(
     params.canopyShape === 'weeping'
       ? params.canopyShape
       : 'spherical';
+  const canopySize = clamp(Number(params.canopySize ?? 1.0), 0.4, 2.2);
 
   const trunkMaterial = String(params.trunkMaterial || 'Wood');
   const leafMaterial = String(params.leafMaterial || 'Grass');
   const trunkColor = String(params.trunkColor || '#5c4033');
   const leafColor = String(params.leafColor || '#2d6a4f');
   const variation = clamp(Number(params.variation ?? 0.22), 0, 1);
+  const leafVariation = clamp(
+    Number(params.leafVariation !== undefined ? params.leafVariation : variation),
+    0,
+    1
+  );
 
   const parts: any[] = [];
 
@@ -621,17 +823,38 @@ export function generateParameterizedTree3DParts(
     }),
   });
 
-  // 3. Ramas secundarias parametrizadas (`branchCount`)
-  const branchStartHeight = rootFlareHeight + trunkHeight * 0.58;
+  // 3. Ramas secundarias parametrizadas (`branchCount`, `branchLength`, `branchDistribution`)
+  const branchStartHeight =
+    branchDistribution === 'canopy_top'
+      ? rootFlareHeight + trunkHeight * 0.78
+      : rootFlareHeight + trunkHeight * 0.58;
   const branchSpreadRadius = Math.max(1.2, height * 0.18);
   const branchEndpoints: [number, number, number][] = [];
 
   for (let i = 0; i < branchCount; i++) {
-    const angle = (i / branchCount) * Math.PI * 2 + (rng() - 0.5) * 0.45 * variation;
-    const tierFactor = i / Math.max(1, branchCount - 1);
-    const branchLength = round4(
-      Math.max(1.4, height * (0.24 - tierFactor * 0.06) * (0.9 + rng() * 0.25 * variation))
-    );
+    const baseAngle =
+      branchDistribution === 'alternating'
+        ? i * Math.PI + (i * Math.PI) / Math.max(2, branchCount)
+        : branchDistribution === 'whorled'
+        ? (i / branchCount) * Math.PI * 2
+        : (i / branchCount) * Math.PI * 2;
+    const angle = baseAngle + (rng() - 0.5) * 0.45 * variation;
+    const tierFactor =
+      branchDistribution === 'whorled' || branchDistribution === 'canopy_top'
+        ? 0.5
+        : i / Math.max(1, branchCount - 1);
+    const heightSpan =
+      branchDistribution === 'whorled'
+        ? trunkHeight * 0.08 * ((i % 2) * 0.5)
+        : branchDistribution === 'canopy_top'
+        ? trunkHeight * 0.14
+        : tierFactor * (trunkHeight * 0.32);
+
+    const computedBranchLen =
+      explicitBranchLength !== null
+        ? explicitBranchLength * (1 - tierFactor * 0.12) * (0.94 + rng() * 0.16 * variation)
+        : height * (0.24 - tierFactor * 0.06) * (0.9 + rng() * 0.25 * variation);
+    const branchLength = round4(Math.max(1.2, computedBranchLen));
     const branchThick = round4(Math.max(0.28, trunkThickness * (0.48 - tierFactor * 0.12)));
     const pitchDeg = canopyShape === 'weeping' ? 58 : canopyShape === 'conical' ? 32 : 42;
     const tiltRad = (pitchDeg * Math.PI) / 180;
@@ -640,13 +863,13 @@ export function generateParameterizedTree3DParts(
     const verticalOffset = Math.cos(tiltRad) * branchLength * 0.5;
 
     const bx = round4(Math.cos(angle) * (trunkThickness * 0.25 + radialOffset));
-    const by = round4(branchStartHeight + tierFactor * (trunkHeight * 0.32) + verticalOffset);
+    const by = round4(branchStartHeight + heightSpan + verticalOffset);
     const bz = round4(Math.sin(angle) * (trunkThickness * 0.25 + radialOffset));
 
     const tipX = round4(Math.cos(angle) * (trunkThickness * 0.3 + radialOffset * 1.85));
     const tipY = round4(
       branchStartHeight +
-        tierFactor * (trunkHeight * 0.32) +
+        heightSpan +
         verticalOffset * (canopyShape === 'weeping' ? 1.2 : 1.75)
     );
     const tipZ = round4(Math.sin(angle) * (trunkThickness * 0.3 + radialOffset * 1.85));
@@ -690,7 +913,7 @@ export function generateParameterizedTree3DParts(
     });
   }
 
-  // 4. Copa principal (`CanopyCrown_Main`) según `canopyShape` y `leafDistribution`
+  // 4. Copa principal (`CanopyCrown_Main`) según `canopyShape`, `canopySize` y `leafDistribution`
   const densityMultiplier =
     leafDistribution === 'dense'
       ? 1.25
@@ -701,11 +924,11 @@ export function generateParameterizedTree3DParts(
       : 1.0;
 
   const crownWidth = round4(
-    Math.max(2.6, height * (canopyShape === 'conical' ? 0.46 : 0.56) * densityMultiplier)
+    Math.max(2.0, height * (canopyShape === 'conical' ? 0.46 : 0.56) * densityMultiplier * canopySize)
   );
   const crownHeight = round4(
     Math.max(
-      2.2,
+      1.8,
       height *
         (canopyShape === 'conical'
           ? 0.55
@@ -714,7 +937,8 @@ export function generateParameterizedTree3DParts(
           : canopyShape === 'weeping'
           ? 0.48
           : 0.44) *
-        densityMultiplier
+        densityMultiplier *
+        canopySize
     )
   );
   const crownCenterY = round4(rootFlareHeight + trunkHeight * 0.88 + crownHeight * 0.26);
@@ -744,19 +968,23 @@ export function generateParameterizedTree3DParts(
       shapeStyle: canopyShape,
       radialSegments: 10,
       latSegments: 6,
-      jitterAmount: variation * 0.28,
+      jitterAmount: Math.max(variation, leafVariation) * 0.28,
       colorHex: leafColor,
       rng,
     }),
   });
 
-  // 5. Racimos de follaje secundarios (`FoliageCluster_1..N`) controlados por `leafDistribution`
-  const clusterCount =
+  // 5. Racimos de follaje secundarios (`FoliageCluster_1..N`) controlados por `foliageCount`, `leafDistribution` y `leafVariation`
+  const defaultClusterCount =
     leafDistribution === 'dense'
       ? Math.max(4, branchCount)
       : leafDistribution === 'sparse'
       ? Math.max(1, Math.floor(branchCount * 0.5))
       : Math.max(2, Math.min(6, branchCount));
+  const clusterCount =
+    params.foliageCount !== undefined && Number.isFinite(Number(params.foliageCount))
+      ? clamp(Math.round(Number(params.foliageCount)), 0, 16)
+      : defaultClusterCount;
 
   for (let c = 0; c < clusterCount; c++) {
     const anchor = branchEndpoints[c % branchEndpoints.length] || [
@@ -765,18 +993,20 @@ export function generateParameterizedTree3DParts(
       round4(Math.sin(c) * branchSpreadRadius),
     ];
     const clusterScale = round4(
-      (0.45 + (rng() * 0.22 * variation)) * (leafDistribution === 'clustered' ? 1.15 : 1.0)
+      (0.45 + (rng() * 0.24 * leafVariation)) * (leafDistribution === 'clustered' ? 1.15 : 1.0)
     );
     const clusterSize: [number, number, number] = [
-      round4(Math.max(1.5, crownWidth * clusterScale)),
-      round4(Math.max(1.2, crownHeight * clusterScale * (canopyShape === 'layered' ? 0.65 : 0.85))),
-      round4(Math.max(1.5, crownWidth * clusterScale)),
+      round4(Math.max(1.2, crownWidth * clusterScale)),
+      round4(Math.max(1.0, crownHeight * clusterScale * (canopyShape === 'layered' ? 0.65 : 0.85))),
+      round4(Math.max(1.2, crownWidth * clusterScale)),
     ];
     const clusterName = `FoliageCluster_${c + 1}`;
     const clusterY = Math.max(
       round4(clusterSize[1] * 0.5 + 0.5),
       round4(anchor[1] + (canopyShape === 'weeping' ? -0.35 : 0.45))
     );
+    const leafTintFactor = 1 + (rng() - 0.5) * 0.26 * leafVariation;
+    const clusterColor = modulateHexColor(leafColor, leafTintFactor);
 
     parts.push({
       partId: `part_foliage_${c + 1}`,
@@ -786,11 +1016,11 @@ export function generateParameterizedTree3DParts(
       size: clusterSize,
       position: [anchor[0], clusterY, anchor[2]],
       rotation: [
-        round4((rng() - 0.5) * 12 * variation),
+        round4((rng() - 0.5) * 14 * leafVariation),
         round4(rng() * 360),
-        round4((rng() - 0.5) * 12 * variation),
+        round4((rng() - 0.5) * 14 * leafVariation),
       ],
-      color: leafColor,
+      color: clusterColor,
       material: leafMaterial,
       transparency: 0,
       reflectance: 0.04,
@@ -806,8 +1036,8 @@ export function generateParameterizedTree3DParts(
         shapeStyle: canopyShape,
         radialSegments: 8,
         latSegments: 5,
-        jitterAmount: variation * 0.3,
-        colorHex: leafColor,
+        jitterAmount: leafVariation * 0.32,
+        colorHex: clusterColor,
         rng,
       }),
     });
@@ -1260,7 +1490,16 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     req.tree_params
   );
 
-  const normalizedParts = normalizePartsWithSyncMetadata(generated.parts, safeModelName);
+  const normalizedParts = normalizePartsWithSyncMetadata(generated.parts, safeModelName).map(
+    (p: any) => ({
+      ...p,
+      meshId: '',
+      assetId: '',
+      robloxAssetId: null,
+      assetUri: null,
+      geometrySource: 'EditableMeshBuffers',
+    })
+  );
   const totalTris = normalizedParts.reduce(
     (sum: number, p: any) => sum + (Array.isArray(p.meshData?.faces) ? p.meshData.faces.length : 12),
     0
@@ -1273,15 +1512,37 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   );
   const fileName = `${safeModelName}.luau`;
   const deterministicId = `asset-proc-${computeFnv1a32Hex(`${safeModelName}:${String(seed)}:${totalTris}`)}`;
+  const assetGeometryHash = crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify(
+        normalizedParts.map((p: any) => ({
+          partId: p.partId,
+          geometryHash: p.geometryHash,
+          vertices: p.meshData?.vertices || [],
+          faces: p.meshData?.faces || [],
+        }))
+      ),
+      'utf-8'
+    )
+    .digest('hex');
 
-  return {
+  const baseAsset: Record<string, any> = {
     id: deterministicId,
+    forgeAssetId: deterministicId,
+    sourceAssetId: deterministicId,
+    robloxAssetId: null,
+    assetUri: null,
+    geometrySource: 'EditableMeshBuffers',
+    geometryHash: assetGeometryHash,
     name: safeModelName,
     category: canonicalCategory,
     asset_type: assetType,
     generation_mode: 'procedural',
     seed: String(seed),
-    tree_params: canonicalCategory === 'Trees & Vegetation' ? { seed, ...req.tree_params } : undefined,
+    ...(canonicalCategory === 'Trees & Vegetation'
+      ? { tree_params: { seed, ...req.tree_params } }
+      : {}),
     poly_count: totalTris,
     collision_fidelity: collisionFidelity,
     rojo_target_folder: 'src/shared/Assets3D',
@@ -1290,5 +1551,15 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     pbr_profile: generated.pbrProfile,
     parts: normalizedParts,
     luau_code: luauCode,
+  };
+
+  const contentHash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(baseAsset), 'utf-8')
+    .digest('hex');
+
+  return {
+    ...baseAsset,
+    contentHash,
   };
 }

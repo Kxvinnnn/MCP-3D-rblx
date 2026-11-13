@@ -50,14 +50,14 @@ ROJO_PORT=34872
    - **Windows**: `%LocalAppData%\Roblox\Plugins\ForgeAIStudioPlugin.server.luau`
    - **macOS**: `~/Library/Application Support/Roblox/Plugins/ForgeAIStudioPlugin.server.luau`
 2. En Roblox Studio, abre **Game Settings → Security** y habilita **Allow HTTP Requests**.
-3. En el DockWidget de **Forge AI v2.2**:
+3. En el DockWidget de **Forge AI v2.3.0**:
    - Configura **Local Bridge URL** (por defecto `http://127.0.0.1:48720`).
    - Configura **Security Token** (el mismo token definido en `FORGE_PLUGIN_LOCAL_TOKEN`).
    - El plugin guardará la configuración automáticamente con `plugin:SetSetting`.
 
 ---
 
-## 4. Capacidades del Plugin de Roblox Studio v2.2.0
+## 4. Capacidades del Plugin de Roblox Studio v2.3.0
 
 ### 4.1 Modificación Real del DataModel (`studio.apply_modifications`)
 - Recibe especificaciones completas de modelos o selecciones parciales desde Forge.
@@ -81,3 +81,4 @@ ROJO_PORT=34872
 ### 4.4 Verificador de Sincronización Rojo y Autoverificación
 - Consulta el manifiesto de Rojo y compara el hash FNV32 del código Luau en memoria y en disco.
 - Ejecuta autochequeos unitarios en Luau (`runForgePluginSelfVerification`) validando la sensibilidad de hashes ante mutaciones de vértices intermedios y renombrado de piezas.
+- **Estado de Validación**: La estructura Luau `--!strict`, los endpoints del Bridge y la reconciliación de recibos están **TESTEADOS** en la suite automatizada; la ejecución visual directa dentro de **Roblox Studio Desktop** en Windows permanece **PENDIENTE** de prueba manual interactiva con tu instancia local de Studio.

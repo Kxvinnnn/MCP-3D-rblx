@@ -58,15 +58,20 @@ export const CreateWizardView: React.FC = () => {
   const [generationMode, setGenerationMode] = useState<'procedural' | 'ai'>('procedural');
   const [seed, setSeed] = useState<string>('forge-tree-2026');
 
-  // Tree Procedural Parameters (Fase 7)
+  // Tree Procedural Parameters (Fase 7 & Etapa 6)
   const [treeHeight, setTreeHeight] = useState<number>(14);
   const [trunkThickness, setTrunkThickness] = useState<number>(1.6);
   const [branchCount, setBranchCount] = useState<number>(4);
+  const [branchLength, setBranchLength] = useState<number>(4.0);
+  const [branchDistribution, setBranchDistribution] = useState<'tiered' | 'whorled' | 'alternating' | 'canopy_top'>('tiered');
   const [canopyShape, setCanopyShape] = useState<'spherical' | 'conical' | 'layered' | 'weeping'>('spherical');
+  const [canopySize, setCanopySize] = useState<number>(1.0);
   const [leafDistribution, setLeafDistribution] = useState<'dense' | 'balanced' | 'sparse' | 'clustered'>('balanced');
+  const [foliageCount, setFoliageCount] = useState<number>(4);
   const [trunkMaterial, setTrunkMaterial] = useState<string>('Wood');
   const [leafMaterial, setLeafMaterial] = useState<string>('Grass');
   const [treeVariation, setTreeVariation] = useState<number>(0.25);
+  const [leafVariation, setLeafVariation] = useState<number>(0.25);
 
   // Input states
   const [prompt, setPrompt] = useState<string>(
@@ -188,9 +193,16 @@ export const CreateWizardView: React.FC = () => {
     abortControllerRef.current = controller;
 
     try {
+      const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      const storedToken =
+        typeof window !== 'undefined' ? window.localStorage.getItem('forge_security_token') || '' : '';
+      if (storedToken) {
+        reqHeaders['X-Forge-Token'] = storedToken;
+      }
+
       const response = await fetch('/api/v1/generate-3d-stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: reqHeaders,
         signal: controller.signal,
         body: JSON.stringify({
           prompt: inputMethod === 'text' ? prompt : `Asset de tipo ${category} generado con referencia/relieve`,
@@ -205,11 +217,16 @@ export const CreateWizardView: React.FC = () => {
                   height: treeHeight,
                   trunkThickness,
                   branchCount,
+                  branchLength,
+                  branchDistribution,
                   canopyShape,
+                  canopySize,
                   leafDistribution,
+                  foliageCount,
                   trunkMaterial,
                   leafMaterial,
                   variation: treeVariation,
+                  leafVariation,
                 }
               : undefined,
           target_poly_budget: polyBudgets[detailLevel].tris,
@@ -849,6 +866,35 @@ export const CreateWizardView: React.FC = () => {
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Longitud de ramas: <span className="text-white font-mono">{branchLength} studs</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={1.5}
+                        max={12}
+                        step={0.5}
+                        value={branchLength}
+                        onChange={(e) => setBranchLength(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 mt-1.5"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">Distribución de ramas:</label>
+                      <select
+                        value={branchDistribution}
+                        onChange={(e) => setBranchDistribution(e.target.value as any)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
+                      >
+                        <option value="tiered">Escalonada (Natural)</option>
+                        <option value="whorled">Verticilada (Simétrica)</option>
+                        <option value="alternating">Alternada</option>
+                        <option value="canopy_top">Alta / Copa superior</option>
+                      </select>
+                    </div>
+
+                    <div>
                       <label className="text-[11px] text-slate-300 block mb-1">Forma de copa:</label>
                       <select
                         value={canopyShape}
@@ -860,6 +906,23 @@ export const CreateWizardView: React.FC = () => {
                         <option value="layered">Escalonada (Bonsái / Estilizado)</option>
                         <option value="weeping">Colgante (Sauce llorón)</option>
                       </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Tamaño de copa: <span className="text-white font-mono">{canopySize.toFixed(1)}x</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0.5}
+                        max={2.0}
+                        step={0.1}
+                        value={canopySize}
+                        onChange={(e) => setCanopySize(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 mt-1.5"
+                      />
                     </div>
 
                     <div>
@@ -878,7 +941,50 @@ export const CreateWizardView: React.FC = () => {
 
                     <div>
                       <label className="text-[11px] text-slate-300 block mb-1">
-                        Variación orgánica: <span className="text-white font-mono">{Math.round(treeVariation * 100)}%</span>
+                        Cantidad de follaje: <span className="text-white font-mono">{foliageCount}</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={12}
+                        step={1}
+                        value={foliageCount}
+                        onChange={(e) => setFoliageCount(parseInt(e.target.value, 10))}
+                        className="w-full accent-emerald-500 mt-1.5"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">Material tronco:</label>
+                      <select
+                        value={trunkMaterial}
+                        onChange={(e) => setTrunkMaterial(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
+                      >
+                        <option value="Wood">Wood</option>
+                        <option value="WoodPlanks">WoodPlanks</option>
+                        <option value="Slate">Slate</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">Material hojas:</label>
+                      <select
+                        value={leafMaterial}
+                        onChange={(e) => setLeafMaterial(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
+                      >
+                        <option value="Grass">Grass</option>
+                        <option value="Fabric">Fabric</option>
+                        <option value="SmoothPlastic">SmoothPlastic</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Variación árbol: <span className="text-white font-mono">{Math.round(treeVariation * 100)}%</span>
                       </label>
                       <input
                         type="range"
@@ -887,6 +993,21 @@ export const CreateWizardView: React.FC = () => {
                         step={0.05}
                         value={treeVariation}
                         onChange={(e) => setTreeVariation(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 mt-1.5"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Variación hojas: <span className="text-white font-mono">{Math.round(leafVariation * 100)}%</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={0.8}
+                        step={0.05}
+                        value={leafVariation}
+                        onChange={(e) => setLeafVariation(parseFloat(e.target.value))}
                         className="w-full accent-emerald-500 mt-1.5"
                       />
                     </div>

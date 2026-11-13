@@ -1,5 +1,5 @@
 {
-  "bridgeVersion": "1.0.0",
+  "bridgeVersion": "2.3.0",
   "protocolVersion": "1.0",
   "network": {
     "bindHost": "127.0.0.1",

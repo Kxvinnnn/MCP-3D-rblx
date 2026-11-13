@@ -361,7 +361,7 @@ export const ModularArchitectureAndAgents: React.FC = () => {
             <Terminal className="w-5 h-5 text-cyan-400 shrink-0" />
             <div>
               <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
-                Roblox Studio Plugin v2.1 (ForgeAIStudioPlugin.server.luau)
+                Roblox Studio Plugin v2.3.0 (ForgeAIStudioPlugin.server.luau)
               </h4>
               <p className="text-xs text-slate-400 mt-0.5">
                 Reconstrucción EditableMesh in-place en modo edición, importador 3D, publicación PBR y verificación de sincronización Rojo.

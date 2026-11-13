@@ -120,8 +120,10 @@ export function verifyEnvelopeHmac(
   envelope: BridgeMessageEnvelope,
   sharedSecret: string
 ): boolean {
-  if (!sharedSecret) return true;
-  if (!envelope.signature || typeof envelope.signature !== 'string') {
+  if (!sharedSecret || typeof sharedSecret !== 'string' || !sharedSecret.trim()) {
+    return false;
+  }
+  if (!envelope.signature || typeof envelope.signature !== 'string' || !envelope.signature.trim()) {
     return false;
   }
   const expected = computeEnvelopeHmac(envelope, sharedSecret);
@@ -131,14 +133,39 @@ export function verifyEnvelopeHmac(
   return crypto.timingSafeEqual(a, b);
 }
 
+/**
+ * Caché acotada para detección de reenvío (replay) de mensajes firmados ya procesados.
+ */
+export class SignedEnvelopeReplayGuard {
+  private readonly seenMessages = new Map<string, number>();
+
+  public checkAndRecord(taskId: string, signature: string, windowMs: number = 10 * 60 * 1000): boolean {
+    const now = Date.now();
+    for (const [key, recordedAt] of this.seenMessages.entries()) {
+      if (now - recordedAt > windowMs || this.seenMessages.size > 5000) {
+        this.seenMessages.delete(key);
+      } else {
+        break;
+      }
+    }
+    const replayKey = `${taskId}|${signature}`;
+    if (this.seenMessages.has(replayKey)) {
+      return false;
+    }
+    this.seenMessages.set(replayKey, now);
+    return true;
+  }
+}
+
 export interface EnvelopeValidationResult {
   valid: boolean;
+  isReplay?: boolean;
   error?: string;
   envelope?: BridgeMessageEnvelope;
 }
 
 /**
- * Valida estrictamente el contrato de mensajes (Fase 7).
+ * Valida estrictamente el contrato de mensajes (Fase 7) y exige firma HMAC-SHA256 válida.
  */
 export function validateBridgeMessageEnvelope(
   raw: unknown,
@@ -146,6 +173,7 @@ export function validateBridgeMessageEnvelope(
     expectedSessionId?: string;
     sharedSecret?: string;
     maxClockSkewMs?: number;
+    replayGuard?: SignedEnvelopeReplayGuard;
   }
 ): EnvelopeValidationResult {
   if (!raw || typeof raw !== 'object') {
@@ -221,11 +249,27 @@ export function validateBridgeMessageEnvelope(
     signature: typeof candidate.signature === 'string' ? candidate.signature : undefined,
   };
 
-  if (options?.sharedSecret) {
-    if (!verifyEnvelopeHmac(envelope, options.sharedSecret)) {
+  if (!options?.sharedSecret || !options.sharedSecret.trim()) {
+    return {
+      valid: false,
+      error: 'Configuración incompleta: falta sharedSecret para verificar la firma HMAC-SHA256.',
+    };
+  }
+
+  if (!verifyEnvelopeHmac(envelope, options.sharedSecret)) {
+    return {
+      valid: false,
+      error: 'Firma criptográfica HMAC-SHA256 inválida o ausente en el mensaje.',
+    };
+  }
+
+  if (options.replayGuard && envelope.signature) {
+    const fresh = options.replayGuard.checkAndRecord(envelope.taskId, envelope.signature, maxSkew * 2);
+    if (!fresh) {
       return {
         valid: false,
-        error: 'Firma criptográfica HMAC-SHA256 inválida o ausente en el mensaje.',
+        isReplay: true,
+        error: 'Mensaje firmado repetido (ataque replay bloqueado).',
       };
     }
   }

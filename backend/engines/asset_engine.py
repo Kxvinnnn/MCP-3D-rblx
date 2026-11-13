@@ -1375,15 +1375,27 @@ class AssetEngine:
         try:
             data = json.loads(self.library_file_path.read_text(encoding="utf-8"))
             return data if isinstance(data, list) else data.get("assets", [])
-        except Exception:
+        except Exception as exc:
+            print(f"[Forge:AssetLibrary] Error leyendo JSON corrupto en '{self.library_file_path}': {exc}")
             return []
 
     def save_library(self, assets: List[Dict[str, Any]]) -> None:
         self.library_file_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.library_file_path.with_suffix(".json.tmp")
+        tmp_path = self.library_file_path.with_suffix(f".{os.getpid()}.json.tmp")
         serialized = json.dumps(assets, indent=2, ensure_ascii=False)
-        tmp_path.write_text(serialized, encoding="utf-8")
-        os.replace(tmp_path, self.library_file_path)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(serialized)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self.library_file_path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            raise
 
     def get_asset(self, asset_id_or_name: str) -> Optional[Dict[str, Any]]:
         """

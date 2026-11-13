@@ -94,21 +94,84 @@ KNOWN_PLACEHOLDER_SECRETS = {
     "default",
 }
 
-_configured_token = (
-    os.getenv("FORGE_SECURITY_TOKEN") or os.getenv("FORGE_LOCAL_TOKEN") or ""
-).strip()
-if (
-    os.getenv("NODE_ENV") == "production" or os.getenv("FORGE_ENV") == "production"
-) and _configured_token.lower() in KNOWN_PLACEHOLDER_SECRETS:
-    raise RuntimeError(
-        "Security Violation: Refusing to start in production with a default example security token."
-    )
+
+def validate_backend_security_config(
+    security_token: Optional[str] = None,
+    bridge_shared_secret: Optional[str] = None,
+    node_env: Optional[str] = None,
+) -> Dict[str, Any]:
+    import secrets as py_secrets
+
+    env_name = (
+        node_env
+        if node_env is not None
+        else (os.getenv("FORGE_ENV") or os.getenv("NODE_ENV") or "development")
+    ).strip().lower()
+    is_production = env_name == "production"
+
+    raw_sec = (
+        security_token
+        if security_token is not None
+        else (os.getenv("FORGE_SECURITY_TOKEN") or os.getenv("FORGE_LOCAL_TOKEN") or "")
+    ).strip()
+    raw_bridge = (
+        bridge_shared_secret
+        if bridge_shared_secret is not None
+        else (os.getenv("FORGE_BRIDGE_SHARED_SECRET") or raw_sec)
+    ).strip()
+
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if is_production:
+        if not raw_sec:
+            errors.append("Security Violation: FORGE_SECURITY_TOKEN is required in production.")
+        elif raw_sec.lower() in KNOWN_PLACEHOLDER_SECRETS:
+            errors.append("Security Violation: Placeholder FORGE_SECURITY_TOKEN is forbidden in production.")
+        elif len(raw_sec) < 16:
+            errors.append("Security Violation: FORGE_SECURITY_TOKEN must be at least 16 characters in production.")
+
+        if not raw_bridge:
+            errors.append("Security Violation: FORGE_BRIDGE_SHARED_SECRET is required in production.")
+        elif raw_bridge.lower() in KNOWN_PLACEHOLDER_SECRETS:
+            errors.append("Security Violation: Placeholder FORGE_BRIDGE_SHARED_SECRET is forbidden in production.")
+        elif len(raw_bridge) < 16:
+            errors.append("Security Violation: FORGE_BRIDGE_SHARED_SECRET must be at least 16 characters in production.")
+
+        if errors:
+            raise RuntimeError(" ".join(errors))
+        return {
+            "is_production": True,
+            "effective_security_token": raw_sec,
+            "effective_bridge_secret": raw_bridge,
+            "warnings": warnings,
+        }
+
+    eff_sec = raw_sec
+    if not eff_sec:
+        eff_sec = f"forge_dev_ephem_{py_secrets.token_hex(24)}"
+        warnings.append(
+            "Dev Mode: FORGE_SECURITY_TOKEN not set; generated ephemeral session token (unauthenticated protected routes still return 401)."
+        )
+    eff_bridge = raw_bridge or eff_sec
+    return {
+        "is_production": False,
+        "effective_security_token": eff_sec,
+        "effective_bridge_secret": eff_bridge,
+        "warnings": warnings,
+    }
+
+
+_sec_init = validate_backend_security_config()
+for _warn in _sec_init["warnings"]:
+    logger.warning(_warn)
 
 # Mutable runtime configuration for Rojo workspace path
 RUNTIME_CONFIG: Dict[str, Any] = {
     "rojo_project_path": os.getenv("ROJO_PROJECT_PATH", "./rojo_workspace"),
     "project_context_file": os.getenv("PROJECT_CONTEXT_FILE", "project_context.md"),
-    "forge_local_token": _configured_token,
+    "forge_local_token": _sec_init["effective_security_token"],
+    "bridge_shared_secret": _sec_init["effective_bridge_secret"],
     "rate_limit_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "45")),
 }
 
@@ -163,13 +226,44 @@ def verify_token_constant_time(provided: str, expected: str) -> bool:
     return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
-def verify_security_token(provided_token: Optional[str] = None) -> None:
+def _extract_forge_auth_header(
+    x_forge_token: Optional[str] = None,
+    authorization: Optional[str] = None,
+) -> str:
+    tok = str(x_forge_token or "").strip()
+    if tok:
+        return tok
+    auth = str(authorization or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+def verify_security_token(
+    provided_token: Optional[str] = None,
+    authorization: Optional[str] = None,
+) -> None:
     configured_token = str(RUNTIME_CONFIG.get("forge_local_token", "") or "").strip()
-    if configured_token and not verify_token_constant_time(str(provided_token or ""), configured_token):
+    candidate = _extract_forge_auth_header(provided_token, authorization)
+    if not configured_token or not verify_token_constant_time(candidate, configured_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-Forge-Token header.",
         )
+
+
+_BRIDGE_PROTOCOL_PATHS = {
+    "/api/v1/bridge/auth/handshake",
+    "/api/v1/bridge/heartbeat",
+    "/api/v1/bridge/task-ack",
+    "/api/v1/bridge/task-result",
+}
+_PROTECTED_GET_PATHS = {
+    "/api/v1/bridge/status",
+    "/api/v1/rojo/sync-manifest",
+    "/api/v1/assets/sync-status",
+    "/api/v1/context/audit",
+}
 
 
 @app.middleware("http")
@@ -196,11 +290,24 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
     bucket.append(now)
     _rate_limit_Buckets[client_ip] = bucket
 
-    # 3. Optional local security token validation on mutating requests
-    configured_token = str(RUNTIME_CONFIG.get("forge_local_token", "") or "").strip()
-    if configured_token and request.method in ("POST", "DELETE", "PUT"):
-        provided_token = request.headers.get("X-Forge-Token", "")
-        if not verify_token_constant_time(provided_token, configured_token):
+    # 3. Fail-closed security token validation on protected routes
+    req_path = request.url.path
+    requires_auth = (
+        req_path.startswith("/api/v1")
+        and req_path not in _BRIDGE_PROTOCOL_PATHS
+        and (
+            request.method in ("POST", "DELETE", "PUT", "PATCH")
+            or req_path in _PROTECTED_GET_PATHS
+            or req_path.startswith("/api/v1/bridge/task/")
+        )
+    )
+    if requires_auth:
+        configured_token = str(RUNTIME_CONFIG.get("forge_local_token", "") or "").strip()
+        provided = _extract_forge_auth_header(
+            request.headers.get("X-Forge-Token"),
+            request.headers.get("Authorization"),
+        )
+        if not configured_token or not verify_token_constant_time(provided, configured_token):
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"error": "Invalid or missing X-Forge-Token header."}
@@ -470,7 +577,7 @@ _BRIDGE_STATE: Dict[str, Any] = {
     "session_id": None,
     "session_token": None,
     "session_expires_at": 0.0,
-    "bridge_version": "1.0.0",
+    "bridge_version": "2.3.0",
     "last_heartbeat_at": 0.0,
     "reconnect_requested": False,
     "rojo_remote_status": None,
@@ -543,9 +650,8 @@ def _get_public_bridge_status() -> Dict[str, Any]:
 def _bridge_get_shared_secret() -> str:
     return (
         os.environ.get("FORGE_BRIDGE_SHARED_SECRET")
-        or os.environ.get("FORGE_SECURITY_TOKEN")
-        or os.environ.get("FORGE_LOCAL_TOKEN")
-        or ""
+        or str(RUNTIME_CONFIG.get("bridge_shared_secret") or "")
+        or str(RUNTIME_CONFIG.get("forge_local_token") or "")
     ).strip()
 
 
@@ -577,14 +683,26 @@ def _bridge_verify_session_request(request: Request) -> bool:
         return False
     auth_header = request.headers.get("authorization", "")
     bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-    if bearer and _BRIDGE_STATE["session_token"] and bearer == _BRIDGE_STATE["session_token"]:
+    if (
+        bearer
+        and _BRIDGE_STATE["session_token"]
+        and hmac.compare_digest(bearer, str(_BRIDGE_STATE["session_token"]))
+    ):
         return True
     secret = _bridge_get_shared_secret()
     forge_tok = request.headers.get("x-forge-token", "").strip()
     sess_hdr = request.headers.get("x-bridge-session", "").strip()
-    if secret and forge_tok == secret and (not sess_hdr or sess_hdr == _BRIDGE_STATE["session_id"]):
+    if (
+        secret
+        and forge_tok
+        and hmac.compare_digest(forge_tok, secret)
+        and (not sess_hdr or sess_hdr == _BRIDGE_STATE["session_id"])
+    ):
         return True
-    return not secret and bool(_BRIDGE_STATE["session_id"])
+    return False
+
+
+_USED_HANDSHAKE_NONCES: Dict[str, float] = {}
 
 
 @app.post("/api/v1/bridge/auth/handshake")
@@ -593,20 +711,28 @@ def bridge_auth_handshake(request: Request, body: Dict[str, Any]):
     import hmac
     import secrets
     secret = _bridge_get_shared_secret()
-    bridge_version = str(body.get("bridgeVersion", "1.0.0")).strip()
+    if not secret:
+        raise HTTPException(status_code=401, detail="Bridge shared secret not configured.")
+    bridge_version = str(body.get("bridgeVersion", "2.3.0")).strip()
     protocol_version = str(body.get("protocolVersion", "1.0")).strip()
     timestamp = str(body.get("timestamp", "")).strip()
     nonce = str(body.get("nonce", "")).strip()
     signature = str(body.get("signature", "")).strip()
     header_tok = request.headers.get("x-forge-token", "").strip()
 
-    if secret:
-        canonical = f"{bridge_version}|{protocol_version}|{timestamp}|{nonce}"
-        expected_sig = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-        sig_ok = bool(signature) and hmac.compare_digest(signature, expected_sig)
-        tok_ok = bool(header_tok) and hmac.compare_digest(header_tok, secret)
-        if not sig_ok and not tok_ok:
-            raise HTTPException(status_code=401, detail="Invalid HMAC signature or shared secret in handshake.")
+    if not timestamp or not nonce or len(nonce) < 8:
+        raise HTTPException(status_code=401, detail="Missing timestamp or cryptographic nonce in handshake.")
+    if nonce in _USED_HANDSHAKE_NONCES and (time.time() - _USED_HANDSHAKE_NONCES[nonce]) < 600:
+        raise HTTPException(status_code=401, detail="Handshake nonce replay detected.")
+
+    canonical = f"{bridge_version}|{protocol_version}|{timestamp}|{nonce}"
+    expected_sig = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    sig_ok = bool(signature) and hmac.compare_digest(signature, expected_sig)
+    if not sig_ok:
+        raise HTTPException(status_code=401, detail="Invalid HMAC signature in handshake.")
+    if header_tok and not hmac.compare_digest(header_tok, secret):
+        raise HTTPException(status_code=401, detail="Invalid X-Forge-Token header in handshake.")
+    _USED_HANDSHAKE_NONCES[nonce] = time.time()
 
     sid = f"sess_{secrets.token_hex(12)}"
     stoken = secrets.token_hex(24)
@@ -680,12 +806,14 @@ def bridge_task_result(request: Request, body: Dict[str, Any]):
 
 
 @app.get("/api/v1/bridge/status")
-def bridge_get_status():
+def bridge_get_status(x_forge_token: Optional[str] = Header(default=None)):
+    verify_security_token(x_forge_token)
     return _get_public_bridge_status()
 
 
 @app.post("/api/v1/bridge/reconnect")
-def bridge_request_reconnect():
+def bridge_request_reconnect(x_forge_token: Optional[str] = Header(default=None)):
+    verify_security_token(x_forge_token)
     _BRIDGE_STATE["reconnect_requested"] = True
     _BRIDGE_STATE["session_expires_at"] = 0.0
     return {
@@ -695,8 +823,9 @@ def bridge_request_reconnect():
 
 
 @app.post("/api/v1/bridge/enqueue")
-def bridge_enqueue_task(body: Dict[str, Any]):
+def bridge_enqueue_task(body: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
     import uuid
+    verify_security_token(x_forge_token)
     operation = str(body.get("operation", "")).strip()
     if not operation:
         raise HTTPException(status_code=400, detail="Operation is required.")
@@ -725,7 +854,8 @@ class RojoConfigRequest(BaseModel):
 
 
 @app.post("/api/v1/rojo/configure")
-def configure_rojo_path(req: RojoConfigRequest):
+def configure_rojo_path(req: RojoConfigRequest, x_forge_token: Optional[str] = Header(default=None)):
+    verify_security_token(x_forge_token)
     raw_path = req.rojo_project_path.strip()
     if not raw_path or "\0" in raw_path:
         raise HTTPException(status_code=400, detail="Invalid project path.")
@@ -871,13 +1001,26 @@ def list_assets():
 
 
 @app.post("/api/v1/assets")
-def add_asset(asset: Dict[str, Any]):
+def add_asset(asset: Dict[str, Any], x_forge_token: Optional[str] = Header(default=None)):
+    verify_security_token(x_forge_token)
     saved = save_asset_to_library(asset)
     return {"asset": saved}
 
 
 @app.delete("/api/v1/assets/{asset_id}")
-def delete_asset(asset_id: str):
+def delete_asset(
+    asset_id: str,
+    confirm: Optional[bool] = None,
+    x_forge_confirm_delete: Optional[str] = Header(default=None),
+    x_forge_token: Optional[str] = Header(default=None),
+):
+    verify_security_token(x_forge_token)
+    confirmed = confirm is True or str(x_forge_confirm_delete or "").strip().lower() == "true"
+    if not confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Explicit confirmation required to delete asset (?confirm=true or X-Forge-Confirm-Delete: true).",
+        )
     engine = get_asset_engine()
     deleted_ok = engine.delete_asset(asset_id)
     remaining = len(engine.load_library())
@@ -2278,7 +2421,7 @@ def health_check():
     rojo_status = get_rojo_status()
     return {
         "status": "ok",
-        "backend_engine": "FastAPI Unified v2.1 (7 Modular Engines + EditableMesh Pipeline)",
+        "backend_engine": "FastAPI Unified v2.3.0 (7 Modular Engines + EditableMesh Pipeline)",
         "gemini_connected": gemini_client is not None,
         "configured_models": TIER_MODELS,
         "rojo_project_path": rojo_status["rojo_project_path"],

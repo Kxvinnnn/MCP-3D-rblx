@@ -54,6 +54,8 @@ export interface MeshPart3DSpec {
   reflectance?: number;
   meshId?: string;
   assetId?: string;
+  robloxAssetId?: string | null;
+  assetUri?: string | null;
   textureId?: string;
   pbrMaterial?: PartPBRMaterialSpec;
   meshData?: SubMeshGeometryData;
@@ -107,6 +109,13 @@ export interface OperationHistoryEntry {
 export interface Forge3DAsset {
   id?: string;
   asset_id?: string;
+  forgeAssetId?: string;
+  sourceAssetId?: string;
+  robloxAssetId?: string | null;
+  assetUri?: string | null;
+  geometrySource?: 'EditableMeshBuffers' | 'PublishedCloudMeshId' | 'StudioExternalUnreadable';
+  geometryHash?: string;
+  contentHash?: string;
   name: string;
   category: string;
   asset_type: 'Model3D' | 'Scene3D' | 'PBRMaterial';

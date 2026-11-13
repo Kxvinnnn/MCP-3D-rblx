@@ -420,11 +420,11 @@ end`;
         <div className="p-5 rounded-2xl bg-[#0d1117] border border-gray-800 flex flex-col gap-4">
           <h4 className="font-bold text-sm text-white flex items-center gap-2">
             <CheckCircle className="w-4 h-4 text-emerald-400" />
-            Plugin Roblox Studio v2.0 (Scripts + Modelos 3D + Optimizador Selection)
+            Plugin Roblox Studio v2.3.0 (Scripts + Modelos 3D + Optimizador Selection)
           </h4>
           <ol className="text-xs text-gray-300 space-y-2.5 list-decimal pl-4 leading-relaxed">
             <li>
-              El nuevo <strong className="text-white">ForgeAIStudioPlugin.server.luau v2.0</strong> incluye selector dinámico <code className="text-cyan-300">Server | Client | Module</code> (ya no fuerza Server), generador e importador de modelos 3D en <code className="text-cyan-300">Workspace</code>, optimizador de <code className="text-cyan-300">Selection</code> y verificador de sincronización Rojo.
+              El plugin <strong className="text-white">ForgeAIStudioPlugin.server.luau v2.3.0</strong> incluye selector dinámico <code className="text-cyan-300">Server | Client | Module</code>, generador e importador de modelos 3D en <code className="text-cyan-300">Workspace</code>, optimizador de <code className="text-cyan-300">Selection</code> y verificador de sincronización Rojo.
             </li>
             <li>
               Guárdalo en tu carpeta local de plugins de Roblox Studio:

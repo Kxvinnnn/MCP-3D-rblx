@@ -1,5 +1,5 @@
 """
-Forge AI Studio v2.2 - Modular Engine Architecture (AI-First Self-Documented Edition)
+Forge AI Studio v2.3.0 - Modular Engine Architecture (AI-First Self-Documented Edition)
 =====================================================================================
 Independent single-responsibility engines orchestrated by FastAPI (`main.py`) and Express (`server.ts`):
 - context_pruner: Domain-scoped AI prompt context slicer (~65% less redundant prompt context) & AI manifest

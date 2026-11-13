@@ -601,8 +601,21 @@ export const Forge3DStudio: React.FC = () => {
     e.stopPropagation();
     if (!id) return;
     try {
-      await fetch(`/api/v1/assets/${id}`, { method: 'DELETE' });
-      setAssetLibrary((prev) => prev.filter((item) => item.id !== id));
+      const storedToken =
+        typeof window !== 'undefined' ? window.localStorage.getItem('forge_security_token') || '' : '';
+      const headers: Record<string, string> = {
+        'X-Forge-Confirm-Delete': 'true',
+      };
+      if (storedToken) {
+        headers['X-Forge-Token'] = storedToken;
+      }
+      const res = await fetch(`/api/v1/assets/${id}?confirm=true`, {
+        method: 'DELETE',
+        headers,
+      });
+      if (res.ok) {
+        setAssetLibrary((prev) => prev.filter((item) => item.id !== id));
+      }
     } catch (err) {
       console.error('Error deleting asset:', err);
     }

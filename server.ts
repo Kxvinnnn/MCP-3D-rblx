@@ -12,9 +12,10 @@ import {
   FORGE_ROADMAP_STATUS,
   SPECIALIZED_AGENTS,
 } from './src/server/engines/architectureManifest.ts';
+import { fileURLToPath } from 'url';
 import {
-  cloudBridgeCoordinator,
-  isPlaceholderSecretInProduction,
+  CloudBridgeCoordinator,
+  validateMainServerSecurityConfig,
   verifyTokenConstantTime,
 } from './src/server/engines/bridgeCoordinatorEngine.ts';
 import {
@@ -52,82 +53,129 @@ import {
 
 dotenv.config();
 
-const app = express();
-const PORT = 3000;
 const FASTAPI_UPSTREAM = process.env.FASTAPI_UPSTREAM_URL || 'http://127.0.0.1:8000';
 
-app.use(express.json({ limit: '25mb' }));
-
-// -----------------------------------------------------------------------------
-// 1. Security Hardening: Restricted CORS, Rate Limiting & Path Validation
-// -----------------------------------------------------------------------------
-
-const ALLOWED_ORIGINS = new Set([
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:8000',
-  'http://127.0.0.1:8000',
-]);
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && (ALLOWED_ORIGINS.has(origin) || origin.endsWith('.run.app'))) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, X-Forge-Token, Authorization, X-Bridge-Session, User-Agent'
-  );
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-  next();
-});
-
-// Sliding-window rate limiter (45 requests / minute per IP)
-const rateBuckets = new Map<string, number[]>();
-const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MINUTE || 45);
-let runtimeRojoPath = path.resolve(process.cwd(), process.env.ROJO_PROJECT_PATH || './rojo_workspace');
-let runtimeSecurityToken = String(
-  process.env.FORGE_SECURITY_TOKEN || process.env.FORGE_LOCAL_TOKEN || ''
-).trim();
-if (isPlaceholderSecretInProduction(runtimeSecurityToken)) {
-  throw new Error(
-    'Seguridad: No se permite arrancar en producción con el token de ejemplo por defecto.'
-  );
+export interface MainServerOptions {
+  securityToken?: string;
+  bridgeSharedSecret?: string;
+  nodeEnv?: string;
+  rojoProjectPath?: string;
+  rateLimitPerMinute?: number;
+  coordinator?: CloudBridgeCoordinator;
 }
 
-app.use('/api/v1', (req, res, next) => {
-  const ip = req.ip || '127.0.0.1';
-  const now = Date.now();
-  const windowMs = 60_000;
-  const recent = (rateBuckets.get(ip) || []).filter((t) => now - t < windowMs);
-  if (recent.length >= RATE_LIMIT_PER_MIN) {
-    return res.status(429).json({
-      error: `Límite de frecuencia alcanzado (${RATE_LIMIT_PER_MIN} req/min). Espera unos segundos.`,
-    });
+export function createMainServerApp(options: MainServerOptions = {}) {
+  const secValidation = validateMainServerSecurityConfig({
+    securityToken: options.securityToken,
+    bridgeSharedSecret: options.bridgeSharedSecret,
+    nodeEnv: options.nodeEnv,
+  });
+  if (!secValidation.valid) {
+    throw new Error(secValidation.errors.join(' '));
   }
-  recent.push(now);
-  rateBuckets.set(ip, recent);
 
-  if (runtimeSecurityToken && ['POST', 'DELETE', 'PUT'].includes(req.method)) {
-    const isBridgeEndpoint =
+  const cloudBridgeCoordinator =
+    options.coordinator ||
+    new CloudBridgeCoordinator({ sharedSecret: secValidation.effectiveBridgeSecret });
+  if (options.coordinator) {
+    cloudBridgeCoordinator.setSharedSecret(secValidation.effectiveBridgeSecret);
+  }
+
+  const app = express();
+  app.use(express.json({ limit: '25mb' }));
+
+  // -----------------------------------------------------------------------------
+  // 1. Security Hardening: Restricted CORS, Rate Limiting & Path Validation
+  // -----------------------------------------------------------------------------
+
+  const ALLOWED_ORIGINS = new Set([
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+  ]);
+
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && (ALLOWED_ORIGINS.has(origin) || origin.endsWith('.run.app'))) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, X-Forge-Token, X-Forge-Confirm-Delete, Authorization, X-Bridge-Session, User-Agent'
+    );
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
+  // Sliding-window rate limiter (45 requests / minute per IP)
+  const rateBuckets = new Map<string, number[]>();
+  const RATE_LIMIT_PER_MIN = Number(
+    options.rateLimitPerMinute ?? process.env.RATE_LIMIT_PER_MINUTE ?? 45
+  );
+  let runtimeRojoPath = path.resolve(
+    process.cwd(),
+    options.rojoProjectPath || process.env.ROJO_PROJECT_PATH || './rojo_workspace'
+  );
+  const runtimeSecurityToken = secValidation.effectiveSecurityToken;
+
+  function extractAuthToken(req: express.Request): string {
+    const xForge = String(req.headers['x-forge-token'] || '').trim();
+    if (xForge) return xForge;
+    const auth = String(req.headers.authorization || '').trim();
+    if (/^Bearer\s+/i.test(auth)) {
+      return auth.replace(/^Bearer\s+/i, '').trim();
+    }
+    return '';
+  }
+
+  const PROTECTED_GET_PATHS = new Set([
+    '/bridge/status',
+    '/files',
+    '/rojo/sync-manifest',
+    '/assets/sync-status',
+    '/context',
+    '/context/audit',
+  ]);
+
+  app.use('/api/v1', (req, res, next) => {
+    const ip = req.ip || '127.0.0.1';
+    const now = Date.now();
+    const windowMs = 60_000;
+    const recent = (rateBuckets.get(ip) || []).filter((t) => now - t < windowMs);
+    if (recent.length >= RATE_LIMIT_PER_MIN) {
+      return res.status(429).json({
+        error: `Límite de frecuencia alcanzado (${RATE_LIMIT_PER_MIN} req/min). Espera unos segundos.`,
+      });
+    }
+    recent.push(now);
+    rateBuckets.set(ip, recent);
+
+    const isBridgeProtocolEndpoint =
       req.path === '/bridge/auth/handshake' ||
       req.path === '/bridge/heartbeat' ||
       req.path === '/bridge/task-ack' ||
       req.path === '/bridge/task-result';
-    if (!isBridgeEndpoint) {
-      const provided = String(req.headers['x-forge-token'] || '');
+
+    const requiresForgeAuth =
+      !isBridgeProtocolEndpoint &&
+      (['POST', 'DELETE', 'PUT', 'PATCH'].includes(req.method) ||
+        PROTECTED_GET_PATHS.has(req.path) ||
+        req.path.startsWith('/bridge/task/'));
+
+    if (requiresForgeAuth) {
+      const provided = extractAuthToken(req);
       if (!verifyTokenConstantTime(provided, runtimeSecurityToken)) {
         return res.status(401).json({
-          error: 'Acceso denegado: Cabecera X-Forge-Token inválida o ausente.',
+          error: 'Acceso denegado: Cabecera X-Forge-Token (o Bearer token) inválida o ausente.',
         });
       }
     }
-  }
-  next();
-});
+    next();
+  });
 
 // Optional Automatic Upstream Proxy to FastAPI (Port 8000) when FastAPI is running locally
 async function isFastApiRunning(): Promise<boolean> {
@@ -642,9 +690,11 @@ app.post('/api/v1/bridge/enqueue', async (req, res) => {
 
 app.post('/api/v1/rojo/configure', async (req, res) => {
   try {
-    const { rojo_project_path, initialize_if_missing = true, security_token } = req.body;
-    if (security_token !== undefined) {
-      runtimeSecurityToken = String(security_token).trim();
+    const { rojo_project_path, initialize_if_missing = true } = req.body;
+    if (req.body?.security_token !== undefined) {
+      return res.status(403).json({
+        error: 'Seguridad: No se permite modificar FORGE_SECURITY_TOKEN en caliente mediante HTTP.',
+      });
     }
     if (rojo_project_path) {
       const cleaned = String(rojo_project_path).trim();
@@ -2795,6 +2845,16 @@ return ${systemSlug}HUD
 });
 
 app.delete('/api/v1/assets/:id', (req, res) => {
+  const confirmHeader = String(req.headers['x-forge-confirm-delete'] || '').trim().toLowerCase();
+  const confirmQuery = String(req.query?.confirm || '').trim().toLowerCase();
+  const confirmBody =
+    req.body?.confirm === true || String(req.body?.confirm || '').trim().toLowerCase() === 'true';
+  if (confirmHeader !== 'true' && confirmQuery !== 'true' && !confirmBody) {
+    return res.status(400).json({
+      error:
+        'Confirmación explícita requerida para eliminar el recurso (?confirm=true o cabecera X-Forge-Confirm-Delete: true).',
+    });
+  }
   const id = req.params.id;
   const libPath = getAssetsLibraryPath();
   const deletedOk = deleteAssetFromLibraryServer(libPath, id);
@@ -2900,11 +2960,18 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       height,
       trunkThickness,
       branchCount,
+      branchLength,
+      branchDistribution,
       leafDistribution,
       canopyShape,
+      canopySize,
+      foliageCount,
       trunkMaterial,
       leafMaterial,
+      trunkColor,
+      leafColor,
       variation,
+      leafVariation,
       reference_image_base64,
       reference_image_mime_type = 'image/png',
       uploaded_mesh_obj,
@@ -2994,18 +3061,30 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       (height !== undefined ||
       trunkThickness !== undefined ||
       branchCount !== undefined ||
+      branchLength !== undefined ||
+      branchDistribution !== undefined ||
       leafDistribution !== undefined ||
-      canopyShape !== undefined
+      canopyShape !== undefined ||
+      canopySize !== undefined ||
+      foliageCount !== undefined ||
+      leafVariation !== undefined
         ? {
             seed,
             height,
             trunkThickness,
             branchCount,
+            branchLength,
+            branchDistribution,
             leafDistribution,
             canopyShape,
+            canopySize,
+            foliageCount,
             trunkMaterial,
             leafMaterial,
+            trunkColor,
+            leafColor,
             variation,
+            leafVariation,
           }
         : undefined);
 
@@ -3236,11 +3315,18 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       height,
       trunkThickness,
       branchCount,
+      branchLength,
+      branchDistribution,
       leafDistribution,
       canopyShape,
+      canopySize,
+      foliageCount,
       trunkMaterial,
       leafMaterial,
+      trunkColor,
+      leafColor,
       variation,
+      leafVariation,
       reference_image_base64,
       uploaded_mesh_obj,
       uploaded_sub_meshes,
@@ -3311,18 +3397,30 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       (height !== undefined ||
       trunkThickness !== undefined ||
       branchCount !== undefined ||
+      branchLength !== undefined ||
+      branchDistribution !== undefined ||
       leafDistribution !== undefined ||
-      canopyShape !== undefined
+      canopyShape !== undefined ||
+      canopySize !== undefined ||
+      foliageCount !== undefined ||
+      leafVariation !== undefined
         ? {
             seed,
             height,
             trunkThickness,
             branchCount,
+            branchLength,
+            branchDistribution,
             leafDistribution,
             canopyShape,
+            canopySize,
+            foliageCount,
             trunkMaterial,
             leafMaterial,
+            trunkColor,
+            leafColor,
             variation,
+            leafVariation,
           }
         : undefined);
 
@@ -3695,10 +3793,24 @@ app.post('/api/v1/generate-ui-stream', async (req, res) => {
   }
 });
 
+  return {
+    app,
+    coordinator: cloudBridgeCoordinator,
+    security: secValidation,
+  };
+}
+
 // -----------------------------------------------------------------------------
 // 7. Vite Middleware for Frontend
 // -----------------------------------------------------------------------------
-async function startServer() {
+export async function startServer(options: MainServerOptions = {}) {
+  const { app, security } = createMainServerApp(options);
+  if (security.warnings.length > 0) {
+    for (const w of security.warnings) {
+      console.warn(`[Forge Security] ${w}`);
+    }
+  }
+  const PORT = Number(process.env.PORT || 3000);
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: {
@@ -3715,9 +3827,19 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Forge AI Unified Gateway running on http://localhost:${PORT} (FastAPI Bridge target: ${FASTAPI_UPSTREAM})`);
+  return app.listen(PORT, '0.0.0.0', () => {
+    console.log(
+      `Forge AI Unified Gateway running on http://localhost:${PORT} (FastAPI Bridge target: ${FASTAPI_UPSTREAM})`
+    );
   });
 }
 
-startServer();
+const isMainEntry =
+  typeof process !== 'undefined' &&
+  Array.isArray(process.argv) &&
+  Boolean(process.argv[1]) &&
+  path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
+
+if (isMainEntry) {
+  void startServer();
+}

@@ -1294,16 +1294,52 @@ export function loadAssetsLibraryServer(libraryFilePath: string): any[] {
   try {
     const raw = JSON.parse(fs.readFileSync(libraryFilePath, 'utf-8'));
     return Array.isArray(raw) ? raw : Array.isArray(raw?.assets) ? raw.assets : [];
-  } catch {
+  } catch (err: any) {
+    console.error(
+      `[Forge:AssetLibrary] Error leyendo JSON corrupto en '${libraryFilePath}': ${err?.message || err}`
+    );
     return [];
   }
 }
 
-export function saveAssetsLibraryServer(libraryFilePath: string, assets: any[]): void {
+export function saveAssetsLibraryServer(
+  libraryFilePath: string,
+  assets: any[],
+  options?: { beforeRenameHook?: (tmpPath: string) => void }
+): void {
   fs.mkdirSync(path.dirname(libraryFilePath), { recursive: true });
-  const tmpPath = `${libraryFilePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(assets, null, 2), 'utf-8');
-  fs.renameSync(tmpPath, libraryFilePath);
+  const tmpPath = `${libraryFilePath}.${process.pid}.${Date.now()}.${Math.random()
+    .toString(36)
+    .slice(2, 8)}.tmp`;
+  let fd: number | null = null;
+  try {
+    const serialized = JSON.stringify(assets, null, 2);
+    fd = fs.openSync(tmpPath, 'w', 0o600);
+    fs.writeFileSync(fd, serialized, 'utf-8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    if (options?.beforeRenameHook) {
+      options.beforeRenameHook(tmpPath);
+    }
+    fs.renameSync(tmpPath, libraryFilePath);
+  } catch (err: any) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore close failure on cleanup path
+      }
+    }
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch {
+      // ignore unlink failure on cleanup path
+    }
+    throw new Error(`Fallo atómico al guardar biblioteca en '${libraryFilePath}': ${err?.message || err}`);
+  }
 }
 
 export function getAssetFromLibraryServer(libraryFilePath: string, assetIdOrName: string): any | null {

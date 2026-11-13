@@ -14,13 +14,18 @@ import express from 'express';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import {
   BRIDGE_PROTOCOL_VERSION,
   BridgeMessageEnvelope,
+  SignedEnvelopeReplayGuard,
   validateBridgeMessageEnvelope,
 } from './protocol.js';
-import { verifyTokenConstantTime } from './security.js';
+import {
+  validateBridgeSecurityConfig,
+  verifyTokenConstantTime,
+} from './security.js';
 import { LocalRojoManager } from './rojoHandler.js';
 import { TaskExecutionCoordinator, TaskStateStoreAdapter } from './studioQueue.js';
 import { ForgeCloudOutboundClient } from './cloudClient.js';
@@ -98,6 +103,18 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
     options?.maxFileSizeBytes ?? process.env.BRIDGE_MAX_FILE_SIZE_BYTES ?? 15 * 1024 * 1024
   );
 
+  const securityCheck = validateBridgeSecurityConfig({
+    pluginLocalToken,
+    sharedSecret,
+  });
+  if (!securityCheck.valid) {
+    throw new Error(
+      `Seguridad Bridge: Configuración inválida — ${securityCheck.errors.join(' ')}`
+    );
+  }
+
+  const replayGuard = new SignedEnvelopeReplayGuard();
+
   const activityLogs: ActivityLogEntry[] = [];
   const logActivity = (level: 'info' | 'warn' | 'error', message: string) => {
     const entry: ActivityLogEntry = {
@@ -140,7 +157,7 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
   const cloudClient = new ForgeCloudOutboundClient({
     cloudUrl,
     sharedSecret,
-    bridgeVersion: '1.0.0',
+    bridgeVersion: '2.3.0',
     heartbeatIntervalMs,
     rojoManager,
     coordinator,
@@ -186,38 +203,46 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
     next();
   });
 
-  // Validación de token para rutas del plugin y mutaciones locales
+  // Validación estricta de token para todas las rutas del puente y plugin (sin fallback permisivo)
   const requireLocalAuth: express.RequestHandler = (req, res, next) => {
-    if (!pluginLocalToken) {
-      return next();
-    }
     const provided = String(
       req.headers['x-plugin-token'] || req.headers['x-forge-token'] || ''
     ).trim();
-    if (!verifyTokenConstantTime(provided, pluginLocalToken)) {
-      logActivity('warn', `Intento no autorizado en ${req.path}: Token de plugin inválido.`);
+    if (!pluginLocalToken || !verifyTokenConstantTime(provided, pluginLocalToken)) {
+      logActivity('warn', `Intento no autorizado en ${req.path}: Token de plugin inválido o ausente.`);
       return res.status(401).json({
-        error: 'No autorizado: Cabecera X-Plugin-Token o X-Forge-Token inválida.',
+        error: 'No autorizado: Cabecera X-Plugin-Token o X-Forge-Token inválida o ausente.',
       });
     }
     next();
   };
 
-  // 1. Estado consolidado del puente local (sin exponer secretos ni rutas absolutas de Windows)
-  app.get('/local/status', async (_req, res) => {
+  // 1. Estado consolidado del puente local (protegido por token local; sin rutas absolutas de Windows)
+  app.get('/local/status', requireLocalAuth, async (_req, res) => {
     const rojoStatus = await rojoManager.getStatus();
     const studioState = coordinator.getStudioState();
     const cloudStatus = cloudClient.getStatus();
     const queueMetrics = coordinator.getQueueMetrics();
+    const persistenceDiag = coordinator.getPersistenceDiagnostics();
 
     res.json({
-      bridgeVersion: '1.0.0',
+      bridgeVersion: '2.3.0',
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       bindAddress: `${bindHost}:${bindPort}`,
       cloudConnection: cloudStatus,
       rojo: rojoStatus,
       robloxStudio: studioState,
       queue: queueMetrics,
+      persistence: {
+        hasStateFile: Boolean(persistenceDiag.filePath),
+        saveCount: persistenceDiag.saveCount,
+        saveErrorCount: persistenceDiag.saveErrorCount,
+        loadErrorCount: persistenceDiag.loadErrorCount,
+        corruptedFileDetected: persistenceDiag.corruptedFileDetected,
+        invalidRecordsRejected: persistenceDiag.invalidRecordsRejected,
+        recoveredCompletedTasksCount: persistenceDiag.recoveredCompletedTasksCount,
+        recoveredAwaitingConfirmationsCount: persistenceDiag.recoveredAwaitingConfirmationsCount,
+      },
       recentLogs: activityLogs.slice(-25),
       timestamp: new Date().toISOString(),
     });
@@ -230,12 +255,19 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
     res.json({ reconnected: status.connected, cloudConnection: status });
   });
 
-  // 3. Ejecución directa de una tarea validada bajo el Contrato de Mensajes v1.0
+  // 3. Ejecución directa de una tarea validada bajo el Contrato de Mensajes v1.0 con firma HMAC + anti-replay
   app.post('/local/execute', requireLocalAuth, async (req, res) => {
     const validation = validateBridgeMessageEnvelope(req.body, {
-      sharedSecret: sharedSecret || undefined,
+      sharedSecret,
+      replayGuard,
     });
     if (!validation.valid || !validation.envelope) {
+      if (validation.isReplay) {
+        return res.status(409).json({
+          status: 'rejected_duplicate',
+          error: validation.error,
+        });
+      }
       return res.status(400).json({
         status: 'failed',
         error: validation.error,
@@ -247,7 +279,7 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
     const response = await coordinator.executeDeduplicated(
       envelope,
       async (env) => cloudClient.dispatchAllowedOperation(env),
-      sharedSecret || undefined
+      sharedSecret
     );
     res.json(response);
   });
@@ -274,7 +306,7 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
 
     res.json({
       ok: true,
-      bridgeVersion: '1.0.0',
+      bridgeVersion: '2.3.0',
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       studioState: updatedStudio,
       rojoStatus,
@@ -433,7 +465,7 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
         httpServer = srv;
         logActivity(
           'info',
-          `Forge Local Bridge v1.0.0 escuchando exclusivamente en http://${bindHost}:${bindPort}`
+          `Forge Local Bridge v2.3.0 escuchando exclusivamente en http://${bindHost}:${bindPort}`
         );
         if (options?.autoConnectCloud !== false) {
           await cloudClient.start();
@@ -469,10 +501,10 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
   };
 }
 
-// Ejecución directa cuando se inicia como proceso principal
+// Ejecución directa cuando se inicia como proceso principal (soporta tsx src/server.ts y node dist/server.js)
 const isMainModule =
-  process.argv[1] &&
-  path.resolve(process.argv[1]).replace(/\\/g, '/').endsWith('/src/server.ts');
+  Boolean(process.argv[1]) &&
+  path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
 
 if (isMainModule) {
   const bridge = createForgeLocalBridgeApp();

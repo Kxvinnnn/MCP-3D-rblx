@@ -71,7 +71,7 @@ local widgetInfo = DockWidgetPluginGuiInfo.new(
 )
 
 local dockWidget = plugin:CreateDockWidgetPluginGui("ForgeAIStudioSuiteV2", widgetInfo)
-dockWidget.Title = "Forge AI v2.1 • EditableMesh 3D, Luau & Rojo"
+dockWidget.Title = "Forge AI v2.3.0 • EditableMesh 3D, Luau & Rojo"
 
 toggleButton.Click:Connect(function()
     dockWidget.Enabled = not dockWidget.Enabled
@@ -2653,7 +2653,7 @@ local selectedScriptType: "Server" | "Client" | "Module" = "Server"
 local selectedModelTier: "fast" | "pro" = "fast"
 
 local headerLabel = Instance.new("TextLabel")
-headerLabel.Text = "Forge AI v2.1 • EditableMesh 3D, Luau & Rojo"
+headerLabel.Text = "Forge AI v2.3.0 • EditableMesh 3D, Luau & Rojo"
 headerLabel.Font = Enum.Font.GothamBold
 headerLabel.TextSize = 15
 headerLabel.TextColor3 = Color3.fromRGB(248, 250, 252)

@@ -1,13 +1,15 @@
-# Referencia Completa de la API (REST & SSE) — Forge AI Studio v2.0
+# Referencia Completa de la API (REST & SSE) — Forge AI Studio v2.3.0
 
-Todos los endpoints están disponibles tanto en el servidor **FastAPI (`http://127.0.0.1:8000`)** como a través del **Gateway Unificado (`http://localhost:3000`)**.
+Todos los endpoints están disponibles a través del **Gateway Unificado (`http://127.0.0.1:3000`)** y los equivalentes Python en **FastAPI (`http://127.0.0.1:8000`)**.
 
 ---
 
-## Autenticación y Cabeceras de Seguridad
+## Autenticación y Cabeceras de Seguridad (Fail-Closed en Producción)
 
 - `Content-Type: application/json`
-- `X-Forge-Token: <token_opcional>` — Si se configura `FORGE_LOCAL_TOKEN` en `.env` o mediante `/api/v1/rojo/configure`, todos los endpoints `POST` y `DELETE` que escriben en disco requieren esta cabecera.
+- `X-Forge-Token: <token>` — Validado en **tiempo constante** (`crypto.timingSafeEqual` / `hmac.compare_digest`) contra `FORGE_SECURITY_TOKEN` / `FORGE_LOCAL_TOKEN` / `FORGE_BRIDGE_SHARED_SECRET`.
+- Cuando existe token configurado (u obligatoriamente cuando `NODE_ENV=production`, donde se rechazan secretos vacíos o de ejemplo), **todas las rutas protegidas de `/api/v1/*`** exigen `X-Forge-Token` válido (incluidas lecturas sensibles como `/api/v1/files`, `/api/v1/context` y `/api/v1/bridge/status`, además de escrituras `POST` y `DELETE`).
+- En operaciones de handshake/resultado del Puente Local (`forge-bridge`), los payloads incluyen además firma **HMAC-SHA256** (`X-Forge-Signature`) y protección anti-replay por `nonce` + ventana de tiempo.
 
 ---
 
@@ -86,8 +88,14 @@ Recibe un objeto `Forge3DAsset` cuyas sub-partes (`parts`) fueron modificadas en
 }
 ```
 
-### `DELETE /api/v1/assets/:id`
-Elimina un asset 3D de la biblioteca persistente.
+### `DELETE /api/v1/assets/:id?confirm=true`
+Elimina un asset 3D de la biblioteca persistente. Requiere confirmación explícita mediante query `?confirm=true` o cabecera `X-Forge-Confirm-Delete: true` (responde HTTP `400` si no se confirma).
+
+### `POST /api/v1/assets/compare-datamodel` & `POST /api/v1/assets/studio-push`
+Comparan el hash canónico / por piezas entre Studio y Forge, o reciben un push incremental desde el Plugin de Roblox Studio vía Bridge.
+
+### `POST /api/v1/assets/publish-pbr`
+Sube mapas PBR hacia Roblox Open Cloud cuando hay `ROBLOX_OPEN_CLOUD_API_KEY` configurada (`cloud_published` con `rbxassetid://` reales), o guarda localmente con estado `local_saved` sin inventar `rbxassetid://` falsos.
 
 ---
 
@@ -150,3 +158,16 @@ Lee o actualiza el archivo `backend/project_context.md`.
 
 ### `GET /api/v1/context/audit` & `POST /api/v1/context/bootstrap-modules`
 Audita físicamente en disco si los módulos referenciados en `project_context.md` (`Maid.luau`, `RemoteProvider.luau`, `GameTypes.luau`) existen dentro de `ROJO_PROJECT_PATH/src/shared/` y permite instalarlos con 1 clic si faltan.
+
+---
+
+## 7. `Forge Local Bridge` & Coordinador Cloud-Local
+
+### `POST /api/v1/bridge/handshake` & `POST /api/v1/bridge/heartbeat`
+Establece sesión firmada HMAC-SHA256 con protección anti-replay por `nonce` y reporta el estado consolidado del proyecto Rojo local y Roblox Studio.
+
+### `GET /api/v1/bridge/status`
+Devuelve el estado de sesión del puente, estado de Roblox Studio, estado de Rojo y métricas de cola.
+
+### `POST /api/v1/bridge/enqueue` & `POST /api/v1/bridge/task-result`
+Encola tareas tipadas para el Puente Local / Plugin (`studio.reconstruct_model`, `studio.apply_modifications`, `studio.get_selection`, `rojo.write_package`, etc.) y procesa resultados firmados con validación HMAC-SHA256.

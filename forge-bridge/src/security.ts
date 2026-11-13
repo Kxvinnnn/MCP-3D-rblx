@@ -164,12 +164,92 @@ export function computeSha256Short(content: Buffer | string): string {
   return crypto.createHash('sha256').update(content).digest('hex').slice(0, 12);
 }
 
+export const KNOWN_PLACEHOLDER_SECRETS = new Set([
+  'forge-local-dev-token-2026',
+  'reemplazar-con-secreto-aleatorio-de-32-bytes',
+  'tu-secreto-compartido-de-32-bytes-aqui',
+  'changeme',
+  'default',
+  'my_secret',
+  'secret',
+  'password',
+]);
+
+export interface BridgeSecurityConfigValidation {
+  valid: boolean;
+  isProduction: boolean;
+  errors: string[];
+}
+
+/**
+ * Valida la configuración criptográfica y de tokens del puente antes de iniciar.
+ * En producción prohíbe tokens vacíos o de ejemplo; en cualquier entorno exige tokens no vacíos
+ * salvo que se active explícitamente un modo de desarrollo controlado.
+ */
+export function validateBridgeSecurityConfig(params: {
+  pluginLocalToken: string;
+  sharedSecret: string;
+  isProduction?: boolean;
+  allowDevFallback?: boolean;
+}): BridgeSecurityConfigValidation {
+  const isProduction =
+    params.isProduction ??
+    (process.env.NODE_ENV === 'production' || process.env.FORGE_ENV === 'production');
+  const errors: string[] = [];
+
+  const localToken = String(params.pluginLocalToken || '').trim();
+  const shared = String(params.sharedSecret || '').trim();
+
+  if (!localToken) {
+    errors.push(
+      'Falta FORGE_PLUGIN_LOCAL_TOKEN (o pluginLocalToken): el puente no puede iniciar sin token de autenticación local.'
+    );
+  }
+  if (!shared) {
+    errors.push(
+      'Falta FORGE_BRIDGE_SHARED_SECRET (o sharedSecret): se requiere un secreto compartido para firmar/verificar mensajes HMAC-SHA256.'
+    );
+  }
+
+  if (isProduction) {
+    if (params.allowDevFallback) {
+      errors.push('El modo de desarrollo no puede activarse en producción.');
+    }
+    if (localToken && KNOWN_PLACEHOLDER_SECRETS.has(localToken.toLowerCase())) {
+      errors.push(
+        'Seguridad Producción: No se permite iniciar con un FORGE_PLUGIN_LOCAL_TOKEN de ejemplo.'
+      );
+    }
+    if (shared && KNOWN_PLACEHOLDER_SECRETS.has(shared.toLowerCase())) {
+      errors.push(
+        'Seguridad Producción: No se permite iniciar con un FORGE_BRIDGE_SHARED_SECRET de ejemplo.'
+      );
+    }
+    if (localToken && localToken.length < 16) {
+      errors.push(
+        'Seguridad Producción: FORGE_PLUGIN_LOCAL_TOKEN debe tener al menos 16 caracteres.'
+      );
+    }
+    if (shared && shared.length < 16) {
+      errors.push(
+        'Seguridad Producción: FORGE_BRIDGE_SHARED_SECRET debe tener al menos 16 caracteres.'
+      );
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    isProduction,
+    errors,
+  };
+}
+
 /**
  * Comparación en tiempo constante para tokens de autenticación.
  */
 export function verifyTokenConstantTime(provided: string, expected: string): boolean {
-  if (!expected) return false;
-  const a = Buffer.from(String(provided || ''), 'utf-8');
+  if (!provided || !expected) return false;
+  const a = Buffer.from(String(provided), 'utf-8');
   const b = Buffer.from(String(expected), 'utf-8');
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);

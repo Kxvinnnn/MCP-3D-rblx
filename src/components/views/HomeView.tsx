@@ -319,7 +319,7 @@ export const HomeView: React.FC = () => {
                 Roblox Studio &amp; Puente
               </h3>
               <p className="text-slate-400 text-xs leading-relaxed">
-                Gestiona la sincronización en vivo con el Plugin v2.2.0, resuelve diferencias y transfiere modelos con 1 clic.
+                Gestiona la sincronización en vivo con el Plugin v2.3.0, resuelve diferencias y transfiere modelos con 1 clic.
               </p>
             </div>
             <div className="mt-5 flex items-center gap-2 text-xs font-medium text-emerald-400 group-hover:text-emerald-300">

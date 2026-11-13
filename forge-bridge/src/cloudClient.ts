@@ -20,6 +20,7 @@ import {
   BridgeMessageEnvelope,
   BridgeResponseEnvelope,
   SessionCredentials,
+  SignedEnvelopeReplayGuard,
   validateBridgeMessageEnvelope,
   buildBridgeResponseEnvelope,
 } from './protocol.js';
@@ -56,6 +57,14 @@ export class ForgeCloudOutboundClient {
   private transport: 'websocket' | 'https_polling' | 'disconnected' = 'disconnected';
   private lastHeartbeatAt: string | null = null;
   private lastError: string | null = null;
+  private readonly replayGuard = new SignedEnvelopeReplayGuard();
+
+  private isSessionExpiringSoon(): boolean {
+    if (!this.session) return true;
+    const ttl = Math.max(0, this.session.expiresAt - this.session.issuedAt);
+    const renewLeadMs = Math.min(60_000, Math.floor(ttl * 0.25));
+    return Date.now() >= this.session.expiresAt - renewLeadMs;
+  }
 
   constructor(options: {
     cloudUrl: string;
@@ -69,7 +78,7 @@ export class ForgeCloudOutboundClient {
   }) {
     this.cloudUrl = options.cloudUrl.replace(/\/+$/, '');
     this.sharedSecret = options.sharedSecret;
-    this.bridgeVersion = options.bridgeVersion || '1.0.0';
+    this.bridgeVersion = options.bridgeVersion || '2.3.0';
     this.heartbeatIntervalMs = Math.max(1000, options.heartbeatIntervalMs ?? 2500);
     this.maxRetries = Math.max(1, options.maxRetries ?? 3);
     this.rojoManager = options.rojoManager;
@@ -155,21 +164,25 @@ export class ForgeCloudOutboundClient {
    */
   public async connectAndAuthenticate(): Promise<boolean> {
     try {
+      if (!this.sharedSecret || !this.sharedSecret.trim()) {
+        throw new Error('Seguridad: sharedSecret ausente para autenticar handshake con Forge Cloud.');
+      }
       const timestamp = new Date().toISOString();
       const nonce = crypto.randomUUID();
       const rojoStatus = await this.rojoManager.getStatus();
       const studioState = this.coordinator.getStudioState();
 
       const canonicalAuth = `${this.bridgeVersion}|${BRIDGE_PROTOCOL_VERSION}|${timestamp}|${nonce}`;
-      const signature = this.sharedSecret
-        ? crypto.createHmac('sha256', this.sharedSecret).update(canonicalAuth, 'utf-8').digest('hex')
-        : '';
+      const signature = crypto
+        .createHmac('sha256', this.sharedSecret)
+        .update(canonicalAuth, 'utf-8')
+        .digest('hex');
 
       const res = await fetch(`${this.cloudUrl}/api/v1/bridge/auth/handshake`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(this.sharedSecret ? { 'X-Forge-Token': this.sharedSecret } : {}),
+          'X-Forge-Token': this.sharedSecret,
         },
         body: JSON.stringify({
           bridgeVersion: this.bridgeVersion,
@@ -285,8 +298,8 @@ export class ForgeCloudOutboundClient {
   public async sendHeartbeatAndPollTasks(): Promise<void> {
     if (!this.running) return;
 
-    // Verificar expiración de credenciales de sesión (renovar 60s antes de expirar)
-    if (!this.session || Date.now() >= this.session.expiresAt - 60_000) {
+    // Verificar expiración de credenciales de sesión
+    if (!this.session || this.isSessionExpiringSoon()) {
       this.onLog('info', 'Credenciales de sesión próximas a expirar; renovando handshake...');
       await this.connectAndAuthenticate();
       return;
@@ -367,6 +380,7 @@ export class ForgeCloudOutboundClient {
     const validation = validateBridgeMessageEnvelope(rawEnvelope, {
       expectedSessionId: this.session?.sessionId,
       sharedSecret: this.sharedSecret,
+      replayGuard: this.replayGuard,
     });
 
     if (!validation.valid || !validation.envelope) {
@@ -563,7 +577,7 @@ export class ForgeCloudOutboundClient {
     method: 'GET' | 'POST',
     body?: Record<string, unknown>
   ): Promise<{ ok: boolean; status: number; data: any }> {
-    if (!this.session || Date.now() >= this.session.expiresAt - 60_000) {
+    if (!this.session || this.isSessionExpiringSoon()) {
       await this.connectAndAuthenticate();
     }
     const headers: Record<string, string> = {

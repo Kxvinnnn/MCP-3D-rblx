@@ -23,6 +23,8 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import {
   BRIDGE_PROTOCOL_VERSION,
   BridgeMessageEnvelope,
@@ -188,7 +190,9 @@ test('Fase 10 — Recorrido Completo de Validación End-to-End (Cloud <-> Bridge
     assert.ok(activeSessionId.startsWith('sess_e2e_'), 'Debe establecerse una sesión autenticada');
 
     // 4. Detectar el proyecto Rojo y consultar su estado sin rutas absolutas de Windows
-    const statusRes = await fetch(`${bridgeBaseUrl}/local/status`);
+    const statusRes = await fetch(`${bridgeBaseUrl}/local/status`, {
+      headers: { 'X-Plugin-Token': PLUGIN_TOKEN },
+    });
     assert.equal(statusRes.status, 200);
     const statusJson = (await statusRes.json()) as any;
     assert.equal(statusJson.cloudConnection.connected, true);
@@ -1446,6 +1450,530 @@ test('Fase 3 & 4 — Confirmaciones destructivas simultáneas, respuestas duplic
     }
   }
 });
+
+test('Etapa 2 — Seguridad Completa de Forge Local Bridge: arranque sin token, 401/200 rutas protegidas, anti-replay, HMAC inválido, expiración de sesión y reconexión', async () => {
+  const projectRoot = resolveTestRojoProjectRoot();
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevPluginTok = process.env.FORGE_PLUGIN_LOCAL_TOKEN;
+  const prevLocalTok = process.env.FORGE_LOCAL_TOKEN;
+  const prevSharedSecret = process.env.FORGE_BRIDGE_SHARED_SECRET;
+
+  delete process.env.FORGE_PLUGIN_LOCAL_TOKEN;
+  delete process.env.FORGE_LOCAL_TOKEN;
+  delete process.env.FORGE_BRIDGE_SHARED_SECRET;
+
+  try {
+    // 1. Iniciar sin token o secreto -> rechazo seguro antes de escuchar
+    assert.throws(
+      () =>
+        createForgeLocalBridgeApp({
+          port: 48731,
+          rojoProjectPath: projectRoot,
+          pluginLocalToken: '',
+          sharedSecret: SHARED_SECRET,
+          autoConnectCloud: false,
+        }),
+      /FORGE_PLUGIN_LOCAL_TOKEN|pluginLocalToken/i
+    );
+
+    assert.throws(
+      () =>
+        createForgeLocalBridgeApp({
+          port: 48732,
+          rojoProjectPath: projectRoot,
+          pluginLocalToken: PLUGIN_TOKEN,
+          sharedSecret: '',
+          autoConnectCloud: false,
+        }),
+      /FORGE_BRIDGE_SHARED_SECRET|sharedSecret/i
+    );
+
+    // En producción rechaza secretos de ejemplo
+    process.env.NODE_ENV = 'production';
+    assert.throws(
+      () =>
+        createForgeLocalBridgeApp({
+          port: 48733,
+          rojoProjectPath: projectRoot,
+          pluginLocalToken: 'forge-local-dev-token-2026',
+          sharedSecret: SHARED_SECRET,
+          autoConnectCloud: false,
+        }),
+      /ejemplo|Producción/i
+    );
+    process.env.NODE_ENV = prevNodeEnv || 'test';
+
+    // Servidor Cloud simulado con expiración corta y seguimiento de sesiones
+    const cloudApp = express();
+    cloudApp.use(express.json());
+    let sessionSeq = 0;
+    let currentSessionId = '';
+    let currentSessionToken = '';
+    let currentExpiresAt = 0;
+    let rejectNextHeartbeat = false;
+
+    cloudApp.post('/api/v1/bridge/auth/handshake', (_req, res) => {
+      sessionSeq += 1;
+      currentSessionId = `sess_sec_${sessionSeq}`;
+      currentSessionToken = `tok_sec_${sessionSeq}`;
+      currentExpiresAt = Date.now() + 30_000;
+      res.json({
+        accepted: true,
+        sessionId: currentSessionId,
+        sessionToken: currentSessionToken,
+        expiresAt: currentExpiresAt,
+        wsSupported: false,
+      });
+    });
+
+    cloudApp.post('/api/v1/bridge/heartbeat', (req, res) => {
+      const auth = req.headers.authorization || '';
+      if (rejectNextHeartbeat || Date.now() > currentExpiresAt || auth !== `Bearer ${currentSessionToken}`) {
+        rejectNextHeartbeat = false;
+        return res.status(401).json({ error: 'Sesión expirada' });
+      }
+      res.json({ pendingTasks: [] });
+    });
+
+    cloudApp.post('/api/v1/bridge/task-ack', (_req, res) => res.json({ acked: true }));
+    cloudApp.post('/api/v1/bridge/task-result', (_req, res) => res.json({ accepted: true }));
+
+    const cloudServer = await new Promise<http.Server>((resolve) => {
+      const s = cloudApp.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const cloudPort = (cloudServer.address() as any).port;
+    const bridgePort = 48734;
+    const testStateFile = path.join(os.tmpdir(), `forge_sec_e2e_${Date.now()}.json`);
+
+    const bridge = createForgeLocalBridgeApp({
+      port: bridgePort,
+      rojoProjectPath: projectRoot,
+      cloudUrl: `http://127.0.0.1:${cloudPort}`,
+      sharedSecret: SHARED_SECRET,
+      pluginLocalToken: PLUGIN_TOKEN,
+      heartbeatIntervalMs: 1200,
+      autoConnectCloud: true,
+      stateFilePath: testStateFile,
+    });
+    await bridge.start();
+    const baseUrl = `http://127.0.0.1:${bridgePort}`;
+
+    try {
+      // 2. Petición a ruta protegida (/local/status y /local/plugin/poll) sin token -> 401
+      const statusNoAuth = await fetch(`${baseUrl}/local/status`);
+      assert.equal(statusNoAuth.status, 401);
+      const pollNoAuth = await fetch(`${baseUrl}/local/plugin/poll`);
+      assert.equal(pollNoAuth.status, 401);
+
+      // 3. Petición con token incorrecto -> 401
+      const wrongTokenRes = await fetch(`${baseUrl}/local/status`, {
+        headers: { 'X-Plugin-Token': 'wrong-token-value-123' },
+      });
+      assert.equal(wrongTokenRes.status, 401);
+
+      // 4. Petición con token correcto -> 200
+      const okRes = await fetch(`${baseUrl}/local/status`, {
+        headers: { 'X-Plugin-Token': PLUGIN_TOKEN },
+      });
+      assert.equal(okRes.status, 200);
+
+      // 5. Reenvío de mensaje firmado ya usado -> rechazado
+      const signedEnvelope: BridgeMessageEnvelope = {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        taskId: 'task_sec_replay_01',
+        sessionId: currentSessionId,
+        operation: 'rojo.status',
+        payload: {},
+        timestamp: new Date().toISOString(),
+        correlationId: 'corr_sec_replay_01',
+      };
+      signedEnvelope.signature = computeEnvelopeHmac(signedEnvelope, SHARED_SECRET);
+
+      const firstExec = await fetch(`${baseUrl}/local/execute`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Plugin-Token': PLUGIN_TOKEN,
+        },
+        body: JSON.stringify(signedEnvelope),
+      });
+      assert.equal(firstExec.status, 200);
+      const firstBody = (await firstExec.json()) as any;
+      assert.equal(firstBody.status, 'completed');
+
+      const replayExec = await fetch(`${baseUrl}/local/execute`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Plugin-Token': PLUGIN_TOKEN,
+        },
+        body: JSON.stringify(signedEnvelope),
+      });
+      assert.equal(replayExec.status, 409);
+      const replayBody = (await replayExec.json()) as any;
+      assert.equal(replayBody.status, 'rejected_duplicate');
+
+      // 6. Firma HMAC inválida -> rechazado (400 en HTTP y failed en cloudClient)
+      const forgedEnvelope: BridgeMessageEnvelope = {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        taskId: 'task_sec_forged_02',
+        sessionId: currentSessionId,
+        operation: 'rojo.status',
+        payload: {},
+        timestamp: new Date().toISOString(),
+        correlationId: 'corr_sec_forged_02',
+        signature: 'deadbeef'.repeat(8),
+      };
+      const forgedRes = await fetch(`${baseUrl}/local/execute`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Plugin-Token': PLUGIN_TOKEN,
+        },
+        body: JSON.stringify(forgedEnvelope),
+      });
+      assert.equal(forgedRes.status, 400);
+      const forgedBody = (await forgedRes.json()) as any;
+      assert.equal(forgedBody.status, 'failed');
+      assert.match(String(forgedBody.error), /HMAC/i);
+
+      // También verifyEnvelopeHmac con secreto vacío falla cerrado
+      const emptySecretCheck = validateBridgeMessageEnvelope(signedEnvelope, {
+        sharedSecret: '',
+      });
+      assert.equal(emptySecretCheck.valid, false);
+
+      // 7. Sesión expirada -> rechazada por cloud y renovada automáticamente en el ciclo de heartbeat
+      const sessionBeforeExpiry = currentSessionId;
+      currentExpiresAt = Date.now() - 1000;
+      await bridge.cloudClient.sendHeartbeatAndPollTasks();
+      assert.notEqual(currentSessionId, sessionBeforeExpiry);
+      assert.equal(bridge.cloudClient.getStatus().connected, true);
+
+      // 8. Reconexión explícita tras desconexión -> estado consistente
+      const sessionBeforeReconnect = currentSessionId;
+      const reconnectRes = await fetch(`${baseUrl}/local/reconnect`, {
+        method: 'POST',
+        headers: { 'X-Plugin-Token': PLUGIN_TOKEN },
+      });
+      assert.equal(reconnectRes.status, 200);
+      const reconnectBody = (await reconnectRes.json()) as any;
+      assert.equal(reconnectBody.reconnected, true);
+      assert.notEqual(reconnectBody.cloudConnection.sessionId, sessionBeforeReconnect);
+      assert.equal(reconnectBody.cloudConnection.connected, true);
+    } finally {
+      await bridge.stop();
+      await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
+      if (fs.existsSync(testStateFile)) {
+        fs.unlinkSync(testStateFile);
+      }
+    }
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prevNodeEnv;
+    if (prevPluginTok === undefined) delete process.env.FORGE_PLUGIN_LOCAL_TOKEN;
+    else process.env.FORGE_PLUGIN_LOCAL_TOKEN = prevPluginTok;
+    if (prevLocalTok === undefined) delete process.env.FORGE_LOCAL_TOKEN;
+    else process.env.FORGE_LOCAL_TOKEN = prevLocalTok;
+    if (prevSharedSecret === undefined) delete process.env.FORGE_BRIDGE_SHARED_SECRET;
+    else process.env.FORGE_BRIDGE_SHARED_SECRET = prevSharedSecret;
+  }
+});
+
+test('Etapa 8 — Persistencia atómica (tmp+rename), detección de corrupción JSON y recuperación tras reinicio real del proceso OS', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-etapa8-bridge-'));
+  const statePath = path.join(tmpDir, 'bridge-state.json');
+
+  try {
+    // 1. Validar escritura atómica ante fallo inyectado: NO destruye último estado válido ni deja temporales
+    const adapter = new JsonFileTaskStateStoreAdapter(statePath);
+    const coord = new TaskExecutionCoordinator({ stateStore: adapter, confirmationExpirationMs: 30000 });
+    const envOk: BridgeMessageEnvelope = {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      taskId: 'task_atomic_seed_01',
+      sessionId: 'sess_atomic',
+      operation: 'rojo.status',
+      payload: {},
+      timestamp: new Date().toISOString(),
+      correlationId: 'corr_atomic_01',
+    };
+    const okRes = await coord.executeDeduplicated(envOk, async () => ({ healthy: true }));
+    assert.equal(okRes.status, 'completed');
+    const validRawBeforeFailure = fs.readFileSync(statePath, 'utf-8');
+
+    adapter.setBeforeRenameHook(() => {
+      throw new Error('EIO simulated disk failure before rename');
+    });
+    const envFail: BridgeMessageEnvelope = {
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      taskId: 'task_atomic_fail_02',
+      sessionId: 'sess_atomic',
+      operation: 'rojo.status',
+      payload: {},
+      timestamp: new Date().toISOString(),
+      correlationId: 'corr_atomic_02',
+    };
+    await assert.rejects(
+      () => coord.executeDeduplicated(envFail, async () => ({ healthy: true })),
+      /Fallo al persistir estado/i
+    );
+    adapter.setBeforeRenameHook(undefined);
+
+    assert.equal(
+      fs.readFileSync(statePath, 'utf-8'),
+      validRawBeforeFailure,
+      'Un fallo antes de rename debe preservar íntegro el último estado válido en disco'
+    );
+    assert.equal(
+      fs.readdirSync(tmpDir).filter((f) => f.endsWith('.tmp')).length,
+      0,
+      'No deben quedar archivos .tmp huérfanos tras error de escritura'
+    );
+    assert.ok(coord.getPersistenceDiagnostics().saveErrorCount >= 1);
+
+    // 2. Corrupción total de JSON y registros incompletos -> rechazo sin marcar como recuperados
+    const corruptPath = path.join(tmpDir, 'corrupt-state.json');
+    fs.writeFileSync(corruptPath, '{"completedTasks": { "bad": ', 'utf-8');
+    const corruptCoord = new TaskExecutionCoordinator({
+      stateStore: new JsonFileTaskStateStoreAdapter(corruptPath),
+    });
+    const corruptDiag = corruptCoord.getPersistenceDiagnostics();
+    assert.equal(corruptDiag.corruptedFileDetected, true);
+    assert.equal(corruptDiag.loadErrorCount, 1);
+    assert.equal(corruptDiag.recoveredCompletedTasksCount, 0);
+
+    const partialPath = path.join(tmpDir, 'partial-records.json');
+    fs.writeFileSync(
+      partialPath,
+      JSON.stringify({
+        completedTasks: {
+          broken_task: { taskId: 'broken_task' }, // faltan campos obligatorios
+        },
+        awaitingConfirmations: {
+          incomplete_await: { taskId: 'incomplete_await', status: 'awaiting_confirmation' },
+        },
+        resultHistory: [{ taskId: '' }],
+      }),
+      'utf-8'
+    );
+    const partialCoord = new TaskExecutionCoordinator({
+      stateStore: new JsonFileTaskStateStoreAdapter(partialPath),
+    });
+    const partialDiag = partialCoord.getPersistenceDiagnostics();
+    assert.ok(partialDiag.invalidRecordsRejected >= 3);
+    assert.equal(partialDiag.recoveredCompletedTasksCount, 0);
+    assert.equal(partialDiag.recoveredAwaitingConfirmationsCount, 0);
+
+    // 3. Reinicio REAL de proceso OS de forge-bridge: awaiting_studio_confirmation sobrevive SIGTERM y se confirma en Proceso 2
+    const procStatePath = path.join(tmpDir, 'proc-restart-state.json');
+    const projectRoot = resolveTestRojoProjectRoot();
+    const serverEntryTs = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../src/server.ts'
+    );
+
+    const pendingCloudTasks: BridgeMessageEnvelope[] = [];
+    const cloudTaskResults: Map<string, any> = new Map();
+    let currentSessionId = '';
+    let currentSessionToken = '';
+
+    const cloudApp = express();
+    cloudApp.use(express.json());
+    cloudApp.post('/api/v1/bridge/auth/handshake', (_req, res) => {
+      currentSessionId = `sess_proc_${Date.now()}`;
+      currentSessionToken = `tok_proc_${Date.now()}`;
+      res.json({
+        accepted: true,
+        sessionId: currentSessionId,
+        sessionToken: currentSessionToken,
+        expiresAt: Date.now() + 300_000,
+        wsSupported: false,
+      });
+    });
+    cloudApp.post('/api/v1/bridge/heartbeat', (_req, res) => {
+      const toSend = pendingCloudTasks.splice(0, pendingCloudTasks.length);
+      res.json({ pendingTasks: toSend });
+    });
+    cloudApp.post('/api/v1/bridge/task-ack', (_req, res) => res.json({ acked: true }));
+    cloudApp.post('/api/v1/bridge/task-result', (req, res) => {
+      if (req.body?.taskId) {
+        cloudTaskResults.set(req.body.taskId, req.body);
+      }
+      res.json({ accepted: true });
+    });
+
+    const cloudServer = await new Promise<http.Server>((resolve) => {
+      const s = cloudApp.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const cloudPort = (cloudServer.address() as any).port;
+
+    const waitForBridgeReady = async (port: number) => {
+      const url = `http://127.0.0.1:${port}/local/status`;
+      for (let i = 0; i < 40; i++) {
+        try {
+          const r = await fetch(url, { headers: { 'X-Plugin-Token': PLUGIN_TOKEN } });
+          if (r.status === 200) return (await r.json()) as any;
+        } catch {
+          // still starting
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error(`Bridge child process on port ${port} did not become ready`);
+    };
+
+    const spawnBridgeProc = (bridgePort: number) =>
+      spawn(process.execPath, ['--import', 'tsx', serverEntryTs], {
+        cwd: path.resolve(path.dirname(serverEntryTs), '..'),
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          BRIDGE_PORT: String(bridgePort),
+          ROJO_PROJECT_PATH: projectRoot,
+          FORGE_CLOUD_URL: `http://127.0.0.1:${cloudPort}`,
+          FORGE_BRIDGE_SHARED_SECRET: SHARED_SECRET,
+          FORGE_PLUGIN_LOCAL_TOKEN: PLUGIN_TOKEN,
+          BRIDGE_HEARTBEAT_INTERVAL_MS: '150',
+          BRIDGE_STATE_FILE_PATH: procStatePath,
+        },
+        stdio: 'pipe',
+      });
+
+    // Proceso 1
+    const proc1 = spawnBridgeProc(48741);
+    try {
+      const st1 = await waitForBridgeReady(48741);
+      assert.equal(st1.persistence.hasStateFile, true);
+
+      const taskId = 'task_real_proc_restart_01';
+      const reconstructEnv: BridgeMessageEnvelope = {
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        taskId,
+        sessionId: currentSessionId || 'sess_proc',
+        operation: 'studio.reconstruct_model',
+        payload: {
+          name: 'RestartSurvivingModel',
+          expected_part_count: 1,
+          model_hash: 'hash_final_proc',
+        },
+        timestamp: new Date().toISOString(),
+        correlationId: 'corr_proc_restart_01',
+      };
+      reconstructEnv.signature = computeEnvelopeHmac(reconstructEnv, SHARED_SECRET);
+      pendingCloudTasks.push(reconstructEnv);
+
+      // Plugin hace poll hasta recibir la tarea
+      let polledTask: any = null;
+      for (let i = 0; i < 25 && !polledTask; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        const pRes = await fetch('http://127.0.0.1:48741/local/plugin/poll', {
+          headers: { 'X-Plugin-Token': PLUGIN_TOKEN },
+        });
+        const pJson: any = await pRes.json();
+        if (Array.isArray(pJson.pendingTasks) && pJson.pendingTasks.length > 0) {
+          polledTask = pJson.pendingTasks[0];
+        }
+      }
+      assert.ok(polledTask, 'Proceso 1 debe entregar la tarea studio.reconstruct_model al plugin');
+
+      // Plugin reporta awaiting_studio_confirmation al Proceso 1
+      const awaitRes = await fetch('http://127.0.0.1:48741/local/plugin/result', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Plugin-Token': PLUGIN_TOKEN,
+        },
+        body: JSON.stringify({
+          taskId,
+          status: 'awaiting_studio_confirmation',
+          result: {
+            taskId,
+            operationId: taskId,
+            status: 'awaiting_confirmation',
+            verified: false,
+            modelName: 'RestartSurvivingModel',
+            expectedPartCount: 1,
+            actualPartCount: 2,
+            expectedModelHash: 'hash_final_proc',
+            appliedModelHash: 'hash_before_proc',
+            verifiedGeometryPartIds: ['part_keep_01'],
+            failedPartIds: [],
+            pendingDeletionPartIds: ['part_del_01'],
+          },
+        }),
+      });
+      assert.equal(awaitRes.status, 200);
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Terminar Proceso 1 limpiamente con SIGTERM
+      const exitPromise1 = new Promise<number | null>((resolve) => {
+        proc1.once('exit', (code) => resolve(code));
+      });
+      proc1.kill('SIGTERM');
+      await exitPromise1;
+    } finally {
+      if (!proc1.killed && proc1.exitCode === null) proc1.kill('SIGKILL');
+    }
+
+    // Verificar que el archivo persistido sobrevivió al Proceso 1
+    assert.equal(fs.existsSync(procStatePath), true);
+
+    // Proceso 2 arrancando desde cero sobre el mismo archivo de estado
+    const proc2 = spawnBridgeProc(48742);
+    try {
+      const st2 = await waitForBridgeReady(48742);
+      assert.equal(st2.persistence.recoveredAwaitingConfirmationsCount, 1);
+      assert.equal(st2.queue.awaitingConfirmationsCount, 1);
+
+      // Plugin envía confirmación destructiva al Proceso 2 tras reinicio
+      const confirmRes = await fetch('http://127.0.0.1:48742/local/plugin/result', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Plugin-Token': PLUGIN_TOKEN,
+        },
+        body: JSON.stringify({
+          taskId: 'task_real_proc_restart_01',
+          status: 'completed',
+          result: {
+            taskId: 'task_real_proc_restart_01',
+            operationId: 'task_real_proc_restart_01',
+            status: 'completed',
+            verified: true,
+            modelName: 'RestartSurvivingModel',
+            expectedPartCount: 1,
+            actualPartCount: 1,
+            expectedModelHash: 'hash_final_proc',
+            appliedModelHash: 'hash_final_proc',
+            verifiedGeometryPartIds: ['part_keep_01'],
+            failedPartIds: [],
+            pendingDeletionPartIds: [],
+            removedPartIds: ['part_del_01'],
+          },
+        }),
+      });
+      assert.equal(confirmRes.status, 200);
+      const confirmJson: any = await confirmRes.json();
+      assert.equal(confirmJson.accepted, true, 'Proceso 2 debe aceptar la confirmación pendiente recuperada tras reinicio OS');
+
+      await new Promise((r) => setTimeout(r, 200));
+      const finalCloudResult = cloudTaskResults.get('task_real_proc_restart_01');
+      assert.ok(finalCloudResult, 'Proceso 2 debe notificar la confirmación final a Forge Cloud');
+      assert.equal(finalCloudResult.status, 'completed');
+
+      const exitPromise2 = new Promise<number | null>((resolve) => {
+        proc2.once('exit', (code) => resolve(code));
+      });
+      proc2.kill('SIGTERM');
+      await exitPromise2;
+    } finally {
+      if (!proc2.killed && proc2.exitCode === null) proc2.kill('SIGKILL');
+      await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 
 
 

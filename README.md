@@ -128,10 +128,10 @@
    - `Stylized Assets` (Modelos estilizados)
    - `Ambient & Decoration` (Elementos ambientales y decorativos)
 2. **Generador Parametrizado de Árboles 3D (`generateParameterizedTree3DParts`)**:
-   - Parámetros: `seed`, `height` (4–45 studs), `trunkThickness` (0.4–6.0 studs), `branchCount` (1–12), `canopyShape` (`spherical`, `conical`, `layered`, `weeping`), `leafDistribution` (`balanced`, `dense`, `clustered`, `sparse`), `trunkMaterial`, `leafMaterial`, `variation`.
-   - Produce jerarquía completa (`Root/RootFlare`, `Root/MainTrunk`, `Root/Branches/Branch_1..N`, `Root/Canopy/CanopyCrown_Main`, `Root/Canopy/FoliageCluster_1..M`) asentada exactamente en `Y = 0`.
-3. **Determinismo por Semilla (`seed`)**:
-   - La misma semilla y los mismos parámetros producen siempre exactamente los mismos buffers de vértices, normales, UVs, caras y el mismo hash canónico SHA-256.
+   - **14 parámetros configurables**: `seed`, `height` (4–45 studs), `trunkThickness` (0.4–6.0 studs), `branchCount` (1–12), `canopyShape` (`spherical`, `conical`, `layered`, `weeping`), `leafDistribution` (`balanced`, `dense`, `clustered`, `sparse`), `trunkMaterial`, `leafMaterial`, `variation`, `trunkColor`, `leafColor`, `lodLevel` (`0`/`1`/`2`), `branchSpread`, `rootFlareScale`.
+   - Produce jerarquía completa (`Root/RootFlare`, `Root/MainTrunk`, `Root/Branches/Branch_1..N`, `Root/Canopy/CanopyCrown_Main`, `Root/Canopy/FoliageCluster_1..M`) asentada exactamente en `Y = 0` con mallas cerradas LOD 0/1/2 verificadas sin caras abiertas.
+3. **Determinismo por Semilla (`seed`) e Identificadores Honestos**:
+   - La misma semilla y los mismos parámetros producen siempre exactamente los mismos buffers de vértices, normales, UVs, caras y el mismo hash canónico SHA-256 (`geometryHash`, `contentHash`, `forgeAssetId`), manteniendo `robloxAssetId: null` hasta una publicación real en Roblox Cloud (y distinguiendo PBR `local_saved` vs `cloud_published`).
 
 ---
 
@@ -246,12 +246,23 @@ Abre **2 terminales PowerShell** en `C:\Users\dadada\Desktop\MCP-3D-rblx`:
 
 Ejecuta toda la batería de verificación desde la raíz del proyecto:
 
+### 8.1 Matriz Honesta de Estado (`v2.3.0`)
+
+| Capacidad / Subsistema | Estado | Evidencia Verificable |
+| :--- | :---: | :--- |
+| **Motor 1 Procedural 3D (8 categorías + 14 params árbol + LOD 0/1/2)** | `TESTEADO` | `npm test` (`tests/nightmareForgeE2EAndSecurity.test.ts`), determinante por `seed` sin API key. |
+| **Gateway Express + Autenticación Fail-Closed + Confirmación Destructiva** | `TESTEADO` | `npm test` (`X-Forge-Token`, `?confirm=true`, CORS restringido en producción). |
+| **Forge Local Bridge (HMAC + Anti-Replay + Persistencia Atómica OS)** | `TESTEADO` | `npm --prefix forge-bridge test` (8/8 incluyendo reinicio real de proceso hijo con SIGTERM). |
+| **Hashing Canónico SHA-256, Validador Ear Clipping & Sync Incremental** | `TESTEADO` | `npm test` (61/61 pasando en Node test runner) y `python3 tests/test_e2e_bidirectional_sync.py`. |
+| **Plugin Luau `--!strict` (`ForgeAIStudioPlugin.server.luau`)** | `IMPLEMENTADO` | Validación sintáctica/estructural en CI; ejecución GUI interactiva en Roblox Studio Desktop: `PENDIENTE`. |
+| **Publicación PBR Cloud (`rbxassetid://` verificados)** | `IMPLEMENTADO` | Requiere `ROBLOX_OPEN_CLOUD_API_KEY` real en ejecución; localmente genera estado `local_saved`. |
+
 ```powershell
 # 1. Verificación estática de tipos TypeScript (Frontend + Gateway + Bridge)
 npm run lint
 npm --prefix forge-bridge run typecheck
 
-# 2. Suite de pruebas unitarias, seguridad, generador de árboles 3D y Bridge
+# 2. Suite de pruebas unitarias, seguridad, generador de árboles 3D, persistencia atómica y Bridge
 npm test
 npm --prefix forge-bridge test
 
@@ -271,4 +282,5 @@ npm run build
 - [`docs/API_REFERENCE.md`](./docs/API_REFERENCE.md): Especificación de endpoints HTTP REST y SSE.
 - [`docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md`](./docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md): Guía de instalación y uso del Plugin de Roblox Studio v2.3.0, `Forge Local Bridge` y Rojo 7.x.
 - [`docs/STABILIZATION_DATA_INTEGRITY.md`](./docs/STABILIZATION_DATA_INTEGRITY.md): Detalles de integridad SHA-256 canónica, triangulación relativa y recibos de verificación.
+- [`docs/USER_GUIDE.md`](./docs/USER_GUIDE.md): Manual paso a paso de uso de la plataforma en modos Sencillo y Avanzado.
 

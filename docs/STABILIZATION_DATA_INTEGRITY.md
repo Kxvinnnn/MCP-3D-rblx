@@ -1,6 +1,6 @@
-# Especificación de Estabilización, Integridad de Datos y Arquitectura Modular — Forge AI Studio v2.2
+# Especificación de Estabilización, Integridad de Datos y Arquitectura Modular — NIGHTMARE FORGE / Forge AI Studio v2.3.0
 
-Este documento sirve como la especificación técnica completa y registro de cambios (*changelog*) de las mejoras de **estabilización, integridad de datos, hashing canónico y sincronización bidireccional** aplicadas a **Forge AI Studio**.
+Este documento sirve como la especificación técnica completa y registro de cambios (*changelog*) de las mejoras de **estabilización, integridad de datos, hashing canónico, persistencia atómica y sincronización bidireccional** aplicadas a **Forge AI Studio**.
 
 ---
 
@@ -9,14 +9,15 @@ Este documento sirve como la especificación técnica completa y registro de cam
 | Categoría | Problema Anterior | Solución Integrada | Módulo Principal |
 | :--- | :--- | :--- | :--- |
 | **Protección de Cambios Pendientes** | `setActiveAsset(null)` o cambiar a otra versión del mismo recurso omitía la verificación de cambios no guardados. | Se implementaron guardias estrictos en `setActiveAsset()` que interceptan cualquier transición a `null` o versión modificada cuando `pendingChanges = true`, solicitando confirmación modal. | `src/context/ForgeContext.tsx` |
-| **Triangulación Geométrica 3D** | Mallas de >3 vértices usaban la fórmula simplista `(N - 2)` sin verificar convexidad, concavidad ni validez de áreas. | Se implementó Ear Clipping 3D con proyección normal de Newell en 2D y verificación de área 3D real (`computeTriangleArea3D > 1e-7`). | `src/utils/robloxGeometryValidator.ts` |
-| **Validación de Geometría Roblox** | No se detectaban caras malformadas (`< 3` vértices), polígonos degenerados, ni valores `NaN`/`Infinity` en matrices de rotación. | Se incorporó el reporte unificado `RobloxGeometryValidationReport` con banderas `hasMalformedFaces`, `hasDegenerateFaces`, `hasIncompleteGeometry` y `hasNonFiniteCoordinates`. | `src/utils/robloxGeometryValidator.ts` |
+| **Triangulación Geométrica 3D** | Mallas de >3 vértices usaban la fórmula simplista `(N - 2)` o umbrales absolutos rígidos. | Se implementó Ear Clipping 3D con proyección normal de Newell en 2D y umbrales relativos a la escala del bounding-box del polígono. | `src/utils/robloxGeometryValidator.ts` |
+| **Validación de Geometría Roblox** | No se validaba `baseMeshData`, se permitían recursos vacíos sin fallo ni se detectaban valores `NaN`/`Infinity`. | Se incorporó validación equivalente para `meshData` y `baseMeshData`, rechazo estricto de modelos sin piezas y detección de `hasMalformedFaces`, `hasDegenerateFaces` y `hasNonFiniteCoordinates`. | `src/utils/robloxGeometryValidator.ts` |
 | **Recuperación Segura de Borradores** | `recoverDraft()` cargaba borradores locales sin validar si la versión guardada en el servidor cambió previamente. | Se añadió la verificación `baseHash` contra el hash de la versión guardada actual. Si difieren, se activa un estado de conflicto explícito (`activeConflict`). | `src/context/ForgeContext.tsx` |
 | **Persistencia de Conflictos** | `resolveConflict('keep_local')` cerraba el conflicto en memoria sin garantizar el envío al servidor. | `resolveConflict('keep_local')` ejecuta la persistencia mediante `/api/v1/assets/rebuild-luau` y solo cierra el conflicto tras verificar la respuesta. | `src/context/ForgeContext.tsx` |
 | **Sincronización Incremental** | Piezas sin `partId` colisionaban por nombre, y la eliminación de piezas no activaba banderas de cambio. | `buildCollisionSafePartMap()` evita colisiones asignando claves de jerarquía compuestas, y las piezas eliminadas activan banderas globales de cambio. | `src/utils/incrementalSync.ts` |
-| **Verificación de Guardado y Sincronización** | `saveAssetToDisk()` y `pushToStudio()` limpiaban `pendingChanges` antes de confirmar que el servidor/Studio completaron la operación. | `verifyPersistedAssetContent()` valida el contenido devuelto. `pushToStudio()` mantiene `pendingChanges = true` mientras la solicitud esté en cola en el puente. | `src/context/ForgeContext.tsx` |
+| **Verificación de Guardado y Recibos** | `saveAssetToDisk()` y `pushToStudio()` limpiaban `pendingChanges` antes de confirmar ejecución o aceptaban recibos parciales. | `verifyPersistedAssetContent()` y `evaluateStudioReconstructionReceipt()` validan contenido y recibos; `pushToStudio()` mantiene `pendingChanges = true` hasta confirmación real verificada. | `src/context/ForgeContext.tsx` & `src/utils/receiptVerification.ts` |
+| **Persistencia Atómica del Bridge y Biblioteca** | Escrituras directas podían corromper JSON ante fallos de disco o reinicios de proceso. | Escritura atómica vía `.tmp` + `fsync` + `rename`, preservación `.corrupt.<ts>.bak` y recuperación de `awaiting_studio_confirmation` tras reinicio OS del Bridge. | `forge-bridge/src/taskStateStore.ts`, `src/server/engines/assetEngine.ts`, `backend/engines/asset_engine.py` |
 | **Hashing Canónico SHA-256** | Errores con pares sustitutos UTF-16, emojis y colisiones en `Set`/`Map` con claves mixtas. | Implementación NIST FIPS 180-4 en `sha256Hex` con `TextEncoder` y normalización determinista en `toCanonicalJsonValue`. | `src/utils/canonicalHash.ts` |
-| **CI / Workflows** | `npm ci || npm install` permitía instalaciones no deterministas en la canalización de CI. | Se fijó la instalación estricta con `npm ci` en `.github/workflows/ci.yml`. | `.github/workflows/ci.yml` |
+| **CI / Workflows** | `npm ci || npm install` permitía instalaciones no deterministas en la canalización de CI. | Se fijó `npm ci` estricto en `.github/workflows/ci.yml` junto a lockfiles sincronizados (`v2.3.0`). | `.github/workflows/ci.yml` |
 
 ---
 
@@ -70,10 +71,10 @@ export function validateRobloxGeometry(asset: Forge3DAsset | null): RobloxGeomet
 
 #### Algoritmo de Triangulación Ear Clipping 3D:
 1. **Verificación de Índices y Limpieza**: Filtra vértices duplicados consecutivos y valida que cada índice pertenezca al rango `0 <= index < vertices.length`.
-2. **Vector Normal de Newell**: Para polígonos de más de 3 vértices, calcula el vector normal de la superficie 3D. Si la magnitud es menor a `1e-8`, rechaza la cara como colineal o degenerada.
+2. **Vector Normal de Newell**: Para polígonos de más de 3 vértices, calcula el vector normal de la superficie 3D con tolerancia relativa a la extensión máxima del polígono.
 3. **Proyección 2D**: Identifica el componente dominante de la normal (eje X, Y o Z) y proyecta el polígono sobre ese plano bidimensional.
 4. **Corte de Orejas (Ear Clipping)**: Detecta vértices conexos cuyo ángulo sea convexo en el sentido de devanado (`CCW` o `CW`) y cuyos triángulos resultantes no contengan ningún otro vértice del polígono.
-5. **Comprobación Geométrica 3D**: Verifica que la superficie 3D del triángulo (`computeTriangleArea3D`) sea mayor a `1e-7`, descartando caras degeneradas de área nula.
+5. **Comprobación Geométrica 3D**: Verifica que la superficie 3D del triángulo supere el umbral relativo de escala, descartando caras degeneradas de área nula sin penalizar modelos miniatura válidos.
 
 ---
 
@@ -117,19 +118,23 @@ export function computeIncrementalDiff(
 
 ---
 
-## 3. Cobertura de Pruebas Automatizadas
+## 3. Cobertura de Pruebas Automatizadas (`v2.3.0`)
 
-Se dispone de 36 pruebas unitarias e integrales que se ejecutan mediante `npm test`:
+El repositorio cuenta con suites completas verificables mediante `npm test`, `npm --prefix forge-bridge test` y `python3 tests/test_e2e_bidirectional_sync.py`:
 
-1. `tests/canonicalHash.test.ts`: 11 pruebas (vectores NIST SHA-256, Unicode/emojis, ordenación canónica, exclusión de claves en raíz, sensibilidad de `baseMeshData`, sub-hashes granulares, tipos no serializables y colisiones `Map`/`Set`).
-2. `tests/forgeContext.test.ts`: 8 pruebas (ejecución real de React `ForgeProvider`, `undo`/`redo`, `confirmSwitchDiscard`, guardias `setActiveAsset`, verificación `baseHash` en `recoverDraft`, resolución de conflictos y `pushToStudio` en cola).
-3. `tests/robloxGeometryValidator.test.ts`: 6 pruebas (triangulación Ear Clipping 3D en polígonos cóncavos, límites de escala, coordenadas no finitas, caras malformadas y caras degeneradas).
-4. `tests/sseParser.test.ts`: 7 pruebas (parsing SSE con terminadores LF/CRLF y fragmentación).
+1. `tests/canonicalHash.test.ts`: Vectores NIST SHA-256, Unicode/emojis, ordenación canónica, exclusión de claves en raíz, sensibilidad de `baseMeshData`, sub-hashes granulares y colisiones `Map`/`Set`.
+2. `tests/forgeContext.test.ts`: Ejecución real de React `ForgeProvider`, `undo`/`redo`, `confirmSwitchDiscard`, guardias `setActiveAsset`, verificación `baseHash` en `recoverDraft`, resolución de conflictos y `pushToStudio` con recibos verificados.
+3. `tests/robloxGeometryValidator.test.ts`: Triangulación Ear Clipping 3D en polígonos cóncavos, tolerancias relativas, `baseMeshData`, límites de escala, coordenadas no finitas y caras degeneradas.
+4. `tests/incrementalSync.test.ts` & `tests/sseParser.test.ts`: Detección de duplicados `partId`, parsing SSE LF/CRLF y fragmentación.
+5. `tests/nightmareForgeE2EAndSecurity.test.ts`: Motor 1 Procedural (8 categorías, 14 params árbol, LODs cerrados), fail-closed auth, anti-replay HMAC, confirmación destructiva, PBR `local_saved`, pipeline HTTP completo de reconstrucción y preservación ante fallos de escritura en biblioteca.
+6. `forge-bridge/tests/bridge.test.ts`: Cola local persistente, HMAC, anti-replay, manejo de JSON corrupto y **reinicio real OS de proceso hijo (`SIGTERM`)** manteniendo confirmaciones pendientes.
+7. `tests/test_e2e_bidirectional_sync.py`: Paridad de hashes FNV32 + sincronización bidireccional Python ↔ Studio y atomicidad de `asset_engine.py`.
 
 ---
 
 ## 4. Comprobación de Calidad del Código
 
-- **Compilador TypeScript**: `npx tsc --noEmit` — 0 errores.
-- **Suite de Pruebas Node.js**: `npm test` — 36/36 tests pasados.
-- **Build de Producción**: `npm run build` — Exitoso.
+- **Compilador TypeScript**: `npm run lint` (`tsc --noEmit`) y `npm --prefix forge-bridge run typecheck` — 0 errores.
+- **Suite de Pruebas Node.js + Bridge**: `npm test` (61/61 tests pasando) y `npm --prefix forge-bridge test` (8/8 tests pasando).
+- **Suite Python E2E**: `python3 tests/test_e2e_bidirectional_sync.py` — pasando.
+- **Build de Producción**: `npm --prefix forge-bridge run build` y `npm run build` — exitosos.

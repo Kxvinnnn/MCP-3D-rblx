@@ -42,7 +42,7 @@ export const BackendExplorer: React.FC = () => {
     'README.md': 'Documentación principal del repositorio: arquitectura de 7 motores, capacidades 3D, roadmap P0-P3 y despliegue.',
     'docs/ARCHITECTURE.md': 'Diseño profundo de los 7 motores modulares, visor 3D WebGL (Three.js) y flujo multi-agente P3.',
     'docs/API_REFERENCE.md': 'Especificación técnica completa de todos los endpoints REST y Server-Sent Events (SSE).',
-    'docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md': 'Manual de integración con Rojo 7.x y uso del plugin ForgeAIStudioPlugin.server.luau v2.1.',
+    'docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md': 'Manual de integración con Rojo 7.x y uso del plugin ForgeAIStudioPlugin.server.luau v2.3.0.',
     'main.py': 'Orquestador central FastAPI que coordina los 7 motores independientes y el plugin de Roblox Studio.',
     'engines/context_pruner.py': 'Podador de contexto IA por dominio (Python): reduce ~65% el contexto extra enviado a Gemini.',
     'engines/rojo_bridge.py': 'Motor Rojo Bridge (Python): sandboxing de rutas, default.project.json, manifiesto SHA-256 y auditoría.',
@@ -64,7 +64,7 @@ export const BackendExplorer: React.FC = () => {
     'requirements.txt': 'Dependencias Python 3.11+: fastapi, uvicorn, pydantic, python-dotenv, google-genai.',
     '.env.example': 'Configuración de entorno para GEMINI_API_KEY, ROJO_PROJECT_PATH y tiers de modelos.',
     'project_context.md': 'Plantilla de contexto local con mapeo Rojo, estándares Luau, Maid pattern y tokens de UI.',
-    'roblox_plugin/ForgeAIStudioPlugin.server.luau': 'Plugin oficial de Roblox Studio v2.1 con reconstrucción EditableMesh in-place y PBR.',
+    'roblox_plugin/ForgeAIStudioPlugin.server.luau': 'Plugin oficial de Roblox Studio v2.3.0 con reconstrucción EditableMesh in-place y PBR.',
   };
 
   return (

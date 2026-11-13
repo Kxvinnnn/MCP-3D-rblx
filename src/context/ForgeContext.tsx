@@ -352,7 +352,7 @@ interface ForgeContextType {
 
 const defaultBridgeStatus: BridgeHealthStatus = {
   bridgeConnected: false,
-  bridgeVersion: '1.0.0',
+  bridgeVersion: '2.3.0',
   protocolVersion: '1.0',
   sessionActive: false,
   lastHeartbeatAt: null,

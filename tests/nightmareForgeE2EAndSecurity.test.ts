@@ -19,10 +19,14 @@ import {
   buildObjAndMtlFromPartsServer,
   buildRbxmxFromPartsServer,
   buildStrictLuauFromEditedParts,
+  generatePBRSurfaceAppearanceLuau,
   getAssetFromLibraryServer,
+  loadAssetsLibraryServer,
   parseRbxmxFromPartsServer,
+  saveAssetsLibraryServer,
   upsertAssetInLibraryServer,
 } from '../src/server/engines/worldAndModelEditorEngine.ts';
+import { createMainServerApp } from '../server.ts';
 import { computeCanonicalAssetHash } from '../src/utils/canonicalHash.ts';
 import { validateRobloxGeometry } from '../src/utils/robloxGeometryValidator.ts';
 import {
@@ -316,3 +320,422 @@ test('Fase 7 — Caso de Uso Completo E2E (16 Pasos): Generar un Árbol 3D para 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('Etapa 4 — Identificadores reales: assets procedurales nunca fabrican rbxassetid:// falsos y separan forgeAssetId/geometryHash/contentHash de robloxAssetId', () => {
+  for (const category of FORGE_ASSET_CATEGORIES) {
+    const asset = synthesizeSeededProcedural3DAsset({
+      category,
+      prompt: `Identifier audit ${category}`,
+      seed: `id-audit-${category}`,
+    });
+
+    assert.ok(String(asset.forgeAssetId || '').startsWith('asset-proc-'));
+    assert.equal(asset.id, asset.forgeAssetId);
+    assert.equal(asset.sourceAssetId, asset.forgeAssetId);
+    assert.equal(asset.robloxAssetId, null);
+    assert.equal(asset.assetUri, null);
+    assert.equal(asset.geometrySource, 'EditableMeshBuffers');
+    assert.match(String(asset.geometryHash), /^[a-f0-9]{64}$/);
+    assert.match(String(asset.contentHash), /^[a-f0-9]{64}$/);
+    assert.doesNotMatch(String(asset.luau_code), /rbxassetid:\/\/\d+/);
+    assert.match(String(asset.luau_code), /PublishedMeshId = ""/);
+    assert.match(String(asset.luau_code), /PublishedAssetId = ""/);
+
+    for (const part of asset.parts) {
+      assert.equal(part.meshId, '');
+      assert.equal(part.assetId, '');
+      assert.equal(part.robloxAssetId, null);
+      assert.equal(part.assetUri, null);
+      assert.equal(part.geometrySource, 'EditableMeshBuffers');
+      assert.equal(part.meshData?.meshId, '');
+      assert.equal(part.meshData?.assetId, '');
+      assert.equal(part.meshData?.robloxAssetId, null);
+      assert.equal(part.meshData?.geometrySource, 'EditableMeshBuffers');
+      assert.match(String(part.meshData?.geometryHash), /^[a-f0-9]{64}$/);
+    }
+
+    // Round-trip JSON + .RBXMX export must not invent rbxassetid:// either
+    const jsonRoundTrip = JSON.parse(JSON.stringify(asset));
+    assert.equal(
+      computeCanonicalAssetHash(jsonRoundTrip),
+      computeCanonicalAssetHash(asset as any)
+    );
+    const rbxmx = buildRbxmxFromPartsServer(asset.name, asset.parts, asset.pbr_profile);
+    assert.doesNotMatch(rbxmx, /rbxassetid:\/\/\d+/);
+    assert.match(rbxmx, /<Content name="MeshId"><null><\/null><\/Content>/);
+  }
+});
+
+test('Etapa 6 — LODs cerrados reales en las 8 categorías y sensibilidad completa a todos los parámetros del Árbol 3D', () => {
+  // 1. Validar que cada parte de cada categoría tiene LOD 0, LOD 1 y LOD 2 independientes y geométricamente válidos
+  for (const category of FORGE_ASSET_CATEGORIES) {
+    const asset = synthesizeSeededProcedural3DAsset({
+      category,
+      prompt: `LOD validation for ${category}`,
+      seed: `lod-seed-${category}`,
+    });
+
+    for (const part of asset.parts) {
+      const lods = (part.meshData as any)?.lodLevels;
+      assert.ok(Array.isArray(lods) && lods.length === 3, `${category}/${part.name} must have 3 LODs`);
+      assert.ok(lods[2].triangleCount <= lods[1].triangleCount);
+      assert.ok(lods[1].triangleCount <= lods[0].triangleCount);
+
+      for (const lod of lods) {
+        assert.ok(Array.isArray(lod.vertices) && lod.vertices.length >= 4);
+        assert.ok(Array.isArray(lod.normals) && lod.normals.length === lod.vertices.length);
+        assert.ok(Array.isArray(lod.uvs) && lod.uvs.length === lod.vertices.length);
+        assert.ok(Array.isArray(lod.faces) && lod.faces.length >= 8);
+
+        const lodAsset = {
+          ...asset,
+          parts: [
+            {
+              ...part,
+              meshData: {
+                vertices: lod.vertices,
+                normals: lod.normals,
+                uvs: lod.uvs,
+                faces: lod.faces,
+              },
+            },
+          ],
+        };
+        const lodReport = validateRobloxGeometry(lodAsset as any);
+        assert.equal(
+          lodReport.isValid,
+          true,
+          `LOD ${lod.level} inválido en ${category}/${part.name}: ${lodReport.errors.join('; ')}`
+        );
+      }
+    }
+  }
+
+  // 2. Validar sensibilidad determinista a CADA parámetro individual del generador de árboles
+  const baseParams = {
+    seed: 'tree-param-matrix-2026',
+    height: 15,
+    trunkThickness: 1.6,
+    branchCount: 4,
+    branchLength: 4.5,
+    branchDistribution: 'tiered' as const,
+    canopyShape: 'spherical' as const,
+    canopySize: 1.0,
+    leafDistribution: 'balanced' as const,
+    foliageCount: 4,
+    trunkMaterial: 'Wood',
+    leafMaterial: 'Grass',
+    variation: 0.25,
+    leafVariation: 0.25,
+  };
+
+  const baseTree = synthesizeSeededProcedural3DAsset({
+    name: 'MatrixOak',
+    category: 'Trees & Vegetation',
+    seed: baseParams.seed,
+    tree_params: baseParams,
+  });
+  const baseHash = computeCanonicalAssetHash(baseTree as any);
+
+  const singleParamMutations: Array<[string, Record<string, any>]> = [
+    ['height', { height: 24 }],
+    ['trunkThickness', { trunkThickness: 2.8 }],
+    ['branchCount', { branchCount: 7 }],
+    ['branchLength', { branchLength: 8.0 }],
+    ['branchDistribution', { branchDistribution: 'alternating' }],
+    ['canopyShape', { canopyShape: 'conical' }],
+    ['canopySize', { canopySize: 1.6 }],
+    ['leafDistribution', { leafDistribution: 'dense' }],
+    ['foliageCount', { foliageCount: 9 }],
+    ['trunkMaterial', { trunkMaterial: 'Slate' }],
+    ['leafMaterial', { leafMaterial: 'Fabric' }],
+    ['variation', { variation: 0.65 }],
+    ['leafVariation', { leafVariation: 0.7 }],
+    ['seed', { seed: 'tree-param-matrix-alt' }],
+  ];
+
+  for (const [paramName, patch] of singleParamMutations) {
+    const mutatedTree = synthesizeSeededProcedural3DAsset({
+      name: 'MatrixOak',
+      category: 'Trees & Vegetation',
+      seed: patch.seed ?? baseParams.seed,
+      tree_params: { ...baseParams, ...patch },
+    });
+    const mutatedHash = computeCanonicalAssetHash(mutatedTree as any);
+    assert.notEqual(
+      mutatedHash,
+      baseHash,
+      `El parámetro '${paramName}' debe alterar determinísticamente el árbol generado`
+    );
+    const valReport = validateRobloxGeometry(mutatedTree as any);
+    assert.equal(
+      valReport.isValid,
+      true,
+      `Árbol mutado con '${paramName}' inválido: ${valReport.errors.join('; ')}`
+    );
+  }
+});
+
+test('Etapa 7 — Pipeline HTTP + Exportación (.luau/.rbxmx/.gltf/.obj/.mtl + PBR honesto) + Bridge firmado + Persistencia en biblioteca', async () => {
+  const tmpRojo = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-etapa7-'));
+  const token = 'etapa7_' + crypto.randomBytes(16).toString('hex');
+  const secret = 'etapa7_sec_' + crypto.randomBytes(16).toString('hex');
+
+  const runtime = createMainServerApp({
+    securityToken: token,
+    bridgeSharedSecret: secret,
+    rojoProjectPath: tmpRojo,
+    nodeEnv: 'test',
+  });
+
+  const server = runtime.app.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const addr = server.address();
+  const port = typeof addr === 'object' && addr ? addr.port : 0;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    // 1. Generar árbol completo por HTTP API autenticada con todos los parámetros de Etapa 6
+    const genRes = await fetch(`${baseUrl}/api/v1/generate-3d`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forge-Token': token,
+      },
+      body: JSON.stringify({
+        name: 'CypressMilestoneTree',
+        category: 'Trees & Vegetation',
+        prompt: 'Ciprés procedural estilizado',
+        generation_mode: 'procedural',
+        seed: 'cypress-etapa7-seed',
+        branchLength: 5.5,
+        branchDistribution: 'whorled',
+        canopyShape: 'conical',
+        canopySize: 1.2,
+        leafDistribution: 'dense',
+        foliageCount: 6,
+        variation: 0.2,
+        leafVariation: 0.35,
+        save_to_rojo: true,
+        save_to_library: true,
+      }),
+    });
+    assert.equal(genRes.status, 200);
+    const generated: any = await genRes.json();
+    assert.equal(generated.name, 'CypressMilestoneTree');
+    assert.equal(generated.robloxAssetId, null);
+    assert.equal(generated.parts.length, 1 + 1 + 4 + 1 + 6); // RootFlare + MainTrunk + 4 Branches + CanopyCrown + 6 FoliageClusters
+    assert.ok(generated.saved_path && fs.existsSync(generated.saved_path));
+
+    // 2. Validar geometría, exportar multi-formato y verificar PBR honesto sin IDs falsos
+    const geomCheck = validateRobloxGeometry(generated);
+    assert.equal(geomCheck.isValid, true);
+
+    const luau = buildStrictLuauFromEditedParts(generated.name, generated.parts, 'Hull');
+    assert.match(luau, /^--!strict/);
+    assert.doesNotMatch(luau, /rbxassetid:\/\/\d+/);
+
+    const rbxmx = buildRbxmxFromPartsServer(generated.name, generated.parts, generated.pbr_profile);
+    assert.doesNotMatch(rbxmx, /rbxassetid:\/\/\d+/);
+    const reparsed = parseRbxmxFromPartsServer(rbxmx, generated.name, 'Hull');
+    assert.equal(reparsed.parts.length, generated.parts.length);
+
+    const gltf = JSON.parse(buildGltfFromPartsServer(generated.name, generated.parts));
+    assert.equal(gltf.asset.version, '2.0');
+    assert.equal(gltf.meshes.length, generated.parts.length);
+    assert.ok(gltf.buffers?.[0]?.byteLength > 0);
+
+    const { obj, mtl } = buildObjAndMtlFromPartsServer(generated.name, generated.parts);
+    assert.match(obj, /o CanopyCrown_Main/);
+    assert.match(mtl, /newmtl Mat_/);
+
+    const pbrLuau = generatePBRSurfaceAppearanceLuau(
+      'CypressBarkPBR',
+      'src/shared/PBRMaterials',
+      0.82,
+      0.04,
+      '#5c4033'
+    );
+    assert.match(pbrLuau, /Publication State: local_saved, Published Channels: 0\/4/);
+    assert.match(pbrLuau, /PBR_HasPublishedCloudIds", false/);
+    assert.doesNotMatch(pbrLuau, /rbxassetid:\/\/[1-9]\d*/);
+
+    // 3. Re-consultar biblioteca persistida desde el servidor y verificar integridad completa
+    const libRes = await fetch(`${baseUrl}/api/v1/assets`, {
+      headers: { 'X-Forge-Token': token },
+    });
+    assert.equal(libRes.status, 200);
+    const libJson: any = await libRes.json();
+    const persisted = (libJson.assets || []).find((a: any) => a.id === generated.id);
+    assert.ok(persisted);
+    const verifyPersisted = verifyPersistedAssetContent(generated, persisted);
+    assert.equal(verifyPersisted.valid, true, verifyPersisted.reason);
+
+    // 4. Bridge HTTP firmado: handshake -> enqueue studio.reconstruct_model -> heartbeat -> task-ack -> task-result -> reconciliación
+    const hsTs = new Date().toISOString();
+    const hsNonce = crypto.randomUUID();
+    const hsSig = crypto
+      .createHmac('sha256', secret)
+      .update(`1.0.0|1.0|${hsTs}|${hsNonce}`, 'utf-8')
+      .digest('hex');
+    const hsRes = await fetch(`${baseUrl}/api/v1/bridge/auth/handshake`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forge-Token': secret,
+      },
+      body: JSON.stringify({
+        bridgeVersion: '1.0.0',
+        protocolVersion: '1.0',
+        timestamp: hsTs,
+        nonce: hsNonce,
+        signature: hsSig,
+      }),
+    });
+    assert.equal(hsRes.status, 200);
+    const hsJson: any = await hsRes.json();
+    assert.equal(hsJson.accepted, true);
+    assert.ok(hsJson.sessionToken);
+
+    const enqPromise = fetch(`${baseUrl}/api/v1/bridge/enqueue`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forge-Token': token,
+      },
+      body: JSON.stringify({
+        operation: 'studio.reconstruct_model',
+        payload: {
+          assetId: generated.id,
+          name: generated.name,
+          parts: generated.parts,
+        },
+        wait_for_completion: true,
+        timeout_ms: 5000,
+      }),
+    });
+
+    // Esperar breve tick a que la tarea quede en cola y recogerla mediante heartbeat
+    await new Promise((r) => setTimeout(r, 30));
+    const hbRes = await fetch(`${baseUrl}/api/v1/bridge/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hsJson.sessionToken}`,
+        'X-Bridge-Session': hsJson.sessionId,
+      },
+      body: JSON.stringify({
+        bridgeVersion: '1.0.0',
+        rojoStatus: { connected: true, rojoServePort: 34872, rojoServerListening: true, syncedFilesCount: 1 },
+      }),
+    });
+    assert.equal(hbRes.status, 200);
+    const hbJson: any = await hbRes.json();
+    assert.equal(hbJson.pendingTasks.length, 1);
+    const queuedTask = hbJson.pendingTasks[0];
+    assert.equal(queuedTask.operation, 'studio.reconstruct_model');
+    assert.ok(queuedTask.signature);
+
+    const ackRes = await fetch(`${baseUrl}/api/v1/bridge/task-ack`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hsJson.sessionToken}`,
+        'X-Bridge-Session': hsJson.sessionId,
+      },
+      body: JSON.stringify({ taskId: queuedTask.taskId }),
+    });
+    assert.equal(ackRes.status, 200);
+    assert.equal(((await ackRes.json()) as any).acked, true);
+
+    const reconstructedHash = computeCanonicalAssetHash(generated);
+    const taskResultPayload: any = {
+      protocolVersion: '1.0',
+      taskId: queuedTask.taskId,
+      sessionId: hsJson.sessionId,
+      correlationId: queuedTask.correlationId,
+      status: 'completed',
+      result: {
+        status: 'completed',
+        modelName: generated.name,
+        appliedModelHash: reconstructedHash,
+        verifiedGeometryPartIds: generated.parts.map((p: any) => p.partId),
+        failedPartIds: [],
+        parts: generated.parts,
+      },
+      error: null,
+      executionTime: 18,
+      timestamp: new Date().toISOString(),
+    };
+    taskResultPayload.signature = runtime.coordinator.computeTaskResultSignature(taskResultPayload);
+
+    const trRes = await fetch(`${baseUrl}/api/v1/bridge/task-result`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${hsJson.sessionToken}`,
+        'X-Bridge-Session': hsJson.sessionId,
+      },
+      body: JSON.stringify(taskResultPayload),
+    });
+    assert.equal(trRes.status, 200);
+    assert.equal(((await trRes.json()) as any).accepted, true);
+
+    const enqJson: any = await enqPromise;
+    assert.equal(enqJson.status, 200);
+    const completedTask: any = await enqJson.json();
+    assert.equal(completedTask.status, 'completed');
+
+    const reconciliation = reconcileReconstructedModelFromStudio(generated, completedTask.result);
+    assert.equal(reconciliation.valid, true, reconciliation.discrepancies.join('; '));
+    assert.equal(reconciliation.status, 'completed');
+    assert.equal(reconciliation.verified, true);
+    assert.equal(reconciliation.domainComparison.hashMatches, true);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(tmpRojo, { recursive: true, force: true });
+  }
+});
+
+test('Etapa 8 — Biblioteca de assets: escritura atómica ante fallos y recuperación segura ante JSON corrupto', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-lib-atomic-'));
+  const libPath = path.join(tmpDir, 'assets_library.json');
+
+  try {
+    const validAsset = synthesizeSeededProcedural3DAsset({
+      name: 'AtomicVaultAsset',
+      category: 'Props',
+      seed: 'atomic-vault-01',
+    });
+    upsertAssetInLibraryServer(libPath, validAsset);
+    const savedRaw = fs.readFileSync(libPath, 'utf-8');
+    assert.equal(loadAssetsLibraryServer(libPath).length, 1);
+
+    // Simular fallo durante saveAssetsLibraryServer antes de rename
+    assert.throws(
+      () =>
+        saveAssetsLibraryServer(libPath, [{ id: 'broken' }], {
+          beforeRenameHook: () => {
+            throw new Error('Disk quota exceeded');
+          },
+        }),
+      /Fallo atómico al guardar biblioteca/i
+    );
+
+    // El archivo válido anterior permanece intacto y sin temporales residuales
+    assert.equal(fs.readFileSync(libPath, 'utf-8'), savedRaw);
+    assert.equal(
+      fs.readdirSync(tmpDir).filter((f) => f.endsWith('.tmp')).length,
+      0
+    );
+
+    // Tolerancia ante JSON corrupto
+    const corruptLibPath = path.join(tmpDir, 'corrupt_library.json');
+    fs.writeFileSync(corruptLibPath, '[{ broken json', 'utf-8');
+    assert.deepEqual(loadAssetsLibraryServer(corruptLibPath), []);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+

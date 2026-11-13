@@ -200,7 +200,7 @@ export const LocalBridgeStatusPanel: React.FC = () => {
           <div className="text-sm font-bold text-white mt-1 font-mono flex items-center gap-2">
             <PlugZap className="w-4 h-4 text-cyan-400" />
             <span>
-              v{status?.bridgeVersion || '1.0.0'} (Proto v{status?.protocolVersion || '1.0'})
+              v{status?.bridgeVersion || '2.3.0'} (Proto v{status?.protocolVersion || '1.0'})
             </span>
           </div>
           <p className="text-[11px] text-slate-400 mt-1">
@@ -240,7 +240,7 @@ export const LocalBridgeStatusPanel: React.FC = () => {
           <p className="text-[11px] text-slate-400 mt-1">
             {studioConnected
               ? `Selección: ${status?.robloxStudio?.selectedModelName || 'Ninguna'} (${status?.robloxStudio?.selectedPartCount || 0} partes)`
-              : 'Abre Roblox Studio con el Plugin Forge v2.2'}
+              : 'Abre Roblox Studio con el Plugin Forge v2.3.0'}
           </p>
         </div>
 

@@ -1,6 +1,6 @@
-# Arquitectura de Software Modular — Forge AI Studio v2.2 (AI-First & Data Integrity Edition)
+# Arquitectura de Software Modular — NIGHTMARE FORGE / Forge AI Studio v2.3.0
 
-Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**, diseñada con **paridad modular 1:1 entre Python (`backend/engines/`) y TypeScript (`src/server/engines/`)**, un **Podador de Contexto por Dominio (`ContextPruner`)** y un **Núcleo Unificado de Integridad de Datos, Hashing Canónico SHA-256 y Triangulación Geométrica 3D Real**.
+Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.3.0**, diseñada con **paridad modular entre Python (`backend/engines/`) y TypeScript (`src/server/engines/`)**, generación 3D procedural local (Motor 1), puente local autenticado (`forge-bridge/`) y un **Núcleo Unificado de Integridad de Datos, Hashing Canónico SHA-256 y Persistencia Atómica**.
 
 > **Índice Rápido para IA**: Consulta `AI_ARCHITECTURE_MAP.md` en la raíz del proyecto o invoca `GET /api/v1/ai-manifest` para obtener los contratos e invariantes de cada módulo en formato compacto.
 
@@ -12,9 +12,10 @@ Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**,
 - **Problema que resuelve**: Enviar todo el archivo `project_context.md` en cada llamada al modelo desperdicia tokens y añade ruido de dominios no relacionados.
 - **Solución**: Divide `project_context.md` en bloques semánticos (`ROJO_MAPPING`, `LUAU_STANDARDS`, `MAID_PATTERN`, `UI_FORGEGUI`, `EXISTING_MODULES`) e inyecta únicamente los bloques requeridos por el dominio activo (`3d`, `pbr`, `luau`, `ui`, `world`, `agents`), manteniendo siempre la lista verificada de módulos Rojo en disco.
 
-### 1.1 `3D Generation Engine` (`backend/engines/generation_3d_engine.py` | `src/server/engines/generation3DEngine.ts`)
+### 1.1 `3D Generation Engine` (`backend/engines/generation_3d_engine.py` | `src/server/engines/generation3DEngine.ts` & `procedural3DGenerator.ts`)
 - **Responsabilidades**:
-  - Extracción de buffers geométricos reales (`vertices`, `normals`, `uvs`, `faces` 0-based) desde `.OBJ` o sub-mallas procesadas.
+  - **Motor 1 Procedural Parametrizado** (sin claves de API): soporta 8 categorías y el generador de árboles 3D con 14 parámetros + mallas cerradas LOD 0/1/2.
+  - Extracción de buffers geométricos reales (`vertices`, `normals`, `uvs`, `faces` 0-based) desde `.OBJ` o sub-mallas procesadas, exponiendo `forgeAssetId` y manteniendo `robloxAssetId: null` hasta publicación cloud.
   - División inteligente de mallas densas (`>9,000` vértices o `>9,500` caras) en sub-partes contiguas sin descartar ningún triángulo (`splitOversizedMeshPartInput`).
   - Generación de módulos Luau `--!strict` que reconstruyen `MeshPart` reales mediante `AssetService:CreateEditableMesh()`, verifican `#editableMesh:GetTriangles()`, liberan memoria con `editableMesh:Destroy()` y nunca asignan la propiedad de solo lectura `MeshPart.MeshId` ni inventan hashes `rbxassetid://`.
 
@@ -22,8 +23,8 @@ Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**,
 - **Responsabilidades**:
   - Serializador y parser bidireccional `.RBXMX` (`buildRbxmxFromPartsServer`, `parseRbxmxFromPartsServer`) que preserva matrices de rotación `CFrame` 3×3, colores, materiales, los 4 canales de `SurfaceAppearance` y los buffers `ForgeMeshGeometryJSON`.
   - Exportador `.glTF 2.0` con buffers binarios embebidos y exportador Wavefront `.OBJ` + `.MTL`.
-  - Publicación de los 4 canales PBR (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`) hacia Roblox Open Cloud con **polling asíncrono de `Operation`** (`/assets/v1/operations/{id}`).
-  - Biblioteca persistente (`assets_library.json`) con **snapshots completos de hasta 25 versiones** (`parts`, `luau_code`, `pbr_profile`, `collision_fidelity`, `description`).
+  - Publicación de los 4 canales PBR (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`) hacia Roblox Open Cloud con **polling asíncrono de `Operation`** (`/assets/v1/operations/{id}`), diferenciando estado `local_saved` vs `cloud_published`.
+  - Biblioteca persistente (`assets_library.json`) con **escritura atómica (`fsync` + `rename`)** y **snapshots completos de hasta 25 versiones**.
 
 ### 1.3 `Luau Engine` (`backend/engines/luau_engine.py` | `src/server/engines/luauEngine.ts`)
 - **Responsabilidades**:
@@ -72,8 +73,9 @@ Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**,
   - Calcula la normal del polígono 3D mediante la fórmula de Newell.
   - Proyecta los vértices sobre el plano dominante 2D (XY, XZ o YZ).
   - Recorta "orejas" (ears) convexas verificando que ningún otro vértice se encuentre dentro del triángulo.
-  - Comprueba en 3D que cada triángulo generado posea una superficie no nula (`computeTriangleArea3D > 1e-7`).
+  - Utiliza tolerancias adaptativas relativas al tamaño del bounding-box del polígono para soportar modelos miniatura y estructuras de gran escala sin falsos degenerados.
 - **Validación de Límites y Restricciones de Roblox Studio**:
+  - Valida tanto `meshData` como `baseMeshData` (rechazando modelos vacíos de 0 piezas como no válidos).
   - Limites de escala por pieza (`0.001` a `2048` studs).
   - Verificación de coordenadas finitas (rechazo de `NaN` o `Infinity` en posición, rotación o `rotationMatrix`).
   - Detección de caras malformadas (`< 3` vértices), índices fuera de límites de vértices y caras degeneradas/colineales.
@@ -106,10 +108,12 @@ Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.2**,
 
 ---
 
-## 4. Plugin de Roblox Studio v2.2 (`backend/roblox_plugin/ForgeAIStudioPlugin.server.luau`)
+## 4. Plugin de Roblox Studio v2.3.0 & Persistencia del Puente (`backend/roblox_plugin/` + `forge-bridge/`)
 
 - **Reconstrucción `EditableMesh` en Modo Edición (`RunService:IsEdit()`)**:
-  - Listener automático `Workspace.ChildAdded` que reconstruye cualquier modelo `.rbxmx` importado en Modo Edición sin necesidad de pulsar Play.
-  - Botón explícito **"Reconstruir Mallas EditableMesh (.RBXMX / Workspace)"** con validación de triángulos y liberación de memoria `editableMesh:Destroy()`.
+  - Listener automático `Workspace.ChildAdded` y ejecución vía puente (`studio.reconstruct_model`, `studio.apply_modifications`) con validación de recibo y hash calculado directamente sobre las piezas reconstruidas (`collectSerializedReconstructedState`).
+  - Confirmación obligatoria en el DockWidget antes de ejecutar eliminaciones destructivas de piezas.
+- **Persistencia Atómica de Tareas (`forge-bridge/src/taskStateStore.ts`)**:
+  - Escritura segura mediante `.tmp` + `rename` + detección de corrupción (`.corrupt.<ts>.bak`), preservando confirmaciones pendientes (`awaiting_studio_confirmation`) a través de reinicios completos del proceso Node.js.
 - **Push Incremental Studio → Forge (`/api/v1/assets/studio-push`)**:
   - Sincroniza la selección actual de Roblox Studio de vuelta hacia Forge AI Studio conservando buffers geométricos y mapas PBR.

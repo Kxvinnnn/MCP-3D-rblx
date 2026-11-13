@@ -47,9 +47,121 @@ export function verifyTokenConstantTime(provided: string, expected: string): boo
 export function isPlaceholderSecretInProduction(secret: string): boolean {
   if (!secret) return false;
   return (
-    process.env.NODE_ENV === 'production' &&
+    (process.env.NODE_ENV === 'production' || process.env.FORGE_ENV === 'production') &&
     KNOWN_PLACEHOLDER_SECRETS.has(secret.trim().toLowerCase())
   );
+}
+
+export interface MainServerSecurityValidationResult {
+  valid: boolean;
+  isProduction: boolean;
+  effectiveSecurityToken: string;
+  effectiveBridgeSecret: string;
+  usedEphemeralDevToken: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+/**
+ * Valida los secretos del servidor principal al arranque.
+ * - En producción exige `FORGE_SECURITY_TOKEN` y `FORGE_BRIDGE_SHARED_SECRET` válidos (no vacíos, no de ejemplo, >= 16 chars).
+ * - En desarrollo/pruebas nunca desactiva la autenticación en silencio: si no se configuró un token explícito,
+ *   genera un token efímero criptográfico por sesión y emite advertencia explícita.
+ */
+export function validateMainServerSecurityConfig(params?: {
+  securityToken?: string;
+  bridgeSharedSecret?: string;
+  nodeEnv?: string;
+  allowDevEphemeralToken?: boolean;
+}): MainServerSecurityValidationResult {
+  const envName = String(
+    params?.nodeEnv ?? process.env.FORGE_ENV ?? process.env.NODE_ENV ?? 'development'
+  ).toLowerCase();
+  const isProduction = envName === 'production';
+
+  const rawSecurityToken = String(
+    params?.securityToken !== undefined
+      ? params.securityToken
+      : process.env.FORGE_SECURITY_TOKEN || process.env.FORGE_LOCAL_TOKEN || ''
+  ).trim();
+
+  const rawBridgeSecret = String(
+    params?.bridgeSharedSecret !== undefined
+      ? params.bridgeSharedSecret
+      : process.env.FORGE_BRIDGE_SHARED_SECRET || rawSecurityToken
+  ).trim();
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (isProduction) {
+    if (!rawSecurityToken) {
+      errors.push(
+        'Seguridad Producción: Falta FORGE_SECURITY_TOKEN (o FORGE_LOCAL_TOKEN). El servidor no puede arrancar sin autenticación.'
+      );
+    } else if (KNOWN_PLACEHOLDER_SECRETS.has(rawSecurityToken.toLowerCase())) {
+      errors.push(
+        'Seguridad Producción: No se permite arrancar en producción con un token de ejemplo por defecto.'
+      );
+    } else if (rawSecurityToken.length < 16) {
+      errors.push(
+        'Seguridad Producción: FORGE_SECURITY_TOKEN debe tener al menos 16 caracteres.'
+      );
+    }
+
+    if (!rawBridgeSecret) {
+      errors.push(
+        'Seguridad Producción: Falta FORGE_BRIDGE_SHARED_SECRET para autenticar sesiones del Local Bridge.'
+      );
+    } else if (KNOWN_PLACEHOLDER_SECRETS.has(rawBridgeSecret.toLowerCase())) {
+      errors.push(
+        'Seguridad Producción: No se permite usar FORGE_BRIDGE_SHARED_SECRET de ejemplo en producción.'
+      );
+    } else if (rawBridgeSecret.length < 16) {
+      errors.push(
+        'Seguridad Producción: FORGE_BRIDGE_SHARED_SECRET debe tener al menos 16 caracteres.'
+      );
+    }
+
+    return {
+      valid: errors.length === 0,
+      isProduction: true,
+      effectiveSecurityToken: rawSecurityToken,
+      effectiveBridgeSecret: rawBridgeSecret,
+      usedEphemeralDevToken: false,
+      errors,
+      warnings,
+    };
+  }
+
+  let effectiveSecurityToken = rawSecurityToken;
+  let usedEphemeralDevToken = false;
+  if (!effectiveSecurityToken) {
+    if (params?.allowDevEphemeralToken === false) {
+      errors.push('Falta FORGE_SECURITY_TOKEN y allowDevEphemeralToken está deshabilitado.');
+    } else {
+      effectiveSecurityToken = `forge_dev_ephem_${crypto.randomBytes(24).toString('hex')}`;
+      usedEphemeralDevToken = true;
+      warnings.push(
+        'Modo Desarrollo: FORGE_SECURITY_TOKEN no configurado; se activó protección obligatoria con token efímero de sesión (la escritura sin token sigue bloqueada con 401).'
+      );
+    }
+  }
+
+  let effectiveBridgeSecret = rawBridgeSecret;
+  if (!effectiveBridgeSecret && effectiveSecurityToken) {
+    effectiveBridgeSecret = effectiveSecurityToken;
+  }
+
+  return {
+    valid: errors.length === 0,
+    isProduction: false,
+    effectiveSecurityToken,
+    effectiveBridgeSecret,
+    usedEphemeralDevToken,
+    errors,
+    warnings,
+  };
 }
 
 export interface RemoteBridgeTaskResult {
@@ -88,7 +200,7 @@ export class CloudBridgeCoordinator {
   private sessionId: string | null = null;
   private sessionToken: string | null = null;
   private sessionExpiresAt = 0;
-  private bridgeVersion = '1.0.0';
+  private bridgeVersion = '2.3.0';
   private lastHeartbeatAt: number = 0;
   private reconnectRequested = false;
 
@@ -106,10 +218,22 @@ export class CloudBridgeCoordinator {
   private readonly recentErrors: Array<{ taskId: string; operation: string; error: string; timestamp: string }> = [];
   private readonly usedHandshakeNonces: Map<string, number> = new Map();
   private readonly maxClockSkewMs = 5 * 60 * 1000;
+  private overrideSharedSecret: string | null = null;
+
+  constructor(options?: { sharedSecret?: string }) {
+    if (options?.sharedSecret) {
+      this.overrideSharedSecret = options.sharedSecret.trim();
+    }
+  }
+
+  public setSharedSecret(secret: string): void {
+    this.overrideSharedSecret = String(secret || '').trim();
+  }
 
   private getSharedSecret(): string {
     const raw = String(
-      process.env.FORGE_BRIDGE_SHARED_SECRET ||
+      this.overrideSharedSecret ||
+        process.env.FORGE_BRIDGE_SHARED_SECRET ||
         process.env.FORGE_SECURITY_TOKEN ||
         process.env.FORGE_LOCAL_TOKEN ||
         ''
@@ -177,46 +301,51 @@ export class CloudBridgeCoordinator {
       return { accepted: false, error: err?.message || 'Configuración de secreto inválida.' };
     }
 
-    const bridgeVersion = String(body.bridgeVersion || '1.0.0').trim();
+    if (!secret) {
+      return {
+        accepted: false,
+        error: 'Seguridad: Secreto compartido del bridge (FORGE_BRIDGE_SHARED_SECRET) no configurado.',
+      };
+    }
+
+    const bridgeVersion = String(body.bridgeVersion || '2.3.0').trim();
     const protocolVersion = String(body.protocolVersion || '1.0').trim();
     const timestamp = String(body.timestamp || '').trim();
     const nonce = String(body.nonce || '').trim();
     const signature = String(body.signature || '').trim();
 
-    if (secret) {
-      const parsedTime = Date.parse(timestamp);
-      const nowMs = Date.now();
-      if (!timestamp || Number.isNaN(parsedTime) || Math.abs(nowMs - parsedTime) > this.maxClockSkewMs) {
-        return {
-          accepted: false,
-          error: 'Timestamp de handshake ausente, inválido o fuera de la ventana de tolerancia.',
-        };
-      }
-      if (!nonce || nonce.length < 8) {
-        return {
-          accepted: false,
-          error: 'Nonce criptográfico obligatorio ausente o inválido en handshake.',
-        };
-      }
-      this.pruneExpiredNonces(nowMs);
-      if (this.usedHandshakeNonces.has(nonce)) {
-        return {
-          accepted: false,
-          error: 'Nonce de handshake repetido (ataque de repetición bloqueado).',
-        };
-      }
-
-      const canonical = `${bridgeVersion}|${protocolVersion}|${timestamp}|${nonce}`;
-      const expectedSig = crypto.createHmac('sha256', secret).update(canonical, 'utf-8').digest('hex');
-      const sigMatches = verifyTokenConstantTime(signature, expectedSig);
-      if (!sigMatches) {
-        return { accepted: false, error: 'Firma HMAC-SHA256 inválida o ausente en handshake.' };
-      }
-      if (providedHeaderToken && !verifyTokenConstantTime(providedHeaderToken, secret)) {
-        return { accepted: false, error: 'Cabecera X-Forge-Token inválida en handshake.' };
-      }
-      this.usedHandshakeNonces.set(nonce, nowMs);
+    const parsedTime = Date.parse(timestamp);
+    const nowMs = Date.now();
+    if (!timestamp || Number.isNaN(parsedTime) || Math.abs(nowMs - parsedTime) > this.maxClockSkewMs) {
+      return {
+        accepted: false,
+        error: 'Timestamp de handshake ausente, inválido o fuera de la ventana de tolerancia.',
+      };
     }
+    if (!nonce || nonce.length < 8) {
+      return {
+        accepted: false,
+        error: 'Nonce criptográfico obligatorio ausente o inválido en handshake.',
+      };
+    }
+    this.pruneExpiredNonces(nowMs);
+    if (this.usedHandshakeNonces.has(nonce)) {
+      return {
+        accepted: false,
+        error: 'Nonce de handshake repetido (ataque de repetición bloqueado).',
+      };
+    }
+
+    const canonical = `${bridgeVersion}|${protocolVersion}|${timestamp}|${nonce}`;
+    const expectedSig = crypto.createHmac('sha256', secret).update(canonical, 'utf-8').digest('hex');
+    const sigMatches = verifyTokenConstantTime(signature, expectedSig);
+    if (!sigMatches) {
+      return { accepted: false, error: 'Firma HMAC-SHA256 inválida o ausente en handshake.' };
+    }
+    if (providedHeaderToken && !verifyTokenConstantTime(providedHeaderToken, secret)) {
+      return { accepted: false, error: 'Cabecera X-Forge-Token inválida en handshake.' };
+    }
+    this.usedHandshakeNonces.set(nonce, nowMs);
 
     this.sessionId = `sess_${crypto.randomBytes(12).toString('hex')}`;
     this.sessionToken = crypto.randomBytes(24).toString('hex');
@@ -280,7 +409,7 @@ export class CloudBridgeCoordinator {
     ) {
       return true;
     }
-    return !secret && Boolean(this.sessionId);
+    return false;
   }
 
   public handleHeartbeat(body: Record<string, any>): {
@@ -334,20 +463,21 @@ export class CloudBridgeCoordinator {
     } catch {
       return false;
     }
-    if (secret) {
-      const expectedSig = this.computeTaskResultSignature(result);
-      if (!result.signature || !verifyTokenConstantTime(String(result.signature), expectedSig)) {
-        this.recentErrors.push({
-          taskId: String(result.taskId || 'unknown'),
-          operation: 'signature_verification',
-          error: 'Firma HMAC-SHA256 inválida o ausente en task-result.',
-          timestamp: new Date().toISOString(),
-        });
-        if (this.recentErrors.length > 30) {
-          this.recentErrors.shift();
-        }
-        return false;
+    if (!secret) {
+      return false;
+    }
+    const expectedSig = this.computeTaskResultSignature(result);
+    if (!result.signature || !verifyTokenConstantTime(String(result.signature), expectedSig)) {
+      this.recentErrors.push({
+        taskId: String(result.taskId || 'unknown'),
+        operation: 'signature_verification',
+        error: 'Firma HMAC-SHA256 inválida o ausente en task-result.',
+        timestamp: new Date().toISOString(),
+      });
+      if (this.recentErrors.length > 30) {
+        this.recentErrors.shift();
       }
+      return false;
     }
 
     const item = this.pendingQueue.get(result.taskId);

@@ -77,7 +77,7 @@ export const StudioSyncView: React.FC = () => {
 
   const pluginInstallScript = `-- Coloca este script en Roblox Studio (ServerScriptService o Plugin):
 local HttpService = game:GetService("HttpService")
-print("[Forge Plugin v2.2.0] Conectando con Forge Local Bridge en 127.0.0.1:48720...")
+print("[Forge Plugin v2.3.0] Conectando con Forge Local Bridge en 127.0.0.1:48720...")
 `;
 
   const handleCopyPluginCode = () => {
@@ -132,8 +132,8 @@ print("[Forge Plugin v2.2.0] Conectando con Forge Local Bridge en 127.0.0.1:4872
               </div>
               <p className="text-[11px] text-slate-400">
                 {isConnected
-                  ? `Plugin v${bridgeStatus.robloxStudio.pluginVersion || '2.2.0'} activo en ${bridgeStatus.robloxStudio.placeName || 'Lugar actual'}`
-                  : 'Abre Roblox Studio con el plugin Forge AI v2.2.0 activo.'}
+                  ? `Plugin v${bridgeStatus.robloxStudio.pluginVersion || '2.3.0'} activo en ${bridgeStatus.robloxStudio.placeName || 'Lugar actual'}`
+                  : 'Abre Roblox Studio con el plugin Forge AI v2.3.0 activo.'}
               </p>
             </div>
           </div>
@@ -155,7 +155,7 @@ print("[Forge Plugin v2.2.0] Conectando con Forge Local Bridge en 127.0.0.1:4872
               <p className="text-[11px] text-slate-400">
                 {isBridgeActive
                   ? 'Protocolo seguro HMAC activo sin exponer datos de red.'
-                  : 'Inicia el puente local en Windows con npm run bridge.'}
+                  : 'Inicia el puente local en Windows con npm --prefix forge-bridge start o start-bridge.ps1.'}
               </p>
             </div>
           </div>

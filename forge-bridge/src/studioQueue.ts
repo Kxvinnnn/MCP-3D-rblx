@@ -350,7 +350,7 @@ export class TaskExecutionCoordinator {
     this.studioState = {
       connected: true,
       lastSeenAt: new Date().toISOString(),
-      pluginVersion: payload.pluginVersion ?? this.studioState.pluginVersion ?? '2.2.0',
+      pluginVersion: payload.pluginVersion ?? this.studioState.pluginVersion ?? '2.3.0',
       placeName: payload.placeName ?? this.studioState.placeName ?? 'Roblox Studio',
       selectedModelName:
         payload.selectedModelName !== undefined
