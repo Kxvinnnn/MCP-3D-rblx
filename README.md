@@ -1,6 +1,14 @@
-# Forge AI Studio v2.0 — Suite de Creación 3D, Materiales PBR, Luau `--!strict`, ForgeGUI y Sincronización Rojo para Roblox Studio
+# NIGHTMARE FORGE / Forge AI Studio v2.3.0 — Suite de Creación 3D (`EditableMesh`), Materiales PBR, Luau `--!strict`, ForgeGUI, Local Bridge y Sincronización Rojo para Roblox Studio
 
-**Forge AI Studio v2.0** es una plataforma integral de ingeniería asistida por IA para **Roblox Studio**, diseñada bajo una arquitectura modular de **7 motores independientes** que comparten un backend central en **Python (FastAPI)** con el SDK oficial **`google-genai`**, un visor y editor **3D WebGL (Three.js)** que emula `ViewportFrame` + `WorldModel`, sincronización automática en disco con **Rojo 7.x** verificada mediante hashes **SHA-256**, y un **Plugin nativo para Roblox Studio (`ForgeAIStudioPlugin.server.luau`)**.
+**NIGHTMARE FORGE / Forge AI Studio v2.3.0** es una plataforma integral para crear, importar, editar, validar, exportar y sincronizar modelos y assets 3D destinados a **Roblox Studio**, diseñada bajo una arquitectura modular verificada con:
+- **3 Motores de Generación 3D integrados**:
+  1. **Motor 1 — Generación Procedural Parametrizada con Semillas Reproducibles (`seed`)**: funciona **100% en local/offline sin requerir claves de API de pago**, soportando las **8 categorías oficiales** (`Props`, `Trees & Vegetation`, `Rocks & Nature`, `Buildings & Structures`, `Furniture & Interior`, `Scene Elements`, `Stylized Assets`, `Ambient & Decoration`) y el **Generador Parametrizado de Árboles 3D** (`seed`, `height`, `trunkThickness`, `branchCount`, `canopyShape`, `leafDistribution`, `trunkMaterial`, `leafMaterial`, `variation`).
+  2. **Motor 2 — Generación Asistida por IA + Procedural**: utiliza el proveedor IA configurado (`GEMINI_API_KEY` opcional) con fallback automático al Motor 1 Procedural si no hay clave configurada.
+  3. **Motor 3 — Importación, Conversión y Ensamblaje (`.OBJ`, `.GLTF`, `.GLB`, `.RBXMX`)**: normaliza escala en Studs, asienta el pivote inferior en `Y = 0` y divide automáticamente mallas mayores de 9,500 triángulos sin pérdida de caras.
+- **Sincronización Bidireccional Real con Roblox Studio**:
+  `Forge AI Studio -> Forge Cloud Coordinator -> Forge Local Bridge (127.0.0.1:48720) -> ForgeAIStudioPlugin.server.luau -> Roblox Studio Workspace` + `Rojo 7.x (:34872)`.
+- **Seguridad Endurecida e Integridad SHA-256**:
+  Autenticación de sesiones y resultados con **HMAC-SHA256**, protección anti-replay por `nonce` y ventana temporal, comparación de tokens en tiempo constante (`timingSafeEqual` / `hmac.compare_digest`), persistencia atómica de tareas (`TaskStateStore`) y verificación de recibos geométricos `EditableMesh`.
 
 ---
 
@@ -8,48 +16,43 @@
 
 1. [Arquitectura General del Sistema](#1-arquitectura-general-del-sistema)
 2. [Estructura Completa del Repositorio](#2-estructura-completa-del-repositorio)
-3. [Los 7 Motores Modulares Independientes](#3-los-7-motores-modulares-independientes)
-4. [Capacidades de Creación 3D, Materiales PBR y Visor WebGL](#4-capacidades-de-creaci%C3%B3n-3d-materiales-pbr-y-visor-webgl)
-5. [Hoja de Ruta (P0 a P3) — Estado de Implementación](#5-hoja-de-ruta-p0-a-p3--estado-de-implementaci%C3%B3n)
-6. [Estándares Obligatorios de Código Luau](#6-est%C3%A1ndares-obligatorios-de-c%C3%B3digo-luau)
-7. [Seguridad, Sandboxing y Auditoría Física de Módulos](#7-seguridad-sandboxing-y-auditor%C3%ADa-f%C3%ADsica-de-m%C3%B3dulos)
-8. [Guía de Instalación y Ejecución Local](#8-gu%C3%ADa-de-instalaci%C3%B3n-y-ejecuci%C3%B3n-local)
-9. [Documentación Adicional en `/docs`](#9-documentaci%C3%B3n-adicional-en-docs)
+3. [Los Motores Modulares y Sistema Multiagente](#3-los-motores-modulares-y-sistema-multiagente)
+4. [Capacidades 3D, Semillas Reproducibles y Árboles 3D](#4-capacidades-3d-semillas-reproducibles-y-árboles-3d)
+5. [Seguridad, Persistencia Atómica e Integridad SHA-256](#5-seguridad-persistencia-atómica-e-integridad-sha-256)
+6. [Guía Paso a Paso de Instalación y Ejecución desde Cero en Windows](#6-guía-paso-a-paso-de-instalación-y-ejecución-desde-cero-en-windows)
+7. [Caso de Uso Completo: Generar y Sincronizar un Árbol 3D en Roblox Studio](#7-caso-de-uso-completo-generar-y-sincronizar-un-árbol-3d-en-roblox-studio)
+8. [Pruebas Automatizadas y CI/CD](#8-pruebas-automatizadas-y-cicd)
+9. [Documentación Adicional en `/docs`](#9-documentación-adicional-en-docs)
 
 ---
 
 ## 1. Arquitectura General del Sistema
 
-El proyecto separa estrictamente la interfaz de usuario, el orquestador central y los motores de dominio para evitar monolitos difíciles de mantener:
-
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                              FORGE AI STUDIO                                 │
+│                   NIGHTMARE FORGE / FORGE AI STUDIO v2.3.0                   │
 │        Interfaz Principal · React 19 + TypeScript + Three.js WebGL           │
-│   (3D Studio & Editor · Motores & Agentes · Luau Engine · UI Engine · Rojo)  │
+│   (Asistente 3D · Visor/Editor 3D · Materiales PBR · Motores · Biblioteca)   │
 └──────────────────────────────────────┬───────────────────────────────────────┘
                                        │ REST JSON + Server-Sent Events (SSE)
                                        ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                     BACKEND CENTRAL · FastAPI (main.py)                      │
-│               & Unified Gateway Bridge (server.ts Puerto 3000/8000)          │
-│     Gestión de IA (google-genai), Seguridad, Proyectos, Tareas y Archivos    │
-└──┬───────────┬────────────┬──────────┬───────────┬───────────┬────────────┬──┘
-   │           │            │          │           │           │            │
-   ▼           ▼            ▼          ▼           ▼           ▼            ▼
-┌──────┐   ┌───────┐   ┌────────┐  ┌───────┐  ┌────────┐  ┌─────────┐  ┌─────────┐
-│  3D  │   │ Asset │   │  Luau  │  │  UI   │  │ World  │  │  Rojo   │  │ Agents  │
-│Gen.  │   │Engine │   │ Engine │  │Engine │  │ Engine │  │ Bridge  │  │ Engine  │
-│Engine│   │ (PBR) │   │Strict  │  │Screen │  │Scenes  │  │Sync SHA │  │  (P3)   │
-└──────┘   └───────┘   └────────┘  └───────┘  └────────┘  └────┬────┘  └─────────┘
-                                                               │
-                                         Escritura Segura (.luau / default.project.json)
-                                                               │
-                                                               ▼
+│              GATEWAY UNIFICADO (server.ts :3000) & FASTAPI (:8000)           │
+│   CloudBridgeCoordinator · Procedural3DGenerator · WorldAndModelEditorEngine │
+└──┬───────────────────────────┬───────────────────────────┬───────────────────┘
+   │                           │                           │
+   │ Envelopes firmados HMAC   │ Escritura segura en disco │ API REST / SSE
+   ▼                           ▼                           ▼
+┌──────────────────────────┐ ┌───────────────────────────┐ ┌───────────────────┐
+│   FORGE LOCAL BRIDGE     │ │   PROYECTO ROJO 7.x       │ │ BIBLIOTECA ASSETS │
+│   (127.0.0.1:48720)      │ │   (rojo serve :34872)     │ │ assets_library    │
+│ Cola Atómica + Anti-Dup  │ │   default.project.json    │ │ Historial SHA-256 │
+└────────────┬─────────────┘ └─────────────┬─────────────┘ └───────────────────┘
+             │ Polling HTTP loopback       │ Sincronización Rojo
+             ▼                             ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                    ROBLOX STUDIO PLUGIN v2.0 + ROJO 7.x                      │
-│           ForgeAIStudioPlugin.server.luau (HttpService + Selection)          │
-│       Inserción 3D en Workspace, Edición, Optimización y Sincronización      │
+│                  ROBLOX STUDIO PLUGIN v2.3.0 + WORKSPACE                     │
+│   ForgeAIStudioPlugin.server.luau (AssetService:CreateEditableMesh + Recibo) │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -59,166 +62,213 @@ El proyecto separa estrictamente la interfaz de usuario, el orquestador central 
 
 ```text
 /
-├── README.md                                  # Documentación principal del repositorio
+├── README.md                                  # Guía principal e instalación paso a paso en Windows
+├── AI_ARCHITECTURE_MAP.md                     # Mapa arquitectónico y contratos de módulos
 ├── docs/
-│   ├── ARCHITECTURE.md                        # Diseño profundo de los 7 motores y seguridad
-│   ├── API_REFERENCE.md                       # Especificación completa de endpoints REST y SSE
-│   └── ROBLOX_PLUGIN_AND_ROJO_GUIDE.md        # Manual de Rojo 7.x y del Plugin de Roblox Studio
-├── backend/                                   # Backend Principal en Python 3.11+ (FastAPI)
-│   ├── main.py                                # Orquestador central FastAPI (Puerto 8000)
-│   ├── requirements.txt                       # Dependencias Python (fastapi, google-genai, pydantic)
-│   ├── .env.example                           # Plantilla de variables de entorno del backend
-│   ├── project_context.md                     # Contexto local inyectado y auditado antes de cada prompt
-│   ├── engines/                               # Los 7 Motores Modulares en Python
-│   │   ├── __init__.py
-│   │   ├── generation_3d_engine.py            # Motor de Generación 3D (Texto e Imagen a Modelo 3D)
-│   │   ├── asset_engine.py                    # Motor de Assets (PBR, LOD, Colisiones y Biblioteca)
-│   │   ├── luau_engine.py                     # Motor Luau (--!strict, task.*, Maid lifecycle)
-│   │   ├── ui_engine.py                       # Motor UI (ScreenGui, ViewportFrame, TweenService)
-│   │   ├── world_engine.py                    # Motor de Escenarios (Lighting, Atmosphere, Biomas)
-│   │   ├── rojo_bridge.py                     # Puente Rojo (Sandboxing, SHA-256, Auditoría de Módulos)
-│   │   └── agents_engine.py                   # Motor de Agentes Especializados (P3 End-to-End)
+│   ├── ARCHITECTURE.md                        # Diseño de motores, seguridad y sincronización
+│   ├── API_REFERENCE.md                       # Especificación de endpoints REST y SSE
+│   ├── ROBLOX_PLUGIN_AND_ROJO_GUIDE.md        # Manual de Rojo 7.x, Local Bridge y Plugin v2.3.0
+│   └── STABILIZATION_DATA_INTEGRITY.md        # Especificación de integridad SHA-256 y recibos
+├── forge-bridge/                              # Servicio Local en Windows (127.0.0.1:48720)
+│   ├── src/
+│   │   ├── server.ts                          # Servidor HTTP loopback exclusivo 127.0.0.1
+│   │   ├── cloudClient.ts                     # Cliente saliente autenticado con HMAC-SHA256
+│   │   ├── protocol.ts                        # Contrato de mensajes v1.0 y firmas HMAC
+│   │   ├── studioQueue.ts                     # Coordinador de tareas, confirmación destructiva y recibos
+│   │   ├── taskStateStore.ts                  # Almacén persistente atómico (.tmp + rename)
+│   │   ├── rojoHandler.ts                     # Gestor local de archivos Rojo y manifiesto SHA-256
+│   │   └── security.ts                        # Sandboxing de rutas relativas y sanitización Luau
+│   └── tests/bridge.test.ts                   # Suite de pruebas de integración y persistencia del Bridge
+├── backend/                                   # Backend Python 3.11+ (FastAPI Puerto 8000)
+│   ├── main.py                                # Orquestador central FastAPI v2.3.0
+│   ├── engines/                               # Motores modulares en Python
 │   └── roblox_plugin/
-│       └── ForgeAIStudioPlugin.server.luau    # Plugin nativo v2.0 para Roblox Studio
-├── rojo_workspace/                            # Proyecto Rojo 7.x preconfigurado y sincronizado en disco
-│   ├── default.project.json                   # Mapeo oficial al DataModel de Roblox Studio (Puerto 34872)
-│   ├── assets_library.json                    # Base de datos persistente de modelos y escenarios 3D
-│   └── src/
-│       ├── server/                            # -> ServerScriptService.Server (*.server.luau)
-│       ├── client/                            # -> StarterPlayer.StarterPlayerScripts.Client (*.client.luau)
-│       │   └── UI/                            # -> StarterGui.Interface (*.luau)
-│       └── shared/                            # -> ReplicatedStorage.Shared (*.luau)
-│           ├── Assets3D/                      # Constructores Luau de modelos 3D generados
-│           ├── Utils/Maid.luau                # Módulo Maid verificado físicamente en disco
-│           ├── Network/RemoteProvider.luau    # Proveedor tipado de RemoteEvents / RemoteFunctions
-│           └── Types/GameTypes.luau           # Definiciones de tipos estáticos compartidos
-├── src/                                       # Interfaz Principal Web (React 19 + TypeScript + Three.js)
-│   ├── App.tsx                                # Navegación principal de 3 zonas
+│       └── ForgeAIStudioPlugin.server.luau    # Plugin nativo v2.3.0 para Roblox Studio
+├── src/                                       # Frontend React 19 + TypeScript + Motores del Gateway
+│   ├── server/engines/
+│   │   ├── procedural3DGenerator.ts           # Motor 1: Generación Procedural Parametrizada (8 categorías + Árboles 3D)
+│   │   ├── bridgeCoordinatorEngine.ts         # Coordinador Cloud con HMAC, anti-replay y sesiones
+│   │   ├── generation3DEngine.ts              # Motor de geometría EditableMesh y exportadores
+│   │   └── worldAndModelEditorEngine.ts       # Compilador .luau, .rbxmx, .gltf, .obj/.mtl y biblioteca
 │   ├── utils/
-│   │   └── roblox3DEngine.ts                  # Motor WebGL: constructor 3D, PBR procedural, 2D->Heightmap, .OBJ exporter
-│   ├── server/engines/                        # Espejo TypeScript de los motores para el Gateway Unificado
-│   │   ├── architectureManifest.ts            # Definición de motores, hoja de ruta P0-P3 y agentes
-│   │   └── worldAndModelEditorEngine.ts       # Compilador Luau para el Editor 3D y World Engine
-│   └── components/
-│       ├── Forge3DStudio.tsx                  # Estudio 3D + Editor Interactivo de Piezas (P2) + PBR + Biblioteca
-│       ├── RobloxWorldViewport3D.tsx          # Visor 3D WebGL real (Three.js Timer, PCFShadowMap, GLB/OBJ/FBX, LOD)
-│       ├── ModularArchitectureAndAgents.tsx   # Panel de 7 Motores, Agentes Especializados (P3), World Engine y Roadmap
-│       ├── ScriptGenerator.tsx                # Interfaz del Luau Engine (Server / Client / Module)
-│       ├── UIGenerator.tsx                    # Interfaz del UI Engine (ForgeGUI)
-│       ├── RobloxCanvasPreview.tsx            # Previsualizador dual: ScreenGui 2D + ViewportFrame 3D (WorldModel)
-│       ├── RojoWorkflowGuide.tsx              # Configurador de ruta Rojo, manifiesto SHA-256 y panel de seguridad
-│       ├── ContextEditor.tsx                  # Editor de project_context.md con auditoría física de módulos
-│       ├── BackendExplorer.tsx                # Explorador y descargador de todos los archivos del backend y docs
-│       └── FloatingTerminalLog.tsx            # Consola flotante en tiempo real para streams SSE y escritura Rojo
-└── server.ts                                  # Gateway Unificado y Proxy hacia FastAPI
+│   │   ├── canonicalHash.ts                   # Hash SHA-256 canónico por pieza y por categoría
+│   │   ├── incrementalSync.ts                 # Motor de diferencias incrementales por partId estable
+│   │   ├── receiptVerification.ts             # Evaluador de recibos de reconstrucción del Plugin
+│   │   └── robloxGeometryValidator.ts         # Validador geométrico EditableMesh con tolerancia relativa
+│   └── components/                            # Vistas del Estudio 3D, Asistente, Visor WebGL y Rojo
+├── tests/                                     # Suites de pruebas automatizadas (Node.js + Python E2E)
+└── server.ts                                  # Servidor Principal Express + Vite Middleware (:3000)
 ```
 
 ---
 
-## 3. Los 7 Motores Modulares Independientes
+## 3. Los Motores Modulares y Sistema Multiagente
 
-| Motor | Módulo Python | Módulo TypeScript | Responsabilidad Principal |
+| Módulo | Implementación TS | Implementación Python | Responsabilidad Principal |
 | :--- | :--- | :--- | :--- |
-| **1. 3D Generation Engine** | `backend/engines/generation_3d_engine.py` | `src/utils/roblox3DEngine.ts` | Generación de modelos 3D compuestos en **Studs** desde texto o imagen de referencia y conversión de imágenes 2D a mallas de relieve 3D. |
-| **2. Asset Engine** | `backend/engines/asset_engine.py` | `src/server/engines/worldAndModelEditorEngine.ts` | Síntesis de texturas PBR (`SurfaceAppearance`), optimización de polígonos (LOD 100%/75%/50%/25%), `CollisionFidelity`, importación `.GLB/.GLTF/.OBJ/.FBX` y biblioteca `assets_library.json`. |
-| **3. Luau Engine** | `backend/engines/luau_engine.py` | `server.ts` (`/api/v1/generate-script*`) | Generación de arquitectura y scripts `Server`, `Client` y `Module` con `--!strict`, librería `task.*` y patrón `Maid`. |
-| **4. UI Engine** | `backend/engines/ui_engine.py` | `server.ts` (`/api/v1/generate-ui*`) | Creación de interfaces `ScreenGui` responsive (`UDim2.fromScale`), `ViewportFrame` 3D y animaciones con `TweenService`. |
-| **5. World Engine** | `backend/engines/world_engine.py` | `src/server/engines/worldAndModelEditorEngine.ts` | Generación de escenarios completos, configuración de biomas lumínicos (`Lighting` + `Atmosphere`) y anclajes espaciales en `Workspace`. |
-| **6. Rojo Bridge** | `backend/engines/rojo_bridge.py` | `server.ts` (`/api/v1/rojo/*`) | Sandboxing de rutas (`resolve_safe_project_path`), detección/creación de `default.project.json`, manifiesto de sincronización **SHA-256** y auditoría de módulos en disco. |
-| **7. Specialized Agents (P3)** | `backend/engines/agents_engine.py` | `src/server/engines/architectureManifest.ts` | Orquestador autónomo de **7 agentes especializados** que construye y sincroniza un sistema completo (Modelo 3D + PBR + Escenario + Script Server + HUD + Rojo) en un solo flujo. |
+| **1. Procedural & 3D Generation Engine** | `src/server/engines/procedural3DGenerator.ts` & `generation3DEngine.ts` | `backend/engines/generation_3d_engine.py` | Generación 3D procedural determinista por semilla (`seed`), generador parametrizado de árboles 3D, Text-to-3D e Image-to-3D. |
+| **2. Asset & PBR Engine** | `src/server/engines/assetEngine.ts` | `backend/engines/asset_engine.py` | Mapas PBR (`SurfaceAppearance`), niveles LOD, `CollisionFidelity`, exportación `.luau/.rbxmx/.gltf/.obj` y biblioteca persistente. |
+| **3. Luau Engine (`--!strict`)** | `src/server/engines/luauEngine.ts` | `backend/engines/luau_engine.py` | Generación de scripts `Server`, `Client` y `Module` con `--!strict`, `task.*` y patrón `Maid`. |
+| **4. UI Engine (`ForgeGUI`)** | `src/server/engines/uiEngine.ts` | `backend/engines/ui_engine.py` | Interfaces `ScreenGui` responsive (`UDim2.fromScale`) y `ViewportFrame` 3D. |
+| **5. World Engine** | `src/server/engines/worldEngine.ts` | `backend/engines/world_engine.py` | Escenarios completos, iluminación ambiental (`Lighting` + `Atmosphere`) y ensamblaje espacial. |
+| **6. Rojo & Local Bridge Engine** | `src/server/engines/bridgeCoordinatorEngine.ts` & `forge-bridge/` | `backend/engines/rojo_bridge.py` | Comunicación segura Cloud-Local-Plugin, sandboxing de rutas, manifiesto SHA-256 y cola persistente atómica. |
+| **7. Sistema Multiagente (8 Roles)** | `src/server/engines/architectureManifest.ts` | `backend/engines/agents_engine.py` | Coordina Agente Coordinador/Diseño, Agente 3D, Agente de Materiales, Agente de Escenario, Agente de Código, Agente de Interfaz, Agente de Roblox y Agente de Validación/Recuperación. |
 
 ---
 
-## 4. Capacidades de Creación 3D, Materiales PBR y Visor WebGL
+## 4. Capacidades 3D, Semillas Reproducibles y Árboles 3D
 
-1. **Texto a Modelo 3D (`Text-to-3D`)**: Descompone cualquier prompt en 6 a 14 sub-partes articuladas (`Block`, `Cylinder`, `Ball`, `Wedge`, `CornerWedge`) con proporciones reales en **Studs** y pivote apoyado en `Y = 0`.
-2. **Imagen de Referencia a Modelo 3D (`Image-to-3D IA`)**: Analiza bocetos o *concept art* mediante Gemini Vision para reconstruir volúmenes, colores y materiales Roblox.
-3. **Conversión 2D a Geometría 3D en Relieve (`Heightmap Extrusion`)**: Transforma los píxeles de una imagen 2D en una malla 3D desplazada según su luminancia con resolución configurable (`24x24` a `80x80`) y altura en Studs.
-4. **Importador `.GLB`, `.GLTF`, `.OBJ` y `.FBX`**: Carga modelos externos directamente en el visor WebGL, normaliza su escala a Studs y audita si superan el límite estricto de Roblox Studio (**10,000 triángulos por `MeshPart`**).
-5. **Editor Interactivo de Modelos 3D (P2)**: Permite añadir o eliminar sub-partes y modificar en tiempo real su primitiva, material Roblox, tamaño `(X, Y, Z)` en Studs, posición `(X, Y, Z)`, color y valores PBR (`Roughness` / `Metalness`), recompilando al instante el módulo Luau `--!strict`.
-6. **Generador Procedural de Mapas PBR (`SurfaceAppearance`)**: Sintetiza en canvas mapas descargables de **Albedo (`ColorMap.png`)**, **Mapa de Normales (`NormalMap.png`)** y **Rugosidad (`RoughnessMap.png`)**.
-7. **Simulador de LOD y `CollisionFidelity`**: Dock inferior colapsable en el visor 3D para probar niveles de detalle (**100%, 75%, 50%, 25%**), visualizar envolventes de colisión (`Hull`, `Box`, `PreciseConvexDecomposition`, `Default`), activar vista explotada (*Exploded View*) y comparar tamaño con un maniquí **Roblox R15 (5.5 Studs)**.
-8. **Exportación Directa a `.OBJ` y `.luau`**: Descarga cualquier modelo generado o editado como malla Wavefront `.OBJ` lista para el *Asset Manager* de Roblox Studio o como script constructor `.luau`.
-
----
-
-## 5. Hoja de Ruta (P0 a P3) — Estado de Implementación
-
-| Prioridad | Desarrollo | Resultado | Motor Responsable | Estado |
-| :---: | :--- | :--- | :--- | :---: |
-| **P0** | Unificar los backends | Arquitectura estable (FastAPI + Gateway Unificado) | Central + Rojo Bridge | ✅ Completado |
-| **P0** | Corregir seguridad y rutas | Escritura segura (Anti-Path Traversal + `X-Forge-Token`) | Rojo Bridge | ✅ Completado |
-| **P0** | Integración real con Rojo | Detección de `default.project.json`, puerto `34872` y manifiesto SHA-256 | Rojo Bridge | ✅ Completado |
-| **P1** | Motor de generación 3D | Crear modelos 3D desde texto e imagen en Studs | 3D Generation Engine | ✅ Completado |
-| **P1** | Importador GLB/GLTF/OBJ/FBX | Llevar modelos externos a Roblox validando `<10k` triángulos | Asset Engine | ✅ Completado |
-| **P1** | Generador de texturas PBR | Mapas Albedo, Normal y Roughness para `SurfaceAppearance` | Asset Engine | ✅ Completado |
-| **P1** | Visor 3D real WebGL | Inspeccionar modelos con `THREE.Timer`, `PCFShadowMap` y raycasting | 3D Generation Engine | ✅ Completado |
-| **P2** | Editor interactivo de modelos | Modificar sub-partes, tamaño, posición y materiales en vivo | Asset Engine | ✅ Completado |
-| **P2** | Generador de escenarios | Construir mapas con biomas de iluminación (`Lighting` + `Atmosphere`) | World Engine | ✅ Completado |
-| **P2** | Biblioteca de assets | Guardar, filtrar, editar y reutilizar creaciones (`assets_library.json`) | Asset Engine | ✅ Completado |
-| **P3** | Agentes especializados | Automatizar todo el flujo (Modelo 3D + PBR + Mundo + Script + UI + Rojo) | Specialized Agents Engine | ✅ Completado |
+1. **8 Categorías Oficiales de Assets 3D**:
+   - `Trees & Vegetation` (Árboles y vegetación)
+   - `Props` (Objetos y props)
+   - `Rocks & Nature` (Rocas y elementos naturales)
+   - `Buildings & Structures` (Edificios y estructuras)
+   - `Furniture & Interior` (Mobiliario e interiores)
+   - `Scene Elements` (Elementos de escenario)
+   - `Stylized Assets` (Modelos estilizados)
+   - `Ambient & Decoration` (Elementos ambientales y decorativos)
+2. **Generador Parametrizado de Árboles 3D (`generateParameterizedTree3DParts`)**:
+   - Parámetros: `seed`, `height` (4–45 studs), `trunkThickness` (0.4–6.0 studs), `branchCount` (1–12), `canopyShape` (`spherical`, `conical`, `layered`, `weeping`), `leafDistribution` (`balanced`, `dense`, `clustered`, `sparse`), `trunkMaterial`, `leafMaterial`, `variation`.
+   - Produce jerarquía completa (`Root/RootFlare`, `Root/MainTrunk`, `Root/Branches/Branch_1..N`, `Root/Canopy/CanopyCrown_Main`, `Root/Canopy/FoliageCluster_1..M`) asentada exactamente en `Y = 0`.
+3. **Determinismo por Semilla (`seed`)**:
+   - La misma semilla y los mismos parámetros producen siempre exactamente los mismos buffers de vértices, normales, UVs, caras y el mismo hash canónico SHA-256.
 
 ---
 
-## 6. Estándares Obligatorios de Código Luau
+## 5. Seguridad, Persistencia Atómica e Integridad SHA-256
 
-Todo script generado por cualquiera de los motores (`Luau Engine`, `UI Engine`, `3D Generation Engine`, `World Engine`, `Agents Engine`) cumple estas reglas innegociables:
-
-1. **Tipado Estático Estricto**: Todo archivo comienza obligatoriamente con `--!strict`.
-2. **Librería `task` Moderna**: Uso exclusivo de `task.wait`, `task.spawn`, `task.delay` y `task.defer` (prohibido `wait()`, `spawn()`, `delay()`).
-3. **Gestión de Memoria con `Maid`**: Toda conexión `RBXScriptConnection`, tween o instancia dinámica se registra en un objeto `Maid` para evitar fugas de memoria.
-4. **Obtención Explícita de Servicios**: Todos los servicios se declaran al inicio del archivo mediante `game:GetService("...")`.
-5. **Escalado Responsive en UI**: Los contenedores principales usan `UDim2.fromScale` y `AnchorPoint = Vector2.new(0.5, 0.5)`, estilizados con `UICorner`, `UIStroke`, `UIGradient` y `UIAspectRatioConstraint`.
+- **Sin credenciales por defecto en producción**: Los archivos `.env.example` y el plugin de Roblox Studio no activan tokens de ejemplo usables por defecto; `server.ts`, `backend/main.py` y `CloudBridgeCoordinator` rechazan tokens placeholder conocidos si `NODE_ENV=production`.
+- **Comparación en tiempo constante**: Validación de tokens y firmas mediante `crypto.timingSafeEqual` (Node.js) y `hmac.compare_digest` (Python).
+- **Verificación HMAC-SHA256 + Anti-Replay**: Handshake con validación de ventana temporal (`5 min`), bloqueo de `nonce` repetido y verificación obligatoria de firma HMAC tanto en el despacho de tareas como en `task-result`.
+- **Persistencia Atómica (`TaskStateStore`)**: Escritura mediante archivo temporal (`.tmp`) + `fs.renameSync` con preservación de archivos corruptos (`.corrupt.<timestamp>.bak`) sin pérdida silenciosa de confirmaciones destructivas pendientes.
 
 ---
 
-## 7. Seguridad, Sandboxing y Auditoría Física de Módulos
+## 6. Guía Paso a Paso de Instalación y Ejecución desde Cero en Windows
 
-- **Anti-Path Traversal (`resolve_safe_project_path`)**: Ningún endpoint puede escribir fuera del directorio configurado en `ROJO_PROJECT_PATH` ni en carpetas no autorizadas.
-- **Sanitización de Código Luau**: Se bloquea cualquier script que contenga funciones inseguras como `loadstring()`, `getfenv()` o `setfenv()`.
-- **Protección de Endpoints Mutables (`X-Forge-Token`)**: Soporte de token local configurable para autorizar escrituras en disco.
-- **Rate Limiting y Límite de Payload**: Límite de ventana deslizante por IP y tope de 15 MB para imágenes de referencia.
-- **Auditoría Física de Módulos (`/api/v1/context/audit`)**: Antes de permitir que Gemini haga `require()` de módulos listados en `project_context.md` (`Maid.luau`, `RemoteProvider.luau`, `GameTypes.luau`), el backend comprueba su existencia física en disco dentro de `rojo_workspace/src/shared/` e incluye un instalador de 1 clic (`/api/v1/context/bootstrap-modules`).
+### 6.1 Requisitos Previos en Windows
+1. **Node.js 20 LTS o superior** (`node -v` y `npm -v`).
+2. **Python 3.11 o superior** (`python --version`).
+3. **Git para Windows** (`git --version`).
+4. **Rojo 7.x CLI** (`rojo --version`, opcional pero recomendado para sincronización de scripts en disco).
+5. **Roblox Studio** con **HttpService habilitado** (`Game Settings -> Security -> Allow HTTP Requests = ON`) y beta de **`EditableMesh` / `EditableImage`** activa si tu versión de Studio lo requiere.
 
----
+### 6.2 Paso 1: Abrir el Repositorio e Instalar Dependencias en Windows PowerShell
 
-## 8. Guía de Instalación y Ejecución Local
+```powershell
+cd C:\Users\dadada\Desktop\MCP-3D-rblx
 
-### A. Ejecutar el Backend Python (FastAPI) en el Puerto 8000
-
-```bash
-cd backend
-python -m venv venv
-# En Linux/macOS:
-source venv/bin/activate
-# En Windows:
-.\venv\Scripts\activate
-
-pip install -r requirements.txt
-cp .env.example .env
-# Edita .env y coloca tu GEMINI_API_KEY y ROJO_PROJECT_PATH
-
-uvicorn main:app --reload --host 127.0.0.1 --port 8000
-```
-
-### B. Ejecutar la Interfaz Web y el Gateway Unificado en el Puerto 3000
-
-```bash
+# 1. Instalar dependencias del proyecto principal (Frontend + Gateway)
 npm install
-npm run dev
+
+# 2. Instalar dependencias y compilar el Forge Local Bridge
+npm --prefix forge-bridge install
+npm --prefix forge-bridge run build
 ```
 
-### C. Iniciar el Servidor de Sincronización Rojo 7.x
+### 6.3 Paso 2: Generar un Secreto Aleatorio Seguro y Configurar `.env`
 
-```bash
-cd rojo_workspace
-rojo serve default.project.json --port 34872
+En PowerShell, genera un token criptográfico aleatorio de 32 bytes:
+
+```powershell
+$SECRET = node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+Write-Host "Tu token seguro generado es: $SECRET"
+```
+
+1. Copia `.env.example` a `.env` en la raíz (`C:\Users\dadada\Desktop\MCP-3D-rblx\.env`):
+   ```ini
+   FORGE_SECURITY_TOKEN="<PEGA_AQUI_TU_SECRET>"
+   FORGE_LOCAL_TOKEN="<PEGA_AQUI_TU_SECRET>"
+   FORGE_BRIDGE_SHARED_SECRET="<PEGA_AQUI_TU_SECRET>"
+   ROJO_PROJECT_PATH="./rojo_workspace"
+   # Opcional: Solo si deseas usar además el Motor 2 asistido por IA en la nube
+   GEMINI_API_KEY=""
+   ```
+2. Copia `forge-bridge\.env.example` a `forge-bridge\.env`:
+   ```ini
+   FORGE_CLOUD_URL="http://127.0.0.1:3000"
+   FORGE_BRIDGE_SHARED_SECRET="<PEGA_AQUI_TU_SECRET>"
+   FORGE_PLUGIN_LOCAL_TOKEN="<PEGA_AQUI_TU_SECRET>"
+   ROJO_PROJECT_PATH="../rojo_workspace"
+   BRIDGE_HOST="127.0.0.1"
+   BRIDGE_PORT="48720"
+   ROJO_PORT="34872"
+   ```
+
+### 6.4 Paso 3: Instalar el Plugin en Roblox Studio
+
+Copia el archivo del plugin a la carpeta oficial de plugins de Roblox Studio en Windows:
+
+```powershell
+Copy-Item -Path ".\backend\roblox_plugin\ForgeAIStudioPlugin.server.luau" `
+          -Destination "$env:LOCALAPPDATA\Roblox\Plugins\ForgeAIStudioPlugin.server.luau" -Force
+```
+
+### 6.5 Paso 4: Iniciar los Servicios en Windows
+
+Abre **2 terminales PowerShell** en `C:\Users\dadada\Desktop\MCP-3D-rblx`:
+
+- **Terminal 1 — Plataforma Principal (Puerto 3000)**:
+  ```powershell
+  npm run dev
+  ```
+  Abre `http://localhost:3000` en tu navegador.
+
+- **Terminal 2 — Forge Local Bridge (Puerto Loopback 127.0.0.1:48720)**:
+  ```powershell
+  npm --prefix forge-bridge start
+  ```
+  *(Opcional: Si también deseas ejecutar `rojo serve`, abre una tercera terminal en `rojo_workspace` y ejecuta `rojo serve default.project.json --port 34872`).*
+
+### 6.6 Paso 5: Conectar Roblox Studio
+1. Abre un lugar (`Place`) en **Roblox Studio** y habilita **Allow HTTP Requests** en `Home -> Game Settings -> Security`.
+2. En la pestaña **Plugins**, abre **Forge AI v2.3.0 -> Forge AI Suite**.
+3. En el campo **Security Token** del widget del plugin, pega el mismo `$SECRET` que configuraste en `.env` y pulsa **Guardar / Conectar**.
+4. Verifica en la barra superior de `http://localhost:3000` que tanto **Local Bridge** como **Roblox Studio** aparecen en estado **Conectado**.
+
+---
+
+## 7. Caso de Uso Completo: Generar y Sincronizar un Árbol 3D en Roblox Studio
+
+1. En `http://localhost:3000`, entra en **Crear Nuevo Objeto 3D**.
+2. En el **Paso 1**, selecciona la categoría **Árboles y Vegetación (`Trees & Vegetation`)** y pulsa **Continuar**.
+3. En el **Paso 2**, escribe la descripción o elige una plantilla y pulsa **Continuar**.
+4. En el **Paso 3**:
+   - Selecciona **Motor 1: Procedural Parametrizado (100% Local / Sin API de pago)**.
+   - Define la **Semilla Reproducible** (ej. `oak-tree-2026`).
+   - Ajusta **Altura total** (`14`–`24` studs), **Grosor de tronco** (`1.6` studs), **Número de ramas** (`5`), **Forma de copa** (`Esférica`, `Cónica`, `Escalonada` o `Colgante`) y **Distribución de hojas** (`Densa`).
+   - Pulsa **Generar Modelo 3D Procedural**.
+5. En el **Paso 5**, inspecciona el árbol 3D en el visor interactivo, ábrelo en el **Editor 3D** para validar geometría o exportar `.luau`, `.rbxmx`, `.gltf` o `.obj`, o pulsa directamente **Enviar a Roblox Studio** para que el plugin reconstruya todas sus `MeshPart` (`EditableMesh`) en `Workspace` y devuelva el recibo SHA-256 verificado.
+
+---
+
+## 8. Pruebas Automatizadas y CI/CD
+
+Ejecuta toda la batería de verificación desde la raíz del proyecto:
+
+```powershell
+# 1. Verificación estática de tipos TypeScript (Frontend + Gateway + Bridge)
+npm run lint
+npm --prefix forge-bridge run typecheck
+
+# 2. Suite de pruebas unitarias, seguridad, generador de árboles 3D y Bridge
+npm test
+npm --prefix forge-bridge test
+
+# 3. Suite Python E2E de sincronización bidireccional y paridad de hashes SHA-256
+python tests/test_e2e_bidirectional_sync.py
+
+# 4. Compilación de producción (Frontend + Bridge)
+npm --prefix forge-bridge run build
+npm run build
 ```
 
 ---
 
 ## 9. Documentación Adicional en `/docs`
 
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md): Detalle profundo del diseño de los 7 motores, flujo multi-agente P3 y modelo de seguridad.
-- [`docs/API_REFERENCE.md`](./docs/API_REFERENCE.md): Documentación completa de todos los endpoints HTTP REST y SSE con esquemas JSON.
-- [`docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md`](./docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md): Guía de instalación y uso del Plugin de Roblox Studio v2.0 y configuración de Rojo.
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md): Diseño de los motores, flujo multiagente, seguridad HMAC y persistencia atómica.
+- [`docs/API_REFERENCE.md`](./docs/API_REFERENCE.md): Especificación de endpoints HTTP REST y SSE.
+- [`docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md`](./docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md): Guía de instalación y uso del Plugin de Roblox Studio v2.3.0, `Forge Local Bridge` y Rojo 7.x.
+- [`docs/STABILIZATION_DATA_INTEGRITY.md`](./docs/STABILIZATION_DATA_INTEGRITY.md): Detalles de integridad SHA-256 canónica, triangulación relativa y recibos de verificación.
+

@@ -16,6 +16,7 @@ Capabilities:
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -85,11 +86,29 @@ TIER_MODELS: Dict[str, str] = {
     "fast": os.getenv("MODEL_TIER_FAST", "gemini-2.5-flash"),
 }
 
+KNOWN_PLACEHOLDER_SECRETS = {
+    "forge-local-dev-token-2026",
+    "reemplazar-con-secreto-aleatorio-de-32-bytes",
+    "tu-secreto-compartido-de-32-bytes-aqui",
+    "changeme",
+    "default",
+}
+
+_configured_token = (
+    os.getenv("FORGE_SECURITY_TOKEN") or os.getenv("FORGE_LOCAL_TOKEN") or ""
+).strip()
+if (
+    os.getenv("NODE_ENV") == "production" or os.getenv("FORGE_ENV") == "production"
+) and _configured_token.lower() in KNOWN_PLACEHOLDER_SECRETS:
+    raise RuntimeError(
+        "Security Violation: Refusing to start in production with a default example security token."
+    )
+
 # Mutable runtime configuration for Rojo workspace path
 RUNTIME_CONFIG: Dict[str, Any] = {
     "rojo_project_path": os.getenv("ROJO_PROJECT_PATH", "./rojo_workspace"),
     "project_context_file": os.getenv("PROJECT_CONTEXT_FILE", "project_context.md"),
-    "forge_local_token": os.getenv("FORGE_LOCAL_TOKEN", ""),
+    "forge_local_token": _configured_token,
     "rate_limit_per_minute": int(os.getenv("RATE_LIMIT_PER_MINUTE", "45")),
 }
 
@@ -114,7 +133,7 @@ autonomous_orchestrator = AutonomousMultiAgentOrchestrator(gemini_client, TIER_M
 
 app = FastAPI(
     title="Forge AI - Unified Roblox 3D, Luau & Rojo Backend",
-    version="2.1.0",
+    version="2.3.0",
     description="Unified FastAPI backend for React Studio Workbench and Roblox Studio Plugin."
 )
 
@@ -131,16 +150,22 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Forge-Token", "User-Agent"],
+    allow_headers=["Content-Type", "X-Forge-Token", "Authorization", "X-Bridge-Session", "User-Agent"],
 )
 
 # Sliding-window rate limiter store
 _rate_limit_Buckets: Dict[str, List[float]] = defaultdict(list)
 
 
+def verify_token_constant_time(provided: str, expected: str) -> bool:
+    if not provided or not expected:
+        return False
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
 def verify_security_token(provided_token: Optional[str] = None) -> None:
-    configured_token = RUNTIME_CONFIG.get("forge_local_token", "")
-    if configured_token and (provided_token or "") != configured_token:
+    configured_token = str(RUNTIME_CONFIG.get("forge_local_token", "") or "").strip()
+    if configured_token and not verify_token_constant_time(str(provided_token or ""), configured_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-Forge-Token header.",
@@ -172,10 +197,10 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
     _rate_limit_Buckets[client_ip] = bucket
 
     # 3. Optional local security token validation on mutating requests
-    configured_token = RUNTIME_CONFIG["forge_local_token"]
+    configured_token = str(RUNTIME_CONFIG.get("forge_local_token", "") or "").strip()
     if configured_token and request.method in ("POST", "DELETE", "PUT"):
         provided_token = request.headers.get("X-Forge-Token", "")
-        if provided_token != configured_token:
+        if not verify_token_constant_time(provided_token, configured_token):
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"error": "Invalid or missing X-Forge-Token header."}

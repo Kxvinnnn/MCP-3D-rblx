@@ -30,7 +30,15 @@ import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
 import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
 
 type WizardStep = 1 | 2 | 3 | 4 | 5;
-type ObjectCategory = 'Props' | 'Weapons' | 'Vehicles' | 'Structures' | 'SciFi' | 'Terrain';
+type ObjectCategory =
+  | 'Props'
+  | 'Trees & Vegetation'
+  | 'Rocks & Nature'
+  | 'Buildings & Structures'
+  | 'Furniture & Interior'
+  | 'Scene Elements'
+  | 'Stylized Assets'
+  | 'Ambient & Decoration';
 type InputMethod = 'text' | 'image' | 'file3d' | 'heightmap';
 type DetailLevel = 'low' | 'medium' | 'high' | 'ultra';
 
@@ -45,12 +53,24 @@ export const CreateWizardView: React.FC = () => {
   } = useForge();
 
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
-  const [category, setCategory] = useState<ObjectCategory>('Props');
+  const [category, setCategory] = useState<ObjectCategory>('Trees & Vegetation');
   const [inputMethod, setInputMethod] = useState<InputMethod>('text');
+  const [generationMode, setGenerationMode] = useState<'procedural' | 'ai'>('procedural');
+  const [seed, setSeed] = useState<string>('forge-tree-2026');
+
+  // Tree Procedural Parameters (Fase 7)
+  const [treeHeight, setTreeHeight] = useState<number>(14);
+  const [trunkThickness, setTrunkThickness] = useState<number>(1.6);
+  const [branchCount, setBranchCount] = useState<number>(4);
+  const [canopyShape, setCanopyShape] = useState<'spherical' | 'conical' | 'layered' | 'weeping'>('spherical');
+  const [leafDistribution, setLeafDistribution] = useState<'dense' | 'balanced' | 'sparse' | 'clustered'>('balanced');
+  const [trunkMaterial, setTrunkMaterial] = useState<string>('Wood');
+  const [leafMaterial, setLeafMaterial] = useState<string>('Grass');
+  const [treeVariation, setTreeVariation] = useState<number>(0.25);
 
   // Input states
   const [prompt, setPrompt] = useState<string>(
-    'Cofre del tesoro medieval de roble oscuro con herrajes dorados cincelados, cerradura mágica luminosa y gemas incrustadas.'
+    'Árbol roble ancestral para Roblox con tronco robusto texturizado, raíces expuestas en Y=0 y copa frondosa.'
   );
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [heightmapDepth, setHeightmapDepth] = useState<number>(3.5);
@@ -75,37 +95,47 @@ export const CreateWizardView: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Category presets suggestions
+  // Category presets suggestions across all 8 official categories
   const categorySuggestions: Record<ObjectCategory, string[]> = {
     Props: [
       'Cofre del tesoro medieval con cerradura mágica brillante',
-      'Poción de alquimia con frasco de cristal y líquido esmeralda brillante',
-      'Antorcha de mazmorra con soporte de hierro forjado y llama animada',
+      'Barril reforzado con aros de hierro forjado y madera envejecida',
+      'Cristal de energía en contenedor de titanio con emisores neón',
     ],
-    Weapons: [
-      'Espada de plasma cibernética con hoja energética cian y mango de carbono',
-      'Arco élfico de madera ancestral con runas talladas luminosas',
-      'Cañón bláster sci-fi pesado con disipadores de calor naranjas',
+    'Trees & Vegetation': [
+      'Árbol roble ancestral con tronco nudoso y copa esférica frondosa',
+      'Pino alpino alto con copa cónica escalonada y corteza rugosa',
+      'Sauce llorón místico con ramas colgantes y follaje denso',
     ],
-    Vehicles: [
-      'Deslizador aerodeslizador futurista con propulsores gemelos y cabina acristalada',
-      'Tanque blindado táctico con torreta giratoria y orugas de alta resistencia',
-      'Dron de exploración espacial con paneles solares y sensor frontal',
+    'Rocks & Nature': [
+      'Formación rocosa basáltica facetada con cristales incrustados',
+      'Peñasco de granito musgoso asentado para terreno natural',
+      'Acantilado modular de piedra caliza estratificada',
     ],
-    Structures: [
-      'Torre de vigilancia hexagonal con balcón de francotirador y base blindada',
-      'Puerta de templo milenario con columnas monolíticas y relieves místicos',
-      'Refugio modular de supervivencia con esclusa de aire y antena parabólica',
+    'Buildings & Structures': [
+      'Torre de vigilancia medieval con pilares de piedra y tejado a cuatro aguas',
+      'Pabellón modular con columnas clásicas y base de hormigón',
+      'Puerta fortificada con arco superior y contrafuertes laterales',
     ],
-    SciFi: [
-      'Núcleo de energía de antimateria con anillos de contención en rotación',
-      'Terminal de computadora holográfica con teclado flotante y pedestal metálico',
-      'Cámara de criogenización con vidrio esmerilado y tubos de refrigerante',
+    'Furniture & Interior': [
+      'Mesa de banquete de roble macizo con soportes metálicos',
+      'Trono tallado con respaldo alto y reposabrazos ornamentados',
+      'Estantería de alquimia con compartimentos modulares',
     ],
-    Terrain: [
-      'Meseta rocosa alienígena con formaciones de cristal púrpura en la cúspide',
-      'Cráter de impacto meteórico con bordes escarpados y lava residual',
-      'Archipiélago de islas flotantes con cascada de agua suspendida',
+    'Scene Elements': [
+      'Portal dimensional sobre plataforma octogonal de piedra rúnica',
+      'Altar ceremonial con escalinata y núcleo energético central',
+      'Plataforma de teletransporte con anillos concéntricos',
+    ],
+    'Stylized Assets': [
+      'Tótem estilizado low-poly con grabados luminosos cian',
+      'Santuario de fantasía con geometría facetada limpia',
+      'Obelisco flotante estilizado con base escalonada',
+    ],
+    'Ambient & Decoration': [
+      'Farol de hierro forjado sobre pedestal con núcleo cálido',
+      'Brasero ceremonial encendido con base de bronce',
+      'Baliza ambiental futurista con corona emisiva',
     ],
   };
 
@@ -166,6 +196,22 @@ export const CreateWizardView: React.FC = () => {
           prompt: inputMethod === 'text' ? prompt : `Asset de tipo ${category} generado con referencia/relieve`,
           asset_type: 'Model3D',
           category,
+          generation_mode: generationMode,
+          seed: seed.trim() || 'forge-seed-2026',
+          tree_params:
+            category === 'Trees & Vegetation'
+              ? {
+                  seed: seed.trim() || 'forge-tree-2026',
+                  height: treeHeight,
+                  trunkThickness,
+                  branchCount,
+                  canopyShape,
+                  leafDistribution,
+                  trunkMaterial,
+                  leafMaterial,
+                  variation: treeVariation,
+                }
+              : undefined,
           target_poly_budget: polyBudgets[detailLevel].tris,
           collision_fidelity: collisionFidelity,
           save_to_rojo: saveToRojo,
@@ -338,28 +384,34 @@ export const CreateWizardView: React.FC = () => {
           </div>
         </div>
 
-        {/* STEP 1: Object Category Selection */}
+        {/* STEP 1: Object Category Selection (8 Official Categories) */}
         {currentStep === 1 && (
           <div className="space-y-6 pt-6">
             <p className="text-slate-300 text-sm">
-              Elige la categoría del objeto. Esto ayuda a optimizar las proporciones en Roblox y las piezas modulares.
+              Elige una de las 8 categorías oficiales de assets 3D para Roblox. Cada categoría ajusta la jerarquía EditableMesh, pivote en Y=0 y materiales PBR.
             </p>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {[
-                { id: 'Props', title: 'Arma / Utilería', desc: 'Cofres, pociones, llaves, antorchas', icon: Box },
-                { id: 'Weapons', title: 'Armas & Blásters', desc: 'Espadas, pistolas, arcos, bastones', icon: Sparkles },
-                { id: 'Vehicles', title: 'Vehículos', desc: 'Coches, deslizadores, naves, tanques', icon: ArrowRight },
-                { id: 'Structures', title: 'Arquitectura', desc: 'Torres, edificios, puertas, refugios', icon: Layers },
-                { id: 'SciFi', title: 'Sci-Fi / Gadgets', desc: 'Consolas, reactores, antenas, portales', icon: Sliders },
-                { id: 'Terrain', title: 'Terreno / Paisaje', desc: 'Rocas, islas flotantes, cráteres', icon: Mountain },
+                { id: 'Trees & Vegetation', title: 'Árboles y Vegetación', desc: 'Árboles parametrizados (tronco, ramas, copa, hojas)', icon: Mountain },
+                { id: 'Props', title: 'Objetos y Props', desc: 'Cofres, barriles, herramientas, contenedores', icon: Box },
+                { id: 'Rocks & Nature', title: 'Rocas y Naturaleza', desc: 'Peñascos facetados, cristales, formaciones', icon: Mountain },
+                { id: 'Buildings & Structures', title: 'Edificios y Estructuras', desc: 'Torres, columnas, arcos, tejados modulares', icon: Layers },
+                { id: 'Furniture & Interior', title: 'Mobiliario e Interiores', desc: 'Mesas, sillas, tronos, estanterías', icon: Box },
+                { id: 'Scene Elements', title: 'Elementos de Escenario', desc: 'Portales, altares, plataformas, puentes', icon: Sliders },
+                { id: 'Stylized Assets', title: 'Modelos Estilizados', desc: 'Tótems low-poly, santuarios, obeliscos', icon: Sparkles },
+                { id: 'Ambient & Decoration', title: 'Ambiental y Decoración', desc: 'Faroles, braseros, balizas luminosas', icon: Shield },
               ].map((item) => {
                 const isSelected = category === item.id;
                 const IconComponent = item.icon;
                 return (
                   <div
                     key={item.id}
-                    onClick={() => setCategory(item.id as ObjectCategory)}
+                    onClick={() => {
+                      setCategory(item.id as ObjectCategory);
+                      const firstSug = categorySuggestions[item.id as ObjectCategory]?.[0];
+                      if (firstSug) setPrompt(firstSug);
+                    }}
                     className={`p-4 rounded-xl border cursor-pointer transition flex flex-col justify-between ${
                       isSelected
                         ? 'bg-cyan-950/40 border-cyan-500 shadow-md shadow-cyan-950/50'
@@ -701,14 +753,156 @@ export const CreateWizardView: React.FC = () => {
               </div>
             </div>
 
+            {/* Engine Mode & Seed Reproducibility (Fase 6 y Fase 7) */}
+            <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-200 block mb-1.5">
+                    Motor de Síntesis 3D:
+                  </label>
+                  <select
+                    value={generationMode}
+                    onChange={(e) => setGenerationMode(e.target.value as 'procedural' | 'ai')}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-cyan-500"
+                  >
+                    <option value="procedural">
+                      Motor 1: Procedural Parametrizado (100% Local / Sin API de pago)
+                    </option>
+                    <option value="ai">
+                      Motor 2: Asistido por IA + Procedural (Usa API si está configurada)
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-200 block mb-1.5">
+                    Semilla Reproducible (Seed — misma semilla = mismo modelo):
+                  </label>
+                  <input
+                    type="text"
+                    value={seed}
+                    onChange={(e) => setSeed(e.target.value)}
+                    placeholder="ej. oak-tree-2026"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+              </div>
+
+              {/* Parámetros específicos de Árboles 3D (Fase 7) */}
+              {category === 'Trees & Vegetation' && (
+                <div className="pt-3 border-t border-slate-800/80 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-400">
+                      Parámetros del Generador de Árboles 3D (Fase 7)
+                    </span>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      Pivote Y=0 • EditableMesh
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Altura total: <span className="text-white font-mono">{treeHeight} studs</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={5}
+                        max={36}
+                        step={1}
+                        value={treeHeight}
+                        onChange={(e) => setTreeHeight(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Grosor de tronco: <span className="text-white font-mono">{trunkThickness} studs</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0.6}
+                        max={4.5}
+                        step={0.2}
+                        value={trunkThickness}
+                        onChange={(e) => setTrunkThickness(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Número de ramas: <span className="text-white font-mono">{branchCount}</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={10}
+                        step={1}
+                        value={branchCount}
+                        onChange={(e) => setBranchCount(parseInt(e.target.value, 10))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">Forma de copa:</label>
+                      <select
+                        value={canopyShape}
+                        onChange={(e) => setCanopyShape(e.target.value as any)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
+                      >
+                        <option value="spherical">Esférica (Roble / Clásico)</option>
+                        <option value="conical">Cónica (Pino / Abeto)</option>
+                        <option value="layered">Escalonada (Bonsái / Estilizado)</option>
+                        <option value="weeping">Colgante (Sauce llorón)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">Distribución de hojas:</label>
+                      <select
+                        value={leafDistribution}
+                        onChange={(e) => setLeafDistribution(e.target.value as any)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
+                      >
+                        <option value="balanced">Equilibrada</option>
+                        <option value="dense">Densa / Frondosa</option>
+                        <option value="clustered">En racimos</option>
+                        <option value="sparse">Ligera / Dispersa</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Variación orgánica: <span className="text-white font-mono">{Math.round(treeVariation * 100)}%</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={0.8}
+                        step={0.05}
+                        value={treeVariation}
+                        onChange={(e) => setTreeVariation(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 mt-1.5"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Save to Rojo Checkbox */}
             <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800 flex items-center justify-between">
               <div className="space-y-0.5">
                 <span className="text-xs font-medium text-white block">
-                  Guardar en disco de Rojo (src/shared/assets)
+                  Guardar en disco de Rojo (src/shared/Assets3D)
                 </span>
                 <span className="text-[11px] text-slate-400 block">
-                  Permite que Roblox Studio cargue el modelo de inmediato mediante Rojo.
+                  Permite que Roblox Studio cargue el modelo de inmediato mediante Rojo o el Local Bridge.
                 </span>
               </div>
               <input
@@ -736,7 +930,11 @@ export const CreateWizardView: React.FC = () => {
                 className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-bold flex items-center gap-2 cursor-pointer transition shadow-lg shadow-cyan-900/40"
               >
                 <Sparkles className="w-4 h-4 text-cyan-200" />
-                <span>Generar Modelo 3D con IA</span>
+                <span>
+                  {generationMode === 'procedural'
+                    ? 'Generar Modelo 3D Procedural'
+                    : 'Generar Modelo 3D con IA'}
+                </span>
               </button>
             </div>
           </div>

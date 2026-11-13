@@ -12,7 +12,15 @@ import {
   FORGE_ROADMAP_STATUS,
   SPECIALIZED_AGENTS,
 } from './src/server/engines/architectureManifest.ts';
-import { cloudBridgeCoordinator } from './src/server/engines/bridgeCoordinatorEngine.ts';
+import {
+  cloudBridgeCoordinator,
+  isPlaceholderSecretInProduction,
+  verifyTokenConstantTime,
+} from './src/server/engines/bridgeCoordinatorEngine.ts';
+import {
+  FORGE_ASSET_CATEGORIES,
+  synthesizeSeededProcedural3DAsset,
+} from './src/server/engines/procedural3DGenerator.ts';
 import {
   AI_MODULE_CONTRACTS,
   buildAiSelfUnderstandingManifest,
@@ -67,7 +75,10 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Forge-Token, User-Agent');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, X-Forge-Token, Authorization, X-Bridge-Session, User-Agent'
+  );
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
@@ -78,7 +89,14 @@ app.use((req, res, next) => {
 const rateBuckets = new Map<string, number[]>();
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MINUTE || 45);
 let runtimeRojoPath = path.resolve(process.cwd(), process.env.ROJO_PROJECT_PATH || './rojo_workspace');
-let runtimeSecurityToken = process.env.FORGE_LOCAL_TOKEN || '';
+let runtimeSecurityToken = String(
+  process.env.FORGE_SECURITY_TOKEN || process.env.FORGE_LOCAL_TOKEN || ''
+).trim();
+if (isPlaceholderSecretInProduction(runtimeSecurityToken)) {
+  throw new Error(
+    'Seguridad: No se permite arrancar en producción con el token de ejemplo por defecto.'
+  );
+}
 
 app.use('/api/v1', (req, res, next) => {
   const ip = req.ip || '127.0.0.1';
@@ -94,11 +112,18 @@ app.use('/api/v1', (req, res, next) => {
   rateBuckets.set(ip, recent);
 
   if (runtimeSecurityToken && ['POST', 'DELETE', 'PUT'].includes(req.method)) {
-    const provided = req.headers['x-forge-token'] || '';
-    if (provided !== runtimeSecurityToken) {
-      return res.status(401).json({
-        error: 'Acceso denegado: Cabecera X-Forge-Token inválida o ausente.',
-      });
+    const isBridgeEndpoint =
+      req.path === '/bridge/auth/handshake' ||
+      req.path === '/bridge/heartbeat' ||
+      req.path === '/bridge/task-ack' ||
+      req.path === '/bridge/task-result';
+    if (!isBridgeEndpoint) {
+      const provided = String(req.headers['x-forge-token'] || '');
+      if (!verifyTokenConstantTime(provided, runtimeSecurityToken)) {
+        return res.status(401).json({
+          error: 'Acceso denegado: Cabecera X-Forge-Token inválida o ausente.',
+        });
+      }
     }
   }
   next();
@@ -2864,18 +2889,22 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
 
   try {
-    if (!ai) {
-      sendSseEvent(res, {
-        type: 'error',
-        message: 'GEMINI_API_KEY no está configurada en las variables de entorno.',
-      });
-      return res.end();
-    }
-
     const {
       prompt,
+      name,
       asset_type = 'Model3D',
-      category = 'Sci-Fi',
+      category = 'Props',
+      generation_mode,
+      seed,
+      tree_params,
+      height,
+      trunkThickness,
+      branchCount,
+      leafDistribution,
+      canopyShape,
+      trunkMaterial,
+      leafMaterial,
+      variation,
       reference_image_base64,
       reference_image_mime_type = 'image/png',
       uploaded_mesh_obj,
@@ -2885,7 +2914,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       save_to_rojo = true,
       save_to_library = true,
       model_tier = 'fast',
-    } = req.body;
+    } = req.body || {};
 
     // Direct uploaded mesh extraction (OBJ / sub-mesh buffers) -> True MeshParts with valid MeshId
     if (
@@ -2958,6 +2987,78 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
         });
         return res.end();
       }
+    }
+
+    const effectiveTreeParams =
+      tree_params ||
+      (height !== undefined ||
+      trunkThickness !== undefined ||
+      branchCount !== undefined ||
+      leafDistribution !== undefined ||
+      canopyShape !== undefined
+        ? {
+            seed,
+            height,
+            trunkThickness,
+            branchCount,
+            leafDistribution,
+            canopyShape,
+            trunkMaterial,
+            leafMaterial,
+            variation,
+          }
+        : undefined);
+
+    const useProceduralEngine =
+      generation_mode === 'procedural' ||
+      seed !== undefined ||
+      effectiveTreeParams !== undefined ||
+      !ai;
+
+    if (useProceduralEngine) {
+      sendSseEvent(res, {
+        type: 'log',
+        level: 'info',
+        message: `Iniciando Motor Procedural Parametrizado [${category}] (Semilla: ${
+          seed ?? effectiveTreeParams?.seed ?? 'auto'
+        }, Fidelidad Colisión: ${collision_fidelity})`,
+      });
+
+      const procAsset = synthesizeSeededProcedural3DAsset({
+        prompt,
+        name,
+        category,
+        asset_type,
+        collision_fidelity,
+        target_poly_budget,
+        seed,
+        tree_params: effectiveTreeParams,
+      });
+
+      if (save_to_rojo) {
+        const savedPath = writeToRojoWorkspace(
+          procAsset.rojo_target_folder || 'src/shared/Assets3D',
+          procAsset.file_name,
+          procAsset.luau_code
+        );
+        procAsset.saved_path = savedPath;
+        sendSseEvent(res, {
+          type: 'rojo_write',
+          saved: true,
+          path: savedPath,
+          message: `ROJO 3D SYNC CONFIRMADO: Módulo MeshPart procedural escrito en ${savedPath} (${procAsset.parts.length} sub-mallas)`,
+        });
+      }
+
+      const savedProcAsset = save_to_library ? saveAssetToLibrary(procAsset) : procAsset;
+      sendSseEvent(res, {
+        type: 'done',
+        status: 'complete',
+        progress: 100,
+        result: savedProcAsset,
+        data: savedProcAsset,
+      });
+      return res.end();
     }
 
     const model = model_tier === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
@@ -3121,21 +3222,34 @@ ${localContext}
   }
 });
 
-// Non-streaming 3D endpoint for Roblox Studio Plugin HttpService
+// Non-streaming 3D endpoint for Roblox Studio Plugin HttpService & Procedural/Tree 3D API
 app.post('/api/v1/generate-3d', async (req, res) => {
   try {
     const {
       prompt,
+      name,
       asset_type = 'Model3D',
-      category = 'Sci-Fi Props',
+      category = 'Props',
+      generation_mode,
+      seed,
+      tree_params,
+      height,
+      trunkThickness,
+      branchCount,
+      leafDistribution,
+      canopyShape,
+      trunkMaterial,
+      leafMaterial,
+      variation,
       reference_image_base64,
       uploaded_mesh_obj,
       uploaded_sub_meshes,
       collision_fidelity = 'Hull',
       target_poly_budget = 2500,
       save_to_rojo = true,
+      save_to_library = true,
       model_tier = 'fast',
-    } = req.body;
+    } = req.body || {};
 
     if (
       (typeof uploaded_mesh_obj === 'string' && uploaded_mesh_obj.includes('v ')) ||
@@ -3165,7 +3279,7 @@ app.post('/api/v1/generate-3d', async (req, res) => {
         const savedPath = save_to_rojo
           ? writeToRojoWorkspace('src/shared/Assets3D', fileName, luauCode)
           : null;
-        const saved = saveAssetToLibrary({
+        const rawUploaded = {
           id: `asset-${Date.now()}`,
           name: safeUploadName,
           category,
@@ -3186,13 +3300,58 @@ app.post('/api/v1/generate-3d', async (req, res) => {
           parts: uploadedParts,
           luau_code: luauCode,
           saved_path: savedPath,
-        });
+        };
+        const saved = save_to_library ? saveAssetToLibrary(rawUploaded) : rawUploaded;
         return res.json(saved);
       }
     }
 
-    if (!ai) {
-      return res.status(503).json({ error: 'GEMINI_API_KEY no configurada.' });
+    const effectiveTreeParams =
+      tree_params ||
+      (height !== undefined ||
+      trunkThickness !== undefined ||
+      branchCount !== undefined ||
+      leafDistribution !== undefined ||
+      canopyShape !== undefined
+        ? {
+            seed,
+            height,
+            trunkThickness,
+            branchCount,
+            leafDistribution,
+            canopyShape,
+            trunkMaterial,
+            leafMaterial,
+            variation,
+          }
+        : undefined);
+
+    const useProceduralEngine =
+      generation_mode === 'procedural' ||
+      seed !== undefined ||
+      effectiveTreeParams !== undefined ||
+      !ai;
+
+    if (useProceduralEngine) {
+      const procAsset = synthesizeSeededProcedural3DAsset({
+        prompt,
+        name,
+        category,
+        asset_type,
+        collision_fidelity,
+        target_poly_budget,
+        seed,
+        tree_params: effectiveTreeParams,
+      });
+      if (save_to_rojo) {
+        procAsset.saved_path = writeToRojoWorkspace(
+          procAsset.rojo_target_folder || 'src/shared/Assets3D',
+          procAsset.file_name,
+          procAsset.luau_code
+        );
+      }
+      const saved = save_to_library ? saveAssetToLibrary(procAsset) : procAsset;
+      return res.json(saved);
     }
 
     const model = model_tier === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';

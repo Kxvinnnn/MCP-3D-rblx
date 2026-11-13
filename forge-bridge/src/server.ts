@@ -119,12 +119,22 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
   });
   rojoManager.startWatching();
 
+  const stateFilePath = options?.stateStore
+    ? options?.stateFilePath
+      ? path.resolve(options.stateFilePath)
+      : undefined
+    : path.resolve(
+        options?.stateFilePath ??
+          process.env.BRIDGE_STATE_FILE_PATH ??
+          path.join(rojoProjectPath, '.forge-bridge-state.json')
+      );
+
   const coordinator = new TaskExecutionCoordinator({
     maxConcurrency,
     defaultTimeoutMs: taskTimeoutMs,
     confirmationExpirationMs: options?.confirmationExpirationMs,
     stateStore: options?.stateStore,
-    stateFilePath: options?.stateFilePath,
+    stateFilePath,
   });
 
   const cloudClient = new ForgeCloudOutboundClient({
@@ -455,6 +465,7 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
     start,
     stop,
     getBindPort: () => bindPort,
+    getStateFilePath: () => stateFilePath ?? null,
   };
 }
 

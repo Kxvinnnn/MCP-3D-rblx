@@ -17,6 +17,21 @@
  *    support in-place `.RBXMX` reconstruction (`ReconstructInPlace`).
  */
 
+export {
+  FORGE_ASSET_CATEGORIES,
+  type ForgeAssetCategory,
+  type CanopyShapeType,
+  type LeafDistributionType,
+  type TreeProceduralParams,
+  type Procedural3DGenerationRequest,
+  hashSeedToUint32,
+  createSeededRng,
+  resolveCanonicalAssetCategory,
+  generateParameterizedTree3DParts,
+  generateSeededCategoryParts,
+  synthesizeSeededProcedural3DAsset,
+} from './procedural3DGenerator.ts';
+
 export interface SubMeshGeometryInput {
   vertices: Array<[number, number, number]>;
   normals: Array<[number, number, number]>;

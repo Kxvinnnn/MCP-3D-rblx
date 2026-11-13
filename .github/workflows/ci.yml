@@ -1,8 +1,8 @@
-name: Forge AI Studio CI
+name: NIGHTMARE FORGE / Forge AI Studio CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'stabilize/**' ]
   pull_request:
     branches: [ main, master ]
 
@@ -14,20 +14,47 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
 
-      - name: Install Dependencies
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Root Dependencies
         run: npm ci
 
-      - name: Typecheck
+      - name: Install Forge Local Bridge Dependencies
+        run: npm --prefix forge-bridge ci
+
+      - name: Root TypeScript Typecheck
         run: npm run lint
 
-      - name: Run Test Suite
-        run: npm test
+      - name: Forge Local Bridge Typecheck & Build
+        run: |
+          npm --prefix forge-bridge run typecheck
+          npm --prefix forge-bridge run build
 
-      - name: Build Application
+      - name: Run Node & Bridge Automated Test Suites
+        run: |
+          npm test
+          npm --prefix forge-bridge test
+
+      - name: Python Backend Syntax & E2E Bidirectional Sync Verification
+        run: |
+          python3 -m py_compile backend/main.py backend/engines/*.py
+          python3 tests/test_e2e_bidirectional_sync.py
+
+      - name: Verify Roblox Studio Luau Plugin Strict Header & Operations
+        run: |
+          head -n 1 backend/roblox_plugin/ForgeAIStudioPlugin.server.luau | grep -q "^--!strict"
+          grep -q "studio.reconstruct_model" backend/roblox_plugin/ForgeAIStudioPlugin.server.luau
+          grep -q "studio.apply_modifications" backend/roblox_plugin/ForgeAIStudioPlugin.server.luau
+
+      - name: Build Production Frontend Bundle
         run: npm run build
+

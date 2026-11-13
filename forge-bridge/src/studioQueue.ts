@@ -13,7 +13,6 @@
  *    tardías/expiradas o cruzadas entre tareas, y persistiendo/recuperando el estado mediante `TaskStateStoreAdapter`.
  */
 
-import fs from 'fs';
 import path from 'path';
 import {
   BridgeMessageEnvelope,
@@ -21,6 +20,35 @@ import {
   BridgeTaskStatus,
   buildBridgeResponseEnvelope,
 } from './protocol.js';
+import {
+  type PersistedAwaitingConfirmationRecord,
+  type TaskResultHistoryEntry,
+  type TaskStateStoreSnapshot,
+  type PersistenceDiagnostics,
+  type TaskStateStoreAdapter,
+  VALID_TASK_STATUSES,
+  isValidBridgeResponseEnvelopeRecord,
+  isValidPersistedAwaitingConfirmationRecord,
+  isValidTaskResultHistoryEntry,
+  InMemoryTaskStateStoreAdapter,
+  type JsonFileTaskStateStoreOptions,
+  JsonFileTaskStateStoreAdapter,
+} from './taskStateStore.js';
+
+export {
+  type PersistedAwaitingConfirmationRecord,
+  type TaskResultHistoryEntry,
+  type TaskStateStoreSnapshot,
+  type PersistenceDiagnostics,
+  type TaskStateStoreAdapter,
+  VALID_TASK_STATUSES,
+  isValidBridgeResponseEnvelopeRecord,
+  isValidPersistedAwaitingConfirmationRecord,
+  isValidTaskResultHistoryEntry,
+  InMemoryTaskStateStoreAdapter,
+  type JsonFileTaskStateStoreOptions,
+  JsonFileTaskStateStoreAdapter,
+};
 
 export interface StudioLiveState {
   connected: boolean;
@@ -30,107 +58,6 @@ export interface StudioLiveState {
   selectedModelName: string | null;
   selectedPartCount: number;
   pendingDestructiveConfirmations: number;
-}
-
-export interface PersistedAwaitingConfirmationRecord {
-  taskId: string;
-  operationId: string;
-  sessionId: string;
-  correlationId: string;
-  modelName: string;
-  partIdsToDelete: string[];
-  expectedModelHash: string;
-  createdAt: number;
-  expiresAt: number;
-  status: 'awaiting_confirmation' | 'confirmed' | 'cancelled' | 'expired';
-  resolvedAt?: number;
-  latestResponse: BridgeResponseEnvelope;
-}
-
-export interface TaskResultHistoryEntry {
-  taskId: string;
-  operationId: string;
-  modelName: string;
-  status: BridgeTaskStatus;
-  timestamp: number;
-}
-
-export interface TaskStateStoreSnapshot {
-  completedTasks: Record<string, BridgeResponseEnvelope>;
-  awaitingConfirmations: Record<string, PersistedAwaitingConfirmationRecord>;
-  resultHistory: TaskResultHistoryEntry[];
-}
-
-export interface TaskStateStoreAdapter {
-  loadState(): TaskStateStoreSnapshot;
-  saveState(snapshot: TaskStateStoreSnapshot): void;
-}
-
-/**
- * Adaptador de almacenamiento en memoria compartible entre instancias de `TaskExecutionCoordinator`
- * para pruebas deterministas de reinicio y recuperación sin efectos secundarios en disco.
- */
-export class InMemoryTaskStateStoreAdapter implements TaskStateStoreAdapter {
-  private snapshot: TaskStateStoreSnapshot = {
-    completedTasks: {},
-    awaitingConfirmations: {},
-    resultHistory: [],
-  };
-
-  public loadState(): TaskStateStoreSnapshot {
-    return JSON.parse(JSON.stringify(this.snapshot));
-  }
-
-  public saveState(snapshot: TaskStateStoreSnapshot): void {
-    this.snapshot = JSON.parse(JSON.stringify(snapshot));
-  }
-}
-
-/**
- * Adaptador de almacenamiento persistente en archivo JSON local para recuperar tareas pendientes
- * de confirmación destructiva y su historial tras un reinicio real del proceso Local Bridge.
- */
-export class JsonFileTaskStateStoreAdapter implements TaskStateStoreAdapter {
-  private readonly filePath: string;
-
-  constructor(filePath: string) {
-    this.filePath = path.resolve(filePath);
-  }
-
-  public loadState(): TaskStateStoreSnapshot {
-    try {
-      if (!fs.existsSync(this.filePath)) {
-        return { completedTasks: {}, awaitingConfirmations: {}, resultHistory: [] };
-      }
-      const raw = fs.readFileSync(this.filePath, 'utf-8');
-      const parsed = JSON.parse(raw);
-      return {
-        completedTasks:
-          parsed && typeof parsed.completedTasks === 'object' && parsed.completedTasks
-            ? parsed.completedTasks
-            : {},
-        awaitingConfirmations:
-          parsed && typeof parsed.awaitingConfirmations === 'object' && parsed.awaitingConfirmations
-            ? parsed.awaitingConfirmations
-            : {},
-        resultHistory: Array.isArray(parsed?.resultHistory) ? parsed.resultHistory : [],
-      };
-    } catch {
-      return { completedTasks: {}, awaitingConfirmations: {}, resultHistory: [] };
-    }
-  }
-
-  public saveState(snapshot: TaskStateStoreSnapshot): void {
-    try {
-      const dir = path.dirname(this.filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(this.filePath, JSON.stringify(snapshot, null, 2), 'utf-8');
-    } catch {
-      // Ignore write failures in read-only environments
-    }
-  }
 }
 
 interface PendingStudioTask {
@@ -146,6 +73,7 @@ export class TaskExecutionCoordinator {
   private readonly defaultTimeoutMs: number;
   private readonly confirmationExpirationMs: number;
   private readonly stateStore: TaskStateStoreAdapter;
+  private readonly stateFilePath: string | null;
   private readonly completedTaskCache: Map<string, BridgeResponseEnvelope> = new Map();
   private readonly awaitingConfirmationRegistry: Map<string, PersistedAwaitingConfirmationRecord> = new Map();
   private readonly resultHistory: TaskResultHistoryEntry[] = [];
@@ -153,6 +81,10 @@ export class TaskExecutionCoordinator {
   private readonly studioPendingQueue: Map<string, PendingStudioTask> = new Map();
   private activeWorkers = 0;
   private readonly waitQueue: Array<() => void> = [];
+  private invalidRecordsRejectedOnRecovery = 0;
+  private recoveredCompletedTasksCount = 0;
+  private recoveredAwaitingConfirmationsCount = 0;
+  private lastPersistenceError: string | null = null;
 
   private studioState: StudioLiveState = {
     connected: false,
@@ -176,38 +108,109 @@ export class TaskExecutionCoordinator {
     this.confirmationExpirationMs = Math.max(500, options?.confirmationExpirationMs ?? 5 * 60 * 1000);
     if (options?.stateStore) {
       this.stateStore = options.stateStore;
+      this.stateFilePath = options?.stateFilePath ? path.resolve(options.stateFilePath) : null;
     } else if (options?.stateFilePath) {
-      this.stateStore = new JsonFileTaskStateStoreAdapter(options.stateFilePath);
+      const resolvedPath = path.resolve(options.stateFilePath);
+      this.stateStore = new JsonFileTaskStateStoreAdapter(resolvedPath);
+      this.stateFilePath = resolvedPath;
     } else {
       this.stateStore = new InMemoryTaskStateStoreAdapter();
+      this.stateFilePath = null;
     }
     this.recoverPersistedState();
   }
 
+  public getStateStore(): TaskStateStoreAdapter {
+    return this.stateStore;
+  }
+
+  public getPersistenceDiagnostics(): PersistenceDiagnostics {
+    const storeDiag = this.stateStore.getDiagnostics ? this.stateStore.getDiagnostics() : {};
+    return {
+      filePath: storeDiag.filePath ?? this.stateFilePath,
+      saveCount: storeDiag.saveCount ?? 0,
+      saveErrorCount: storeDiag.saveErrorCount ?? (this.lastPersistenceError ? 1 : 0),
+      lastSaveError: storeDiag.lastSaveError ?? this.lastPersistenceError,
+      loadErrorCount: storeDiag.loadErrorCount ?? 0,
+      lastLoadError: storeDiag.lastLoadError ?? null,
+      corruptedFileDetected: storeDiag.corruptedFileDetected ?? false,
+      invalidRecordsRejected:
+        (storeDiag.invalidRecordsRejected ?? 0) + this.invalidRecordsRejectedOnRecovery,
+      recoveredCompletedTasksCount: this.recoveredCompletedTasksCount,
+      recoveredAwaitingConfirmationsCount: this.recoveredAwaitingConfirmationsCount,
+    };
+  }
+
   /**
-   * Recupera las tareas completadas, confirmaciones pendientes e historial desde `stateStore` al iniciar o reiniciar el Bridge.
+   * Recupera las tareas completadas, confirmaciones pendientes e historial desde `stateStore` al iniciar o reiniciar el Bridge,
+   * validando cada registro para rechazar datos corruptos o incompletos sin marcarlos como recuperados.
    */
   public recoverPersistedState(): void {
+    this.completedTaskCache.clear();
+    this.awaitingConfirmationRegistry.clear();
+    this.resultHistory.splice(0, this.resultHistory.length);
+    this.invalidRecordsRejectedOnRecovery = 0;
+    this.recoveredCompletedTasksCount = 0;
+    this.recoveredAwaitingConfirmationsCount = 0;
+
     const snap = this.stateStore.loadState();
+    if (!snap || typeof snap !== 'object') {
+      return;
+    }
     const now = Date.now();
-    for (const [taskId, resp] of Object.entries(snap.completedTasks || {})) {
-      if (taskId && resp) {
-        this.completedTaskCache.set(taskId, resp);
-      }
-    }
+
     for (const [taskId, record] of Object.entries(snap.awaitingConfirmations || {})) {
-      if (taskId && record) {
-        if (record.status === 'awaiting_confirmation' && now > record.expiresAt) {
-          record.status = 'expired';
-        }
-        this.awaitingConfirmationRegistry.set(taskId, record);
-        if (!this.completedTaskCache.has(taskId) && record.latestResponse) {
-          this.completedTaskCache.set(taskId, record.latestResponse);
-        }
+      const trimmedId = taskId.trim();
+      if (!trimmedId || !isValidPersistedAwaitingConfirmationRecord(trimmedId, record)) {
+        this.invalidRecordsRejectedOnRecovery += 1;
+        continue;
+      }
+      const clonedRecord: PersistedAwaitingConfirmationRecord = {
+        ...record,
+        partIdsToDelete: [...record.partIdsToDelete],
+      };
+      if (clonedRecord.status === 'awaiting_confirmation' && now > clonedRecord.expiresAt) {
+        clonedRecord.status = 'expired';
+      }
+      this.awaitingConfirmationRegistry.set(trimmedId, clonedRecord);
+      this.recoveredAwaitingConfirmationsCount += 1;
+    }
+
+    for (const [taskId, resp] of Object.entries(snap.completedTasks || {})) {
+      const trimmedId = taskId.trim();
+      if (!trimmedId || !isValidBridgeResponseEnvelopeRecord(trimmedId, resp)) {
+        this.invalidRecordsRejectedOnRecovery += 1;
+        continue;
+      }
+      if (
+        (resp.status === 'awaiting_studio_confirmation' ||
+          resp.status === 'awaiting_confirmation') &&
+        !this.awaitingConfirmationRegistry.has(trimmedId)
+      ) {
+        this.invalidRecordsRejectedOnRecovery += 1;
+        continue;
+      }
+      this.completedTaskCache.set(trimmedId, resp);
+      this.recoveredCompletedTasksCount += 1;
+    }
+
+    for (const [taskId, record] of this.awaitingConfirmationRegistry.entries()) {
+      if (!this.completedTaskCache.has(taskId) && record.latestResponse) {
+        this.completedTaskCache.set(taskId, record.latestResponse);
+        this.recoveredCompletedTasksCount += 1;
       }
     }
+
     if (Array.isArray(snap.resultHistory)) {
-      this.resultHistory.splice(0, this.resultHistory.length, ...snap.resultHistory.slice(-500));
+      const validEntries: TaskResultHistoryEntry[] = [];
+      for (const item of snap.resultHistory) {
+        if (isValidTaskResultHistoryEntry(item)) {
+          validEntries.push(item);
+        } else {
+          this.invalidRecordsRejectedOnRecovery += 1;
+        }
+      }
+      this.resultHistory.splice(0, this.resultHistory.length, ...validEntries.slice(-500));
     }
   }
 
@@ -220,11 +223,17 @@ export class TaskExecutionCoordinator {
     for (const [k, v] of this.awaitingConfirmationRegistry.entries()) {
       awaitingConfirmations[k] = v;
     }
-    this.stateStore.saveState({
-      completedTasks,
-      awaitingConfirmations,
-      resultHistory: this.resultHistory.slice(-500),
-    });
+    try {
+      this.stateStore.saveState({
+        completedTasks,
+        awaitingConfirmations,
+        resultHistory: this.resultHistory.slice(-500),
+      });
+      this.lastPersistenceError = null;
+    } catch (err: any) {
+      this.lastPersistenceError = String(err?.message || err || 'Error de persistencia');
+      throw err;
+    }
   }
 
   private appendResultHistory(

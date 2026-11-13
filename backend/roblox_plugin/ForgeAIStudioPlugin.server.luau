@@ -1,8 +1,8 @@
 --!strict
 --[[
-    Forge AI Studio Plugin v2.1 - Unified Luau, ForgeGUI, EditableMesh 3D Engine & Rojo Verifier
-    ============================================================================================
-    Connects Roblox Studio to the Unified Forge AI Backend via HttpService.
+    Forge AI Studio Plugin v2.3.0 - Unified Luau, ForgeGUI, EditableMesh 3D Engine & Rojo Verifier
+    ==============================================================================================
+    Connects Roblox Studio to the Unified Forge AI Backend and Forge Local Bridge via HttpService.
     Capabilities:
     1. Dynamic Script Generator (Server / Client / Module + Fast / Pro model tiers)
     2. ForgeGUI Builder (StarterGui instance tree + Luau module sync)
@@ -36,7 +36,8 @@ pcall(function()
 end)
 local BACKEND_URL = if #savedBackendUrl > 0 then savedBackendUrl else "http://127.0.0.1:8000"
 local LOCAL_BRIDGE_URL = if #savedBridgeUrl > 0 then savedBridgeUrl else "http://127.0.0.1:48720"
-local DEFAULT_LOCAL_TOKEN = "forge-local-dev-token-2026"
+-- Security: No hardcoded usable default token in source code. Configure via the Plugin UI widget.
+local DEFAULT_LOCAL_TOKEN = ""
 local FORGE_SECURITY_TOKEN = if #savedSecurityToken > 0 then savedSecurityToken else DEFAULT_LOCAL_TOKEN
 
 -- Pending destructive operations queue (Fase 6: Never execute destructive deletions automatically without user confirmation)
@@ -52,7 +53,7 @@ local pendingDestructiveOperations: {
     }
 } = {}
 
-local toolbar = plugin:CreateToolbar("Forge AI v2.1")
+local toolbar = plugin:CreateToolbar("Forge AI v2.3.0")
 local toggleButton = toolbar:CreateButton(
     "Forge AI Suite",
     "Abrir suite de creación 3D EditableMesh, Luau, ForgeGUI y Verificador Rojo",

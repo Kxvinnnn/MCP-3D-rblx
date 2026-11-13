@@ -1,6 +1,6 @@
-# Guía del Plugin de Roblox Studio v2.0 y Sincronización Rojo 7.x
+# Guía del Plugin de Roblox Studio v2.3.0, Forge Local Bridge y Sincronización Rojo 7.x
 
-Esta guía explica cómo conectar **Forge AI Studio v2.0** con **Roblox Studio** utilizando **Rojo 7.x** y el plugin nativo **`ForgeAIStudioPlugin.server.luau`**.
+Esta guía explica cómo conectar **NIGHTMARE FORGE / Forge AI Studio v2.3.0** con **Roblox Studio** utilizando **Forge Local Bridge (`127.0.0.1:48720`)**, **Rojo 7.x (`:34872`)** y el plugin nativo **`ForgeAIStudioPlugin.server.luau`**.
 
 ---
 
@@ -23,27 +23,28 @@ El archivo `rojo_workspace/default.project.json` mapea automáticamente las carp
 
 ## 2. Instalación y Uso del Servicio `Forge Local Bridge` (127.0.0.1:48720)
 
-El puente local (`forge-bridge/`) permite a la nube de Forge AI Studio comunicarse con Rojo y Roblox Studio sin abrir puertos inbound en Windows.
+El puente local (`forge-bridge/`) permite a Forge AI Studio comunicarse con Rojo y Roblox Studio sin abrir puertos de entrada en Windows.
 
 ### 2.1 Configuración de Variables (`forge-bridge/.env`)
+Genera primero un secreto aleatorio de 32 bytes (`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`) y configúralo en `forge-bridge/.env`:
 ```bash
-FORGE_BRIDGE_PORT=48720
-FORGE_BRIDGE_HOST=127.0.0.1
-FORGE_CLOUD_URL=https://ais-dev-gqb23lmn6df25du4b3bz2n-751544883802.us-west2.run.app
-FORGE_BRIDGE_SHARED_SECRET="forge-local-dev-token-2026"
-FORGE_PLUGIN_LOCAL_TOKEN="forge-local-dev-token-2026"
+BRIDGE_PORT=48720
+BRIDGE_HOST=127.0.0.1
+FORGE_CLOUD_URL="http://127.0.0.1:3000"
+FORGE_BRIDGE_SHARED_SECRET="<TU_SECRETO_ALEATORIO_32_BYTES>"
+FORGE_PLUGIN_LOCAL_TOKEN="<TU_SECRETO_ALEATORIO_32_BYTES>"
 ROJO_PROJECT_PATH="../rojo_workspace"
 ROJO_PORT=34872
 ```
 
 ### 2.2 Inicio y Parada en Windows
-- **Iniciar**: Ejecutar `./scripts/start-bridge.ps1` o `npm run start` dentro de `forge-bridge/`.
+- **Iniciar**: Ejecutar `./scripts/start-bridge.ps1` o `npm --prefix forge-bridge start`.
 - **Detener**: Ejecutar `./scripts/stop-bridge.ps1`.
 - **Verificar Estado**: `GET http://127.0.0.1:48720/local/status`.
 
 ---
 
-## 3. Instalación del Plugin `ForgeAIStudioPlugin.server.luau` v2.2.0
+## 3. Instalación del Plugin `ForgeAIStudioPlugin.server.luau` v2.3.0
 
 1. Copia `backend/roblox_plugin/ForgeAIStudioPlugin.server.luau` en la carpeta de Plugins de Roblox Studio:
    - **Windows**: `%LocalAppData%\Roblox\Plugins\ForgeAIStudioPlugin.server.luau`

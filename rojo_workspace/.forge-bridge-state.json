@@ -1,0 +1,4374 @@
+{
+  "completedTasks": {
+    "task_read_types_01": {
+      "protocolVersion": "1.0",
+      "taskId": "task_read_types_01",
+      "sessionId": "sess_e2e_1794519312087",
+      "correlationId": "corr_task_read_types_01",
+      "status": "completed",
+      "result": {
+        "relativePath": "src/shared/Utils/Maid.luau",
+        "encoding": "utf-8",
+        "content": "--!strict\n--[[\n    Maid.luau\n    =========\n    Standard memory management and task cleanup utility for Roblox Luau.\n    Verified local module at ReplicatedStorage.Shared.Utils.Maid\n]]\n\nlocal Maid = {}\nMaid.__index = Maid\n\nexport type MaidTask =\n    RBXScriptConnection\n    | Instance\n    | Tween\n    | (() -> ())\n    | { Destroy: (any) -> () }\n    | { disconnect: (any) -> () }\n\nexport type Maid = typeof(setmetatable(\n    {} :: {\n        _tasks: { [any]: MaidTask },\n    },\n    Maid\n))\n\nfunction Maid.new(): Maid\n    local self = setmetatable({\n        _tasks = {},\n    }, Maid)\n    return self\nend\n\nfunction Maid.isMaid(value: any): boolean\n    return typeof(value) == \"table\" and getmetatable(value) == Maid\nend\n\nfunction Maid:GiveTask(taskItem: MaidTask): number\n    local taskId = #self._tasks + 1\n    self._tasks[taskId] = taskItem\n    return taskId\nend\n\nfunction Maid:DoCleaning()\n    local tasks = self._tasks\n    for key, taskItem in pairs(tasks) do\n        if typeof(taskItem) == \"RBXScriptConnection\" then\n            taskItem:Disconnect()\n        elseif typeof(taskItem) == \"Instance\" then\n            taskItem:Destroy()\n        elseif typeof(taskItem) == \"function\" then\n            taskItem()\n        elseif typeof(taskItem) == \"table\" then\n            if typeof((taskItem :: any).Destroy) == \"function\" then\n                (taskItem :: any):Destroy()\n            elseif typeof((taskItem :: any).Cancel) == \"function\" then\n                (taskItem :: any):Cancel()\n            elseif typeof((taskItem :: any).disconnect) == \"function\" then\n                (taskItem :: any):disconnect()\n            end\n        end\n        tasks[key] = nil\n    end\nend\n\nfunction Maid:Destroy()\n    self:DoCleaning()\nend\n\nreturn Maid\n",
+        "sizeBytes": 1732,
+        "sha256": "e8c1bf1e1c8c",
+        "contentFnv32": "da76e498"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:35:12.166Z",
+      "signature": "da313f24b33f08a57c43a47a4bd1068ff8c649c7d23753971737c33d749f4180"
+    },
+    "task_write_test_02": {
+      "protocolVersion": "1.0",
+      "taskId": "task_write_test_02",
+      "sessionId": "sess_e2e_1794519312087",
+      "correlationId": "corr_task_write_test_02",
+      "status": "completed",
+      "result": {
+        "relativePath": "src/shared/_ForgeBridgeValidationTest.luau",
+        "bytesWritten": 79,
+        "sha256": "60864d30c53b",
+        "contentFnv32": "d186afc6",
+        "timestamp": "2026-11-12T21:35:12.209Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:35:12.209Z",
+      "signature": "eb416b84ac2a469a13369700b7b03cbaf171f27648174d27078eb9bb86fb9342"
+    },
+    "task_detect_03": {
+      "protocolVersion": "1.0",
+      "taskId": "task_detect_03",
+      "sessionId": "sess_e2e_1794519312087",
+      "correlationId": "corr_task_detect_03",
+      "status": "completed",
+      "result": {
+        "changed": true,
+        "added": [],
+        "modified": [
+          {
+            "name": "_ForgeBridgeValidationTest",
+            "relativePath": "src/shared/_ForgeBridgeValidationTest.luau",
+            "sizeBytes": 88,
+            "sha256": "404806d9cad6",
+            "contentFnv32": "ac715dd0",
+            "datamodelTarget": "ReplicatedStorage.Shared._ForgeBridgeValidationTest",
+            "modifiedAt": "2026-11-12T21:35:12.360Z"
+          }
+        ],
+        "deleted": [],
+        "totalScanned": 4,
+        "timestamp": "2026-11-12T21:35:12.363Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:35:12.363Z",
+      "signature": "916e831849cfbd4ab570de91b75f04c16102284717f9fa9be2302c8569edfa98"
+    },
+    "task_studio_sel_04": {
+      "protocolVersion": "1.0",
+      "taskId": "task_studio_sel_04",
+      "sessionId": "sess_e2e_1794519312087",
+      "correlationId": "corr_task_studio_sel_04",
+      "status": "completed",
+      "result": {
+        "selectedModelName": "GhostDetectorModel",
+        "selectedPartCount": 6
+      },
+      "error": null,
+      "executionTime": 88,
+      "timestamp": "2026-11-12T21:35:12.459Z",
+      "signature": "7b59ea3e71ae54015f9a048c6dd20c27f6f7eacf81f7fd78f004db4007c94664"
+    },
+    "task_rojo_build_05": {
+      "protocolVersion": "1.0",
+      "taskId": "task_rojo_build_05",
+      "sessionId": "sess_e2e_1794519312509",
+      "correlationId": "corr_task_rojo_build_05",
+      "status": "completed",
+      "result": {
+        "valid": true,
+        "compilerUsed": "structural_validator",
+        "rojoVersion": null,
+        "errors": [],
+        "warnings": [],
+        "checkedFilesCount": 3
+      },
+      "error": null,
+      "executionTime": 22,
+      "timestamp": "2026-11-12T21:35:12.538Z",
+      "signature": "75b963d494d3c6bd648005194b3ba1c8f8db8fb23387cec2be27750a807ba01d"
+    },
+    "task_343d3ea0-92f7-4c8d-86e0-66783bd49bf7": {
+      "protocolVersion": "1.0",
+      "taskId": "task_343d3ea0-92f7-4c8d-86e0-66783bd49bf7",
+      "sessionId": "sess_3a181b2a1ddcb546e1ec4e73",
+      "correlationId": "corr_1794519312616_haj6v",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:35:12.659Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:35:12.659Z",
+      "signature": "3a12e34261693cc39691f46d9d80c1eb66f0e1f22d415646fea6519cc7dd8afd"
+    },
+    "task_9af29327-a87d-4fe4-a879-85276e1d81eb": {
+      "protocolVersion": "1.0",
+      "taskId": "task_9af29327-a87d-4fe4-a879-85276e1d81eb",
+      "sessionId": "sess_acb19a45afd34a0692ae37d0",
+      "correlationId": "corr_1794519312663_1awz9",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 25,
+      "timestamp": "2026-11-12T21:35:12.763Z",
+      "signature": "fb24fc5cda096aa7d7850da095d73af7882dd30ef1492f15bdc0222838803900"
+    },
+    "task_90eda4a3-70ef-431a-8598-20aaa8912e58": {
+      "protocolVersion": "1.0",
+      "taskId": "task_90eda4a3-70ef-431a-8598-20aaa8912e58",
+      "sessionId": "sess_2b76d971001ff6e3ed69582e",
+      "correlationId": "corr_1794519312900_52l8x",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:35:12.926Z",
+      "signature": "0f28eded5d8808fb7f2e2ce4b387bec496b43193c3c97cc41d705a411817b9a9"
+    },
+    "task_2bb77e7e-1f8c-40fb-9337-d659b271fdb7": {
+      "protocolVersion": "1.0",
+      "taskId": "task_2bb77e7e-1f8c-40fb-9337-d659b271fdb7",
+      "sessionId": "sess_2b76d971001ff6e3ed69582e",
+      "correlationId": "corr_1794519312931_xkkgf",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-12T21:35:13.036Z",
+      "signature": "1ac663ce3201805dc61b144e3696b029a777a28f14dbf610403afe786c733a7c"
+    },
+    "task_2000e699-50bd-420d-813f-55318141a557": {
+      "protocolVersion": "1.0",
+      "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "sessionId": "sess_e999874622f86b3cbb2b0a4d",
+      "correlationId": "corr_1794519313108_riule",
+      "status": "completed",
+      "result": {
+        "operationId": "task_2000e699-50bd-420d-813f-55318141a557",
+        "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 66,
+      "timestamp": "2026-11-12T21:35:13.207Z",
+      "signature": "cf950ac787f37ca014c25fb849d7e7b6ba3d1b76e9c9566938e7b4c2d803310d"
+    },
+    "task_338db777-9028-4527-99ea-03adf29db107": {
+      "protocolVersion": "1.0",
+      "taskId": "task_338db777-9028-4527-99ea-03adf29db107",
+      "sessionId": "sess_e79ec4147bf236407d1686f4",
+      "correlationId": "corr_1794519333913_oo8ks",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:35:33.959Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:35:33.959Z",
+      "signature": "4d5bc61620bf40ebd37432af614131c273fcd2fc7bda2a10e8920d075f82164a"
+    },
+    "task_f7d4a434-0fef-4561-85f3-4aa6b9c17e42": {
+      "protocolVersion": "1.0",
+      "taskId": "task_f7d4a434-0fef-4561-85f3-4aa6b9c17e42",
+      "sessionId": "sess_3fbd116afbda52bce4272410",
+      "correlationId": "corr_1794519333965_f2mrr",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 42,
+      "timestamp": "2026-11-12T21:35:34.142Z",
+      "signature": "246afedcfc7fb900807a74d3bb9a864b05bc0576a966fcecd6743909c5558331"
+    },
+    "task_9835277b-58f9-447b-b141-faca149995eb": {
+      "protocolVersion": "1.0",
+      "taskId": "task_9835277b-58f9-447b-b141-faca149995eb",
+      "sessionId": "sess_fcc6cbff7a40677f43554085",
+      "correlationId": "corr_1794519334311_yrok8",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:35:34.348Z",
+      "signature": "c458feeb895983664997685d92171db5ad6a7d39eb006c3c133b234c88e3e315"
+    },
+    "task_804bb05e-6a25-443c-bff0-58d9e1394ad1": {
+      "protocolVersion": "1.0",
+      "taskId": "task_804bb05e-6a25-443c-bff0-58d9e1394ad1",
+      "sessionId": "sess_fcc6cbff7a40677f43554085",
+      "correlationId": "corr_1794519334354_5ilny",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 72,
+      "timestamp": "2026-11-12T21:35:34.459Z",
+      "signature": "ce369887751dcbecc5fff5b8920375e723c0eba35f5471616b9e15784b8cf638"
+    },
+    "task_4f29578f-c549-4305-a720-1189128f203b": {
+      "protocolVersion": "1.0",
+      "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "sessionId": "sess_0ab1fb317875290aa63839d4",
+      "correlationId": "corr_1794519334552_ndrr4",
+      "status": "completed",
+      "result": {
+        "operationId": "task_4f29578f-c549-4305-a720-1189128f203b",
+        "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 70,
+      "timestamp": "2026-11-12T21:35:34.665Z",
+      "signature": "87b36e21b226757109a8c799e0b4dc55870551b81d37b3beef052e3180ac60be"
+    },
+    "task_be9e8bdf-fe18-41ea-a028-9e392b51c7e3": {
+      "protocolVersion": "1.0",
+      "taskId": "task_be9e8bdf-fe18-41ea-a028-9e392b51c7e3",
+      "sessionId": "sess_c7bf8c14c8c6a6860cd9ba95",
+      "correlationId": "corr_1794519371666_cwzk3",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:36:11.711Z"
+      },
+      "error": null,
+      "executionTime": 3,
+      "timestamp": "2026-11-12T21:36:11.711Z",
+      "signature": "09e8020c1c721e72a9fd5cadf1f3eda149b4b3a3cd7f2075f7786f299c78ecda"
+    },
+    "task_db15205c-ea59-4bbb-b142-9d12f67f7abc": {
+      "protocolVersion": "1.0",
+      "taskId": "task_db15205c-ea59-4bbb-b142-9d12f67f7abc",
+      "sessionId": "sess_a48f8d746cd0da2f6ae318d1",
+      "correlationId": "corr_1794519371717_nfo8w",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 34,
+      "timestamp": "2026-11-12T21:36:11.906Z",
+      "signature": "97910d45822b5c46c99edd6f2b6d7b2138638d2a36416734dc655f6de61a6187"
+    },
+    "task_8e9759dc-c5f7-415e-8ed5-9f5d9341d66e": {
+      "protocolVersion": "1.0",
+      "taskId": "task_8e9759dc-c5f7-415e-8ed5-9f5d9341d66e",
+      "sessionId": "sess_6eff02003377a1bd90b2ab22",
+      "correlationId": "corr_1794519372055_j9u0j",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:36:12.093Z",
+      "signature": "44d428b53521c8b29e94fb51bc472f6249b0a91099c4b29de7ecc02575735230"
+    },
+    "task_99b3c6cd-abcd-4b3c-a575-db6f61a23f7e": {
+      "protocolVersion": "1.0",
+      "taskId": "task_99b3c6cd-abcd-4b3c-a575-db6f61a23f7e",
+      "sessionId": "sess_6eff02003377a1bd90b2ab22",
+      "correlationId": "corr_1794519372099_exswr",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 71,
+      "timestamp": "2026-11-12T21:36:12.205Z",
+      "signature": "fea679d21163f2cffe68a68ed4bbbad206b7992129efec508a299339d45bdf1a"
+    },
+    "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553": {
+      "protocolVersion": "1.0",
+      "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "sessionId": "sess_eb446ba1ff1e3749d31804ec",
+      "correlationId": "corr_1794519372307_lhcm9",
+      "status": "completed",
+      "result": {
+        "operationId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+        "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 81,
+      "timestamp": "2026-11-12T21:36:12.425Z",
+      "signature": "9152d0665c3ade8c159c43e7ecd20f8e57e26b445e7c5cfdf65cc2b4c3cf4d0c"
+    },
+    "task_b0da3cf0-6b7c-4325-8578-dc2942b9ebc0": {
+      "protocolVersion": "1.0",
+      "taskId": "task_b0da3cf0-6b7c-4325-8578-dc2942b9ebc0",
+      "sessionId": "sess_17e13a329e327aacd4c1996f",
+      "correlationId": "corr_1794519377781_iij02",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:36:17.817Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:36:17.817Z",
+      "signature": "cec783e37f01b6521779d3ab47e2129f39a47f1fb4dca1bf2677431d984f3829"
+    },
+    "task_bd0b6cbc-454c-4835-a837-0148138a5eb4": {
+      "protocolVersion": "1.0",
+      "taskId": "task_bd0b6cbc-454c-4835-a837-0148138a5eb4",
+      "sessionId": "sess_2d0f5c5ff7bfff52e87dace3",
+      "correlationId": "corr_1794519377825_gpldo",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 24,
+      "timestamp": "2026-11-12T21:36:17.949Z",
+      "signature": "3316721201f66231b53364936986ea293959005630db7101c32d36e0e274152b"
+    },
+    "task_06fe458f-9511-48cd-88b1-6f275613ceba": {
+      "protocolVersion": "1.0",
+      "taskId": "task_06fe458f-9511-48cd-88b1-6f275613ceba",
+      "sessionId": "sess_91fca4f221bf4412c9aa91dd",
+      "correlationId": "corr_1794519378106_r9w4f",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:36:18.143Z",
+      "signature": "c1f91a059ba856443fe9da12271d60a8211f3bf1dda73c14ddf1a57614d46cb0"
+    },
+    "task_6e082708-9708-47d2-8895-d7eddf586896": {
+      "protocolVersion": "1.0",
+      "taskId": "task_6e082708-9708-47d2-8895-d7eddf586896",
+      "sessionId": "sess_91fca4f221bf4412c9aa91dd",
+      "correlationId": "corr_1794519378149_7hn48",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 71,
+      "timestamp": "2026-11-12T21:36:18.254Z",
+      "signature": "b1d139c239adc733a2b218942b4140975e4a471d5f86d36c6a22f7f271bbf1f5"
+    },
+    "task_4b829e40-e4ba-4f64-9e33-7e944357e275": {
+      "protocolVersion": "1.0",
+      "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "sessionId": "sess_4e38bc0e84010ac9ceabb705",
+      "correlationId": "corr_1794519378343_rd5mu",
+      "status": "completed",
+      "result": {
+        "operationId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+        "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-12T21:36:18.456Z",
+      "signature": "eeccdef89645fbd348bd211a250f3df0288624af30a36cec10aa6f92f27586a2"
+    },
+    "task_4c95ac1e-c783-4e0e-a4e5-3abe0ad1ba33": {
+      "protocolVersion": "1.0",
+      "taskId": "task_4c95ac1e-c783-4e0e-a4e5-3abe0ad1ba33",
+      "sessionId": "sess_2f8d02ef71379aa718829c68",
+      "correlationId": "corr_1794519565623_kl9tk",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:39:25.659Z"
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:39:25.659Z",
+      "signature": "5ac880c2dbca8600b8318134e1a537f8be7643f66d08cf193b47f9108fcfab09"
+    },
+    "task_136f4912-bb1d-483f-9f63-dd7d88be7add": {
+      "protocolVersion": "1.0",
+      "taskId": "task_136f4912-bb1d-483f-9f63-dd7d88be7add",
+      "sessionId": "sess_3273c23e58e0edf4cfe3e7d5",
+      "correlationId": "corr_1794519565676_hqdpo",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 25,
+      "timestamp": "2026-11-12T21:39:25.774Z",
+      "signature": "8850c1c8f7c36b8a3707112534a5a5ef5d8d99f79aab4b270d9b5db2276fb251"
+    },
+    "task_d4253df0-6fca-4d9a-ac55-658227ea9d96": {
+      "protocolVersion": "1.0",
+      "taskId": "task_d4253df0-6fca-4d9a-ac55-658227ea9d96",
+      "sessionId": "sess_ffa828a8010df1be2554ffc8",
+      "correlationId": "corr_1794519565926_n2fph",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:39:25.966Z",
+      "signature": "e0a2745a7548edabfa19c9b64c107421c56d131d28b4598aad3a3623faac0d75"
+    },
+    "task_cc46ada8-8cfd-44f3-b285-42d22bd19b56": {
+      "protocolVersion": "1.0",
+      "taskId": "task_cc46ada8-8cfd-44f3-b285-42d22bd19b56",
+      "sessionId": "sess_ffa828a8010df1be2554ffc8",
+      "correlationId": "corr_1794519565971_dnuqc",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-12T21:39:26.064Z",
+      "signature": "32177dab65d3449c1fb1d068b393d4c1efc79ecdcfbe8d20bf101743e024b02d"
+    },
+    "task_169e32d5-22d7-425c-9793-a0bad83ffc71": {
+      "protocolVersion": "1.0",
+      "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "sessionId": "sess_44e3bafe082c52852c2668cb",
+      "correlationId": "corr_1794519566156_psx58",
+      "status": "completed",
+      "result": {
+        "operationId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+        "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 68,
+      "timestamp": "2026-11-12T21:39:26.258Z",
+      "signature": "812ed789ad5203e605bcb0f4c6bee5f91860c9cf6293c18b95e207b1f6d04512"
+    },
+    "task_cef032f3-0d98-4a29-a7e6-a1b22a061537": {
+      "protocolVersion": "1.0",
+      "taskId": "task_cef032f3-0d98-4a29-a7e6-a1b22a061537",
+      "sessionId": "sess_896435fb1095b6eef4159e43",
+      "correlationId": "corr_1794519756534_570hh",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:42:36.575Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:42:36.575Z",
+      "signature": "dbce338218fff7349642e074f92407bb8dd8b871d4b07d12bf4e3b743e980bf2"
+    },
+    "task_2eaf141d-68d0-4fee-96cf-b0df677d3647": {
+      "protocolVersion": "1.0",
+      "taskId": "task_2eaf141d-68d0-4fee-96cf-b0df677d3647",
+      "sessionId": "sess_8854ea12730c1361e82ae2ae",
+      "correlationId": "corr_1794519756582_o8tor",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 26,
+      "timestamp": "2026-11-12T21:42:36.708Z",
+      "signature": "bc625e5c67a3bf95d28de56d12733e239e0b46b5122db8af6828f4ac17025970"
+    },
+    "task_3d6102d0-2e40-4c3a-9495-fdd8bf03467b": {
+      "protocolVersion": "1.0",
+      "taskId": "task_3d6102d0-2e40-4c3a-9495-fdd8bf03467b",
+      "sessionId": "sess_084af72f9d3010727a1bce41",
+      "correlationId": "corr_1794519756876_1s8xe",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:42:36.921Z",
+      "signature": "78c6da746507bd45c604d14b52cbf8a83eb131f7eb26fe7259faca0f93523a23"
+    },
+    "task_33fa706d-6fbc-46c1-84af-0b45d87ebb0a": {
+      "protocolVersion": "1.0",
+      "taskId": "task_33fa706d-6fbc-46c1-84af-0b45d87ebb0a",
+      "sessionId": "sess_084af72f9d3010727a1bce41",
+      "correlationId": "corr_1794519756929_chv8y",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 71,
+      "timestamp": "2026-11-12T21:42:37.034Z",
+      "signature": "ea04417f604d1f74eed5d0d3d75fae829e05fe3168376bc55e98ab4a7663987e"
+    },
+    "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3": {
+      "protocolVersion": "1.0",
+      "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "sessionId": "sess_86721400ae79ccd23771d284",
+      "correlationId": "corr_1794519757122_n85s3",
+      "status": "completed",
+      "result": {
+        "operationId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+        "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-12T21:42:37.228Z",
+      "signature": "a887dbba5b51a930cdc6d0b3dd5c18b157d6755081f572cad3ba56c59f8155af"
+    },
+    "task_de800263-ec40-41a6-bfc7-012bfb011a5b": {
+      "protocolVersion": "1.0",
+      "taskId": "task_de800263-ec40-41a6-bfc7-012bfb011a5b",
+      "sessionId": "sess_e3c3074e0183afc9cab8897b",
+      "correlationId": "corr_1794519765768_cvuhs",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:42:45.805Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:42:45.805Z",
+      "signature": "e4026df0fed1f210b24195132ed8eb795d0aecc830e83aa2113ac6df534e84a6"
+    },
+    "task_feecb506-f690-4d54-8711-68648af78a3a": {
+      "protocolVersion": "1.0",
+      "taskId": "task_feecb506-f690-4d54-8711-68648af78a3a",
+      "sessionId": "sess_ab9d8f02a1b0444512ecd3c0",
+      "correlationId": "corr_1794519765813_ohctg",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 24,
+      "timestamp": "2026-11-12T21:42:45.934Z",
+      "signature": "b256eb76110b7ac3b5c193f4761d0bf5e578bc6c51d5e79a9a883c3680a45308"
+    },
+    "task_a96806c1-9dd3-4ff6-b254-c74d5d34ca1c": {
+      "protocolVersion": "1.0",
+      "taskId": "task_a96806c1-9dd3-4ff6-b254-c74d5d34ca1c",
+      "sessionId": "sess_c99d92b5fa5499a68bae6828",
+      "correlationId": "corr_1794519766120_v6g6g",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:42:46.158Z",
+      "signature": "a195f3fe43ef12836ce026ae7d21367b83534f04b611432c85ee47151f0aadb9"
+    },
+    "task_d811b18c-fd4a-41cb-995c-f86d37801c3f": {
+      "protocolVersion": "1.0",
+      "taskId": "task_d811b18c-fd4a-41cb-995c-f86d37801c3f",
+      "sessionId": "sess_c99d92b5fa5499a68bae6828",
+      "correlationId": "corr_1794519766164_6weob",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 69,
+      "timestamp": "2026-11-12T21:42:46.263Z",
+      "signature": "86eb7e846e70a24dd9e47db3c3ae214b10190c9390deacdacb2b3546f055bd71"
+    },
+    "task_653727be-1cee-4b52-a6f4-3256bf2fd332": {
+      "protocolVersion": "1.0",
+      "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "sessionId": "sess_27d461e6417c66d5e358bba5",
+      "correlationId": "corr_1794519766359_ex2kk",
+      "status": "completed",
+      "result": {
+        "operationId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+        "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-12T21:42:46.463Z",
+      "signature": "eb2293aaf77582a4a8063a05b271d8b0eff7db561c58dc25fe9694f4b62402b0"
+    },
+    "task_7ac62f49-a071-4c2c-a200-4092fae61df7": {
+      "protocolVersion": "1.0",
+      "taskId": "task_7ac62f49-a071-4c2c-a200-4092fae61df7",
+      "sessionId": "sess_b1eb7b27713633a5bafa28ec",
+      "correlationId": "corr_1794519861534_my9uy",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:44:21.579Z"
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:44:21.579Z",
+      "signature": "a7d990344488ea24115c2d521ad5fd47dc63b531e435ded1027979d62080299b"
+    },
+    "task_83fe62f1-5da8-4cd7-8234-52cdb9e4d570": {
+      "protocolVersion": "1.0",
+      "taskId": "task_83fe62f1-5da8-4cd7-8234-52cdb9e4d570",
+      "sessionId": "sess_622ad039bf402d596fa95987",
+      "correlationId": "corr_1794519861598_ime33",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 31,
+      "timestamp": "2026-11-12T21:44:21.749Z",
+      "signature": "690c11f71fe392aa4ae080ae945f93e0ed670ceded75b032e387803272b3b88e"
+    },
+    "task_32c60cc3-b6e1-44bb-a27f-349b134f3712": {
+      "protocolVersion": "1.0",
+      "taskId": "task_32c60cc3-b6e1-44bb-a27f-349b134f3712",
+      "sessionId": "sess_49632a36848a50291c8ad4a0",
+      "correlationId": "corr_1794519861897_h7o2d",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-12T21:44:21.931Z",
+      "signature": "6d0400e5b75e40a870bd40ce4e8f4eb2408e81fa8061c41afe3ceafc5e5466eb"
+    },
+    "task_041bc6fa-e6aa-4e2b-8155-eb7940596524": {
+      "protocolVersion": "1.0",
+      "taskId": "task_041bc6fa-e6aa-4e2b-8155-eb7940596524",
+      "sessionId": "sess_49632a36848a50291c8ad4a0",
+      "correlationId": "corr_1794519861935_672yf",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 68,
+      "timestamp": "2026-11-12T21:44:22.050Z",
+      "signature": "68545c05eb4efa01f207d0973e3a79d43ed9b505d6ff4c9e9064a81d7a931f7c"
+    },
+    "task_1e193c8f-0795-4cf2-8eb4-d959708401bf": {
+      "protocolVersion": "1.0",
+      "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "sessionId": "sess_793c7d235f38147cad1ebf5e",
+      "correlationId": "corr_1794519862125_9ofnv",
+      "status": "completed",
+      "result": {
+        "operationId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+        "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 68,
+      "timestamp": "2026-11-12T21:44:22.229Z",
+      "signature": "40d3c1ef179aba28483e7964f153cc1c11be80e803c6897056041f43af2edb2f"
+    },
+    "task_478d9956-b269-46c2-a8a1-0df7f651ff64": {
+      "protocolVersion": "1.0",
+      "taskId": "task_478d9956-b269-46c2-a8a1-0df7f651ff64",
+      "sessionId": "sess_20d42c38051deb11a11968a7",
+      "correlationId": "corr_1794519868554_z2k8a",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:44:28.583Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:44:28.583Z",
+      "signature": "998615cbdd66276849214e90336f8657960ab7cfe63248dd428dcf8af04f6b80"
+    },
+    "task_e5e67f4d-75fc-49a9-8054-1232cf0b6612": {
+      "protocolVersion": "1.0",
+      "taskId": "task_e5e67f4d-75fc-49a9-8054-1232cf0b6612",
+      "sessionId": "sess_6f2c2f293680c180f182fedf",
+      "correlationId": "corr_1794519868596_e6dw8",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 22,
+      "timestamp": "2026-11-12T21:44:28.699Z",
+      "signature": "a7402484b85db35f8ab3d4ce377574539f9c228421706ed407ac61af50aaaa5b"
+    },
+    "task_9ae3c56d-41d6-40eb-8dbc-4756e7b043f9": {
+      "protocolVersion": "1.0",
+      "taskId": "task_9ae3c56d-41d6-40eb-8dbc-4756e7b043f9",
+      "sessionId": "sess_43e4b07c1d616e76b04c16fa",
+      "correlationId": "corr_1794519868851_3x51k",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:44:28.882Z",
+      "signature": "5123402c3888cb80ad96dc836ca59980bcc6b23ad1c994eb1114fff5441a3c97"
+    },
+    "task_54aee67b-e391-43b6-8891-15d449d85861": {
+      "protocolVersion": "1.0",
+      "taskId": "task_54aee67b-e391-43b6-8891-15d449d85861",
+      "sessionId": "sess_43e4b07c1d616e76b04c16fa",
+      "correlationId": "corr_1794519868886_hdv0w",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 69,
+      "timestamp": "2026-11-12T21:44:28.983Z",
+      "signature": "a09f4693bf20660f2d878d60d7211d9df20a4f69d23e5e958131765058afff92"
+    },
+    "task_321cf133-5458-4538-9a68-423f2d314994": {
+      "protocolVersion": "1.0",
+      "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "sessionId": "sess_50097e6d712a848d1ec57875",
+      "correlationId": "corr_1794519869061_grrvs",
+      "status": "completed",
+      "result": {
+        "operationId": "task_321cf133-5458-4538-9a68-423f2d314994",
+        "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 69,
+      "timestamp": "2026-11-12T21:44:29.166Z",
+      "signature": "621075d63f88b6f1699af7adb4b2fac3748b583650ba1d0cb8a9faf107edb313"
+    },
+    "task_2cb14ed5-7b48-400c-8dff-81f65593aa8c": {
+      "protocolVersion": "1.0",
+      "taskId": "task_2cb14ed5-7b48-400c-8dff-81f65593aa8c",
+      "sessionId": "sess_333695f492a494bef9c87251",
+      "correlationId": "corr_1794519935850_wt6od",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:45:35.893Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:45:35.893Z",
+      "signature": "7cf663bc3f9d0e7fac8e3cb6e958c47c3f9d1be3fc27365af6b5b42eb62eac88"
+    },
+    "task_aab88b00-3f4e-4024-b003-3086096defba": {
+      "protocolVersion": "1.0",
+      "taskId": "task_aab88b00-3f4e-4024-b003-3086096defba",
+      "sessionId": "sess_27c12e30dfef4716e06812c8",
+      "correlationId": "corr_1794519935899_mevna",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 22,
+      "timestamp": "2026-11-12T21:45:36.016Z",
+      "signature": "aeccb63f093f19bb8d6f0b3c7e5db45265e3272aaa46d7f8c85a06bbbbf078d8"
+    },
+    "task_01a14efd-15f9-4192-8403-9fbcf9dc22d3": {
+      "protocolVersion": "1.0",
+      "taskId": "task_01a14efd-15f9-4192-8403-9fbcf9dc22d3",
+      "sessionId": "sess_173aaf2ae8f88cf232dc9f92",
+      "correlationId": "corr_1794519936204_77chm",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:45:36.231Z",
+      "signature": "2f49c3120d10ba2d26404cdc38e885662c8316cb546b4655d700c51c9b4a0daa"
+    },
+    "task_71f6f885-abd5-4e53-898e-dba186e01525": {
+      "protocolVersion": "1.0",
+      "taskId": "task_71f6f885-abd5-4e53-898e-dba186e01525",
+      "sessionId": "sess_173aaf2ae8f88cf232dc9f92",
+      "correlationId": "corr_1794519936236_ap965",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-12T21:45:36.333Z",
+      "signature": "4f00ea588660cd6cadc90056a52b36002db1bcfc2da5535cc2d0b0d97ac738b5"
+    },
+    "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9": {
+      "protocolVersion": "1.0",
+      "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "sessionId": "sess_40416f2fb3ccefd2a1b6bce0",
+      "correlationId": "corr_1794519936410_ayvtf",
+      "status": "completed",
+      "result": {
+        "operationId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+        "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-12T21:45:36.511Z",
+      "signature": "0a7d907b23c46f9107f32b5a7f2cd8d62e25481b7a3680ec17574cb4736e2be0"
+    },
+    "task_215942a4-2f66-40aa-b0eb-253189a93a84": {
+      "protocolVersion": "1.0",
+      "taskId": "task_215942a4-2f66-40aa-b0eb-253189a93a84",
+      "sessionId": "sess_1804730d149536e5925158bc",
+      "correlationId": "corr_1794519941842_hsyh3",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-12T14:51:28.743Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-12T14:51:28.790Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-12T14:51:28.796Z"
+          }
+        ],
+        "timestamp": "2026-11-12T21:45:41.874Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:45:41.874Z",
+      "signature": "333c316c519cf25aabddef4a184febbd06321e63ede4860941691550db9df9f4"
+    },
+    "task_21cc2f04-62d5-4e68-b2f2-a24744a920e9": {
+      "protocolVersion": "1.0",
+      "taskId": "task_21cc2f04-62d5-4e68-b2f2-a24744a920e9",
+      "sessionId": "sess_69394a8098938007bf49c7a8",
+      "correlationId": "corr_1794519941881_gs26c",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 25,
+      "timestamp": "2026-11-12T21:45:41.997Z",
+      "signature": "c2490a4f36207e94f8022b8e6f422744582e1ab51879ffa6884a68f109672d38"
+    },
+    "task_449eaa9c-4487-4ff0-9084-78c36ca50101": {
+      "protocolVersion": "1.0",
+      "taskId": "task_449eaa9c-4487-4ff0-9084-78c36ca50101",
+      "sessionId": "sess_c83c31954b98f2a4d6068393",
+      "correlationId": "corr_1794519942153_3qm77",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-12T21:45:42.187Z",
+      "signature": "65b14499cd4142b9d9599d52ddbfac148470ba81a21fe7063217b694d6fdac8c"
+    },
+    "task_a10ecd3a-c35d-426a-82ab-12a0b64a2262": {
+      "protocolVersion": "1.0",
+      "taskId": "task_a10ecd3a-c35d-426a-82ab-12a0b64a2262",
+      "sessionId": "sess_c83c31954b98f2a4d6068393",
+      "correlationId": "corr_1794519942192_5exn2",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 68,
+      "timestamp": "2026-11-12T21:45:42.292Z",
+      "signature": "89078aa57d2b18c71f939a5b11c086025945514fe8074bbd86cd091b00416ca4"
+    },
+    "task_bf0a9400-4a86-4f7d-8946-5826bc114b73": {
+      "protocolVersion": "1.0",
+      "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "sessionId": "sess_c638a460754770e63e77a634",
+      "correlationId": "corr_1794519942370_eg5yl",
+      "status": "completed",
+      "result": {
+        "operationId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+        "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 69,
+      "timestamp": "2026-11-12T21:45:42.474Z",
+      "signature": "aa16ff90b7ca4ccbace5c73ef22fba3bbe510566921706ec52f1319053418afd"
+    },
+    "task_c0a4d6b1-bf68-4998-8266-07d3570f2791": {
+      "protocolVersion": "1.0",
+      "taskId": "task_c0a4d6b1-bf68-4998-8266-07d3570f2791",
+      "sessionId": "sess_f5bfe2dc7d19666a3ef8aa4e",
+      "correlationId": "corr_1794587968262_24tj6",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-13T15:47:44.424Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-13T15:47:44.402Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-13T15:47:44.401Z"
+          }
+        ],
+        "timestamp": "2026-11-13T16:39:28.302Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:39:28.302Z",
+      "signature": "1a5065c167dd1f77e0431fc77c3008f1ad3b784f6b76d8b042de4086e05dfd3d"
+    },
+    "task_100f7faf-9a70-42f3-800e-0907754f947b": {
+      "protocolVersion": "1.0",
+      "taskId": "task_100f7faf-9a70-42f3-800e-0907754f947b",
+      "sessionId": "sess_ae1c6e142a11ec83621a2bcb",
+      "correlationId": "corr_1794587968309_cw2a4",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 55,
+      "timestamp": "2026-11-13T16:39:28.462Z",
+      "signature": "66be1bc4e9dda7fe7bfa2a3295fd273826d56bdf9e760f648bca5d2cd2d56e57"
+    },
+    "task_5f141c44-ec42-4850-bed9-63c277ffa46f": {
+      "protocolVersion": "1.0",
+      "taskId": "task_5f141c44-ec42-4850-bed9-63c277ffa46f",
+      "sessionId": "sess_c76e8fec18c177ee16cdc30f",
+      "correlationId": "corr_1794587968676_7e10i",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:39:28.718Z",
+      "signature": "a821f143ebadcb1e8b266b9fdd0d81d16d43775f7b85470439a19c3a320ef6ab"
+    },
+    "task_c28d9094-3551-4655-9ae7-0f206cb470cd": {
+      "protocolVersion": "1.0",
+      "taskId": "task_c28d9094-3551-4655-9ae7-0f206cb470cd",
+      "sessionId": "sess_c76e8fec18c177ee16cdc30f",
+      "correlationId": "corr_1794587968723_59lip",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 69,
+      "timestamp": "2026-11-13T16:39:28.829Z",
+      "signature": "5499f921242df6b69e66d47514de766c4cecc952b46af02dc5a0c46cbef31bbc"
+    },
+    "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f": {
+      "protocolVersion": "1.0",
+      "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "sessionId": "sess_f4f4d153e118b1063571b4fc",
+      "correlationId": "corr_1794587968916_kk250",
+      "status": "completed",
+      "result": {
+        "operationId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+        "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 74,
+      "timestamp": "2026-11-13T16:39:29.035Z",
+      "signature": "68b44c67d53c4205747564cfb1454f0e613b281cb95529495e635847d9883f0a"
+    },
+    "task_847273d7-25f1-474a-9338-2a47dd55742d": {
+      "protocolVersion": "1.0",
+      "taskId": "task_847273d7-25f1-474a-9338-2a47dd55742d",
+      "sessionId": "sess_45409fd2929f5e72c138573f",
+      "correlationId": "corr_1794588087259_yn2yc",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-13T15:47:44.424Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-13T15:47:44.402Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-13T15:47:44.401Z"
+          }
+        ],
+        "timestamp": "2026-11-13T16:41:27.287Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:41:27.287Z",
+      "signature": "fd280b0e0e2f52a19f24055de1a7c6e619412157f80bad52996d4bfbecbcbeb1"
+    },
+    "task_d7b3530d-acd2-412c-add4-220b916865d2": {
+      "protocolVersion": "1.0",
+      "taskId": "task_d7b3530d-acd2-412c-add4-220b916865d2",
+      "sessionId": "sess_ce11cb0bcc40d59d920c6cda",
+      "correlationId": "corr_1794588087299_fahr1",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 21,
+      "timestamp": "2026-11-13T16:41:27.396Z",
+      "signature": "15b09bae20dddca2c57e6e4f49102115e700c0f74e674a8189041da0832cab08"
+    },
+    "task_28f74943-4100-4377-9502-1c65467cd50c": {
+      "protocolVersion": "1.0",
+      "taskId": "task_28f74943-4100-4377-9502-1c65467cd50c",
+      "sessionId": "sess_04aafbdb2d112b95ecba1f74",
+      "correlationId": "corr_1794588087548_60fo9",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:41:27.588Z",
+      "signature": "ae7feda1cf27e94f4cce25e31dbcaf5d895d702b44926d65d9834a71b48b0433"
+    },
+    "task_e5831d0c-2232-439f-8a21-f92fb84efcf3": {
+      "protocolVersion": "1.0",
+      "taskId": "task_e5831d0c-2232-439f-8a21-f92fb84efcf3",
+      "sessionId": "sess_04aafbdb2d112b95ecba1f74",
+      "correlationId": "corr_1794588087593_c9kea",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-13T16:41:27.686Z",
+      "signature": "4f5d7d7769bc467df28fcd474bbf713edfecb8ce796cf75c4d702d23dac037ec"
+    },
+    "task_27042c25-8675-4e59-a84c-0f888b668945": {
+      "protocolVersion": "1.0",
+      "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "sessionId": "sess_9c94fc2340579c21327fc89a",
+      "correlationId": "corr_1794588087756_tvled",
+      "status": "completed",
+      "result": {
+        "operationId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+        "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 67,
+      "timestamp": "2026-11-13T16:41:27.854Z",
+      "signature": "2e79bd8db8d6c5fa1ea75399b33249555cf4afb0a1f3a24be522e698c7b54c87"
+    },
+    "task_6d9a6738-b909-4aaa-b8bb-242137594470": {
+      "protocolVersion": "1.0",
+      "taskId": "task_6d9a6738-b909-4aaa-b8bb-242137594470",
+      "sessionId": "sess_d16626b6e7a70d59e824e37d",
+      "correlationId": "corr_1794588134831_v26dj",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-13T15:47:44.424Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-13T15:47:44.402Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-13T15:47:44.401Z"
+          }
+        ],
+        "timestamp": "2026-11-13T16:42:14.858Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:42:14.858Z",
+      "signature": "016ae1a42d239c5a95bb675b52ebf9e1d9f6067225737eaa403013b841188c4d"
+    },
+    "task_ee8e6abf-6e9d-4ba2-85df-01e8902713e3": {
+      "protocolVersion": "1.0",
+      "taskId": "task_ee8e6abf-6e9d-4ba2-85df-01e8902713e3",
+      "sessionId": "sess_eb64a8cfa172927729793db7",
+      "correlationId": "corr_1794588134871_r7zro",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 19,
+      "timestamp": "2026-11-13T16:42:14.969Z",
+      "signature": "3c141320e1ff825c4bc68f29ce7f8ed10e19e3c07a771d239e70507e7ab48df8"
+    },
+    "task_44917ee7-a55d-4e60-aadb-1efa02323704": {
+      "protocolVersion": "1.0",
+      "taskId": "task_44917ee7-a55d-4e60-aadb-1efa02323704",
+      "sessionId": "sess_d2162bc3da650529afb021c5",
+      "correlationId": "corr_1794588135325_8d7i2",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-13T16:42:15.362Z",
+      "signature": "8252bbdf6920be2a0902057655b97fb03ad6c33edfed4d1c974508f0e2384103"
+    },
+    "task_f553abaf-15db-408d-a1a1-1fdcc6f6b2bf": {
+      "protocolVersion": "1.0",
+      "taskId": "task_f553abaf-15db-408d-a1a1-1fdcc6f6b2bf",
+      "sessionId": "sess_d2162bc3da650529afb021c5",
+      "correlationId": "corr_1794588135367_9wrjt",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 70,
+      "timestamp": "2026-11-13T16:42:15.531Z",
+      "signature": "801b7fe28b744612b460d1223ce8e806d5e48fec131e2fbc9152e3fb1668cef2"
+    },
+    "task_44745638-a719-4cd2-8de5-df1c0caed2e5": {
+      "protocolVersion": "1.0",
+      "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "sessionId": "sess_64885dc39bb5e506af7b16b6",
+      "correlationId": "corr_1794588135621_2ab5s",
+      "status": "completed",
+      "result": {
+        "operationId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+        "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 68,
+      "timestamp": "2026-11-13T16:42:15.727Z",
+      "signature": "63f49e77354e1eac69e5c9a762279be45718433e6bbb6cfebb5614d59712a7f5"
+    },
+    "task_aa3f0e41-77cc-4f87-affd-286b5c97dd33": {
+      "protocolVersion": "1.0",
+      "taskId": "task_aa3f0e41-77cc-4f87-affd-286b5c97dd33",
+      "sessionId": "sess_1c91708ab32225a3a986f590",
+      "correlationId": "corr_1794588242054_kf1ka",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-13T15:47:44.424Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-13T15:47:44.402Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-13T15:47:44.401Z"
+          }
+        ],
+        "timestamp": "2026-11-13T16:44:02.135Z"
+      },
+      "error": null,
+      "executionTime": 6,
+      "timestamp": "2026-11-13T16:44:02.135Z",
+      "signature": "a8750397243fbfcc954f93a2cf06945bcc60a778f1c759124a02aeb7f1ecd4a1"
+    },
+    "task_a36226fa-02e0-4698-b758-d1171e2ede56": {
+      "protocolVersion": "1.0",
+      "taskId": "task_a36226fa-02e0-4698-b758-d1171e2ede56",
+      "sessionId": "sess_2408a72e080c4f64185c04a0",
+      "correlationId": "corr_1794588242146_rzw6x",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 50,
+      "timestamp": "2026-11-13T16:44:02.326Z",
+      "signature": "e6a648ef789bf306adf101a6601c0d5badfae16557f525bd34b73c7d8491e27c"
+    },
+    "task_b099fdb6-635a-4cc1-a8e3-e915e801b741": {
+      "protocolVersion": "1.0",
+      "taskId": "task_b099fdb6-635a-4cc1-a8e3-e915e801b741",
+      "sessionId": "sess_84a023e2cd07cb98bac86d37",
+      "correlationId": "corr_1794588242544_ljeo7",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-13T16:44:02.621Z",
+      "signature": "3871e40b55810eef9c03aeebf7e512ef11783e2f8742a71cc87022920dd8b096"
+    },
+    "task_134a572e-bc25-4750-bbae-8ec7b6a1aff6": {
+      "protocolVersion": "1.0",
+      "taskId": "task_134a572e-bc25-4750-bbae-8ec7b6a1aff6",
+      "sessionId": "sess_84a023e2cd07cb98bac86d37",
+      "correlationId": "corr_1794588242629_o0y9j",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 71,
+      "timestamp": "2026-11-13T16:44:02.790Z",
+      "signature": "cc0a669dd37016e35949f95b0b2b1eb36ffc3638cb1ce4a5877d34cece8eed73"
+    },
+    "task_c1c94e05-5a15-4626-802b-0b439eb89963": {
+      "protocolVersion": "1.0",
+      "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "sessionId": "sess_a2e576d7d7698c2822e65e6d",
+      "correlationId": "corr_1794588242895_ijh27",
+      "status": "completed",
+      "result": {
+        "operationId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+        "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 69,
+      "timestamp": "2026-11-13T16:44:03.019Z",
+      "signature": "e3edd9e1bd94d9409fc06390365a151d58ab2b6677ab6c72c54e04effb8ac30b"
+    },
+    "task_1f8c2c28-6ea3-4557-a337-a39855298204": {
+      "protocolVersion": "1.0",
+      "taskId": "task_1f8c2c28-6ea3-4557-a337-a39855298204",
+      "sessionId": "sess_eb69908401f7ba9c80151d9a",
+      "correlationId": "corr_1794588433739_ugexi",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-13T15:47:44.424Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-13T15:47:44.402Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-13T15:47:44.401Z"
+          }
+        ],
+        "timestamp": "2026-11-13T16:47:13.831Z"
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-13T16:47:13.831Z",
+      "signature": "1840f45ccec5964a594b80363847fb63cd6879e0390c5055bcf2e1f2432203ed"
+    },
+    "task_89d5d2d1-334a-4643-b4ba-3cdb84715941": {
+      "protocolVersion": "1.0",
+      "taskId": "task_89d5d2d1-334a-4643-b4ba-3cdb84715941",
+      "sessionId": "sess_d3e3ba54ddc287e7244046d8",
+      "correlationId": "corr_1794588433841_u67ln",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 77,
+      "timestamp": "2026-11-13T16:47:14.221Z",
+      "signature": "f82c2e8e8229653a29949db337b5434993092f5497c8929992bc607ceaf984d9"
+    },
+    "task_e81ddbe7-56e3-4f9b-a026-4967bb447a2c": {
+      "protocolVersion": "1.0",
+      "taskId": "task_e81ddbe7-56e3-4f9b-a026-4967bb447a2c",
+      "sessionId": "sess_7b15a7e84566f1a7a7964996",
+      "correlationId": "corr_1794588434519_8ii45",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:47:14.583Z",
+      "signature": "f027b1fb8f00bd0830e2bb062d2643b2eb23f710aed4475fa227457e79ac7361"
+    },
+    "task_636d8a5e-8ce5-4b2f-9ba2-a998e53a4650": {
+      "protocolVersion": "1.0",
+      "taskId": "task_636d8a5e-8ce5-4b2f-9ba2-a998e53a4650",
+      "sessionId": "sess_7b15a7e84566f1a7a7964996",
+      "correlationId": "corr_1794588434588_z38b6",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 81,
+      "timestamp": "2026-11-13T16:47:14.711Z",
+      "signature": "da7dd1ea24f6825601c62a36649042970cf916ca1174eabbdf0307a5be38a618"
+    },
+    "task_9963c841-ab8f-40bf-be66-db19a864185e": {
+      "protocolVersion": "1.0",
+      "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "sessionId": "sess_304c2164d1c3016b337eced7",
+      "correlationId": "corr_1794588435012_k0vf3",
+      "status": "completed",
+      "result": {
+        "operationId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+        "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 73,
+      "timestamp": "2026-11-13T16:47:15.236Z",
+      "signature": "4b4902ef4e3699a94644f444b393fc193d3e37599d8ecb45b0d2d425ca01a9be"
+    },
+    "task_755a2e7f-4504-49eb-b3df-277d345bf1eb": {
+      "protocolVersion": "1.0",
+      "taskId": "task_755a2e7f-4504-49eb-b3df-277d345bf1eb",
+      "sessionId": "sess_e2de30c4fea192628a4fe32d",
+      "correlationId": "corr_1794588498782_jt5ng",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-13T15:47:44.424Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-13T15:47:44.402Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-13T15:47:44.401Z"
+          }
+        ],
+        "timestamp": "2026-11-13T16:48:18.850Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:48:18.850Z",
+      "signature": "c0c74195e8fcadcfa39ddb846f34530863d155679fc5421d4e64ff388e6d25f9"
+    },
+    "task_d630444b-c809-4ca2-ac81-53114532e381": {
+      "protocolVersion": "1.0",
+      "taskId": "task_d630444b-c809-4ca2-ac81-53114532e381",
+      "sessionId": "sess_9c512bb621be076589d55004",
+      "correlationId": "corr_1794588498860_n4u4j",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 33,
+      "timestamp": "2026-11-13T16:48:19.062Z",
+      "signature": "48df8ed8f7bcbef176cdd97bf7f429abc100bcadf7fedfadba26866c3936e253"
+    },
+    "task_1733b2cd-23de-4287-bd21-43b762ffe6e5": {
+      "protocolVersion": "1.0",
+      "taskId": "task_1733b2cd-23de-4287-bd21-43b762ffe6e5",
+      "sessionId": "sess_2c858c49a83acc9c5100fc51",
+      "correlationId": "corr_1794588499260_8nuyj",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-13T16:48:19.348Z",
+      "signature": "ad0cfd1db4680d9c7d35bc6cfc90ecab1db843939c549e8f3105ce6c625b9866"
+    },
+    "task_45ebd8c1-bdb4-420b-a984-b6d2a3223087": {
+      "protocolVersion": "1.0",
+      "taskId": "task_45ebd8c1-bdb4-420b-a984-b6d2a3223087",
+      "sessionId": "sess_2c858c49a83acc9c5100fc51",
+      "correlationId": "corr_1794588499354_g5ao5",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 69,
+      "timestamp": "2026-11-13T16:48:19.481Z",
+      "signature": "86545fa8185354294e07bb7d2a8637fe6bc95adbc01a02fdd8980ddb1e3ec1c4"
+    },
+    "task_1cd1cdab-1edb-438d-9732-073a47f8aa23": {
+      "protocolVersion": "1.0",
+      "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "sessionId": "sess_9909b3d2ed50441a10ac27fd",
+      "correlationId": "corr_1794588499621_uukn1",
+      "status": "completed",
+      "result": {
+        "operationId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+        "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 70,
+      "timestamp": "2026-11-13T16:48:19.738Z",
+      "signature": "c66ffacdfa9cf7a0e2aa0698710797651cd40d1884704b4d16486d1fa060a234"
+    },
+    "task_67f5a9f2-e685-4fe0-ba0e-df19884575dc": {
+      "protocolVersion": "1.0",
+      "taskId": "task_67f5a9f2-e685-4fe0-ba0e-df19884575dc",
+      "sessionId": "sess_96fe9cef80ee1e6790448466",
+      "correlationId": "corr_1794588507613_y6nap",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "defaultProjectJson": {
+          "name": "ForgeAI_Roblox_Project",
+          "servePort": 34872,
+          "tree": {
+            "$className": "DataModel",
+            "ReplicatedStorage": {
+              "$className": "ReplicatedStorage",
+              "Shared": {
+                "$path": "src/shared"
+              }
+            },
+            "ServerScriptService": {
+              "$className": "ServerScriptService",
+              "Server": {
+                "$path": "src/server"
+              }
+            },
+            "StarterPlayer": {
+              "$className": "StarterPlayer",
+              "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "Client": {
+                  "$path": "src/client"
+                }
+              }
+            },
+            "StarterGui": {
+              "$className": "StarterGui",
+              "Interface": {
+                "$path": "src/client/UI"
+              }
+            }
+          }
+        },
+        "files": [
+          {
+            "name": "RemoteProvider",
+            "relativePath": "src/shared/Network/RemoteProvider.luau",
+            "sizeBytes": 1913,
+            "sha256": "5d1f69834dff",
+            "contentFnv32": "c3861a46",
+            "datamodelTarget": "ReplicatedStorage.Shared.RemoteProvider",
+            "modifiedAt": "2026-11-13T15:47:44.424Z"
+          },
+          {
+            "name": "GameTypes",
+            "relativePath": "src/shared/Types/GameTypes.luau",
+            "sizeBytes": 1121,
+            "sha256": "1d1bc56e8bf0",
+            "contentFnv32": "3dd430a0",
+            "datamodelTarget": "ReplicatedStorage.Shared.GameTypes",
+            "modifiedAt": "2026-11-13T15:47:44.402Z"
+          },
+          {
+            "name": "Maid",
+            "relativePath": "src/shared/Utils/Maid.luau",
+            "sizeBytes": 1732,
+            "sha256": "e8c1bf1e1c8c",
+            "contentFnv32": "da76e498",
+            "datamodelTarget": "ReplicatedStorage.Shared.Maid",
+            "modifiedAt": "2026-11-13T15:47:44.401Z"
+          }
+        ],
+        "timestamp": "2026-11-13T16:48:27.652Z"
+      },
+      "error": null,
+      "executionTime": 1,
+      "timestamp": "2026-11-13T16:48:27.652Z",
+      "signature": "8fc8ef14e3ea3935d34de7a6c308c1860521b0eb7e60c5dd34f0454fecffb5da"
+    },
+    "task_c87df100-0368-4454-a69d-506de77bd525": {
+      "protocolVersion": "1.0",
+      "taskId": "task_c87df100-0368-4454-a69d-506de77bd525",
+      "sessionId": "sess_79e8da76c113867c054ac2fe",
+      "correlationId": "corr_1794588507658_s9kk2",
+      "status": "completed",
+      "result": {
+        "projectName": "ForgeAI_Roblox_Project",
+        "projectConnected": true,
+        "defaultProjectJsonFound": true,
+        "rojoCliInstalled": false,
+        "rojoVersion": null,
+        "rojoServePort": 34872,
+        "rojoServerListening": false,
+        "syncedFilesCount": 3,
+        "lastChangeDetectedAt": null
+      },
+      "error": null,
+      "executionTime": 44,
+      "timestamp": "2026-11-13T16:48:27.831Z",
+      "signature": "ab7db540b02a021cd8734c211787fb5fce3b86cdbbbb3cbeea9980d7638018f1"
+    },
+    "task_8a9ba3fd-da2e-4d8a-ae91-8ce680f8e85c": {
+      "protocolVersion": "1.0",
+      "taskId": "task_8a9ba3fd-da2e-4d8a-ae91-8ce680f8e85c",
+      "sessionId": "sess_6f34811fc3f5a856d1d01738",
+      "correlationId": "corr_1794588508065_y5577",
+      "status": "completed",
+      "result": {
+        "writtenFiles": [
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.luau",
+            "bytesWritten": 17399,
+            "sha256": "dfe6a94a9cb5"
+          },
+          {
+            "relativePath": "src/shared/Assets3D/CyberTurretValidation3D.rbxmx",
+            "bytesWritten": 33845,
+            "sha256": "452183e1e339"
+          }
+        ]
+      },
+      "error": null,
+      "executionTime": 2,
+      "timestamp": "2026-11-13T16:48:28.106Z",
+      "signature": "55a338ce2fbdf6ea41187398420be4f9894fd3bde276f6c847db6589cc36c675"
+    },
+    "task_c1f7259a-f022-4511-aa9d-dcc335cb7b43": {
+      "protocolVersion": "1.0",
+      "taskId": "task_c1f7259a-f022-4511-aa9d-dcc335cb7b43",
+      "sessionId": "sess_6f34811fc3f5a856d1d01738",
+      "correlationId": "corr_1794588508112_5fzep",
+      "status": "completed",
+      "result": {
+        "modelName": "CyberTurretValidation3D",
+        "mode": "spawned_new",
+        "partCount": 3
+      },
+      "error": null,
+      "executionTime": 70,
+      "timestamp": "2026-11-13T16:48:28.240Z",
+      "signature": "63a0001816b738b213db877f3e501f54f091bb9d4ee6bc68301d51760dc9ab3c"
+    },
+    "task_f541f138-d07b-456b-a373-841ac74a7f00": {
+      "protocolVersion": "1.0",
+      "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "sessionId": "sess_881c124e41e4923980fb2654",
+      "correlationId": "corr_1794588508352_s9jbz",
+      "status": "completed",
+      "result": {
+        "operationId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+        "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+        "status": "completed",
+        "verified": true,
+        "modelName": "DestructiveCheckModel",
+        "expectedModelHash": "hash_after_delete_111",
+        "appliedModelHash": "hash_after_delete_111",
+        "expectedPartCount": 1,
+        "actualPartCount": 1,
+        "removedPartIds": [
+          "part_to_delete_01"
+        ],
+        "pendingDeletionPartIds": [],
+        "failedPartIds": [],
+        "verifiedGeometryPartIds": [
+          "part_kept_01"
+        ]
+      },
+      "error": null,
+      "executionTime": 70,
+      "timestamp": "2026-11-13T16:48:28.473Z",
+      "signature": "8a3785d84f4c80d3d8a5635a85f213c8a5edea0713f1e85f0c23c1023bc67a52"
+    }
+  },
+  "awaitingConfirmations": {
+    "task_2000e699-50bd-420d-813f-55318141a557": {
+      "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "operationId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "sessionId": "sess_e999874622f86b3cbb2b0a4d",
+      "correlationId": "corr_1794519313108_riule",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519313201,
+      "expiresAt": 1794519613201,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+        "sessionId": "sess_e999874622f86b3cbb2b0a4d",
+        "correlationId": "corr_1794519313108_riule",
+        "status": "completed",
+        "result": {
+          "operationId": "task_2000e699-50bd-420d-813f-55318141a557",
+          "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 66,
+        "timestamp": "2026-11-12T21:35:13.207Z",
+        "signature": "cf950ac787f37ca014c25fb849d7e7b6ba3d1b76e9c9566938e7b4c2d803310d"
+      },
+      "resolvedAt": 1794519313207
+    },
+    "task_4f29578f-c549-4305-a720-1189128f203b": {
+      "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "operationId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "sessionId": "sess_0ab1fb317875290aa63839d4",
+      "correlationId": "corr_1794519334552_ndrr4",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519334656,
+      "expiresAt": 1794519634656,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+        "sessionId": "sess_0ab1fb317875290aa63839d4",
+        "correlationId": "corr_1794519334552_ndrr4",
+        "status": "completed",
+        "result": {
+          "operationId": "task_4f29578f-c549-4305-a720-1189128f203b",
+          "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 70,
+        "timestamp": "2026-11-12T21:35:34.665Z",
+        "signature": "87b36e21b226757109a8c799e0b4dc55870551b81d37b3beef052e3180ac60be"
+      },
+      "resolvedAt": 1794519334664
+    },
+    "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553": {
+      "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "operationId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "sessionId": "sess_eb446ba1ff1e3749d31804ec",
+      "correlationId": "corr_1794519372307_lhcm9",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519372418,
+      "expiresAt": 1794519672418,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+        "sessionId": "sess_eb446ba1ff1e3749d31804ec",
+        "correlationId": "corr_1794519372307_lhcm9",
+        "status": "completed",
+        "result": {
+          "operationId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+          "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 81,
+        "timestamp": "2026-11-12T21:36:12.425Z",
+        "signature": "9152d0665c3ade8c159c43e7ecd20f8e57e26b445e7c5cfdf65cc2b4c3cf4d0c"
+      },
+      "resolvedAt": 1794519372424
+    },
+    "task_4b829e40-e4ba-4f64-9e33-7e944357e275": {
+      "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "operationId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "sessionId": "sess_4e38bc0e84010ac9ceabb705",
+      "correlationId": "corr_1794519378343_rd5mu",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519378448,
+      "expiresAt": 1794519678448,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+        "sessionId": "sess_4e38bc0e84010ac9ceabb705",
+        "correlationId": "corr_1794519378343_rd5mu",
+        "status": "completed",
+        "result": {
+          "operationId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+          "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 67,
+        "timestamp": "2026-11-12T21:36:18.456Z",
+        "signature": "eeccdef89645fbd348bd211a250f3df0288624af30a36cec10aa6f92f27586a2"
+      },
+      "resolvedAt": 1794519378456
+    },
+    "task_169e32d5-22d7-425c-9793-a0bad83ffc71": {
+      "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "operationId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "sessionId": "sess_44e3bafe082c52852c2668cb",
+      "correlationId": "corr_1794519566156_psx58",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519566252,
+      "expiresAt": 1794519866252,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+        "sessionId": "sess_44e3bafe082c52852c2668cb",
+        "correlationId": "corr_1794519566156_psx58",
+        "status": "completed",
+        "result": {
+          "operationId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+          "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 68,
+        "timestamp": "2026-11-12T21:39:26.258Z",
+        "signature": "812ed789ad5203e605bcb0f4c6bee5f91860c9cf6293c18b95e207b1f6d04512"
+      },
+      "resolvedAt": 1794519566258
+    },
+    "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3": {
+      "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "operationId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "sessionId": "sess_86721400ae79ccd23771d284",
+      "correlationId": "corr_1794519757122_n85s3",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519757220,
+      "expiresAt": 1794520057220,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+        "sessionId": "sess_86721400ae79ccd23771d284",
+        "correlationId": "corr_1794519757122_n85s3",
+        "status": "completed",
+        "result": {
+          "operationId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+          "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 67,
+        "timestamp": "2026-11-12T21:42:37.228Z",
+        "signature": "a887dbba5b51a930cdc6d0b3dd5c18b157d6755081f572cad3ba56c59f8155af"
+      },
+      "resolvedAt": 1794519757228
+    },
+    "task_653727be-1cee-4b52-a6f4-3256bf2fd332": {
+      "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "operationId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "sessionId": "sess_27d461e6417c66d5e358bba5",
+      "correlationId": "corr_1794519766359_ex2kk",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519766454,
+      "expiresAt": 1794520066454,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+        "sessionId": "sess_27d461e6417c66d5e358bba5",
+        "correlationId": "corr_1794519766359_ex2kk",
+        "status": "completed",
+        "result": {
+          "operationId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+          "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 67,
+        "timestamp": "2026-11-12T21:42:46.463Z",
+        "signature": "eb2293aaf77582a4a8063a05b271d8b0eff7db561c58dc25fe9694f4b62402b0"
+      },
+      "resolvedAt": 1794519766463
+    },
+    "task_1e193c8f-0795-4cf2-8eb4-d959708401bf": {
+      "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "operationId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "sessionId": "sess_793c7d235f38147cad1ebf5e",
+      "correlationId": "corr_1794519862125_9ofnv",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519862222,
+      "expiresAt": 1794520162222,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+        "sessionId": "sess_793c7d235f38147cad1ebf5e",
+        "correlationId": "corr_1794519862125_9ofnv",
+        "status": "completed",
+        "result": {
+          "operationId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+          "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 68,
+        "timestamp": "2026-11-12T21:44:22.229Z",
+        "signature": "40d3c1ef179aba28483e7964f153cc1c11be80e803c6897056041f43af2edb2f"
+      },
+      "resolvedAt": 1794519862229
+    },
+    "task_321cf133-5458-4538-9a68-423f2d314994": {
+      "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "operationId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "sessionId": "sess_50097e6d712a848d1ec57875",
+      "correlationId": "corr_1794519869061_grrvs",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519869159,
+      "expiresAt": 1794520169159,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+        "sessionId": "sess_50097e6d712a848d1ec57875",
+        "correlationId": "corr_1794519869061_grrvs",
+        "status": "completed",
+        "result": {
+          "operationId": "task_321cf133-5458-4538-9a68-423f2d314994",
+          "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 69,
+        "timestamp": "2026-11-12T21:44:29.166Z",
+        "signature": "621075d63f88b6f1699af7adb4b2fac3748b583650ba1d0cb8a9faf107edb313"
+      },
+      "resolvedAt": 1794519869166
+    },
+    "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9": {
+      "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "operationId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "sessionId": "sess_40416f2fb3ccefd2a1b6bce0",
+      "correlationId": "corr_1794519936410_ayvtf",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519936504,
+      "expiresAt": 1794520236504,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+        "sessionId": "sess_40416f2fb3ccefd2a1b6bce0",
+        "correlationId": "corr_1794519936410_ayvtf",
+        "status": "completed",
+        "result": {
+          "operationId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+          "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 67,
+        "timestamp": "2026-11-12T21:45:36.511Z",
+        "signature": "0a7d907b23c46f9107f32b5a7f2cd8d62e25481b7a3680ec17574cb4736e2be0"
+      },
+      "resolvedAt": 1794519936511
+    },
+    "task_bf0a9400-4a86-4f7d-8946-5826bc114b73": {
+      "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "operationId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "sessionId": "sess_c638a460754770e63e77a634",
+      "correlationId": "corr_1794519942370_eg5yl",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794519942465,
+      "expiresAt": 1794520242465,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+        "sessionId": "sess_c638a460754770e63e77a634",
+        "correlationId": "corr_1794519942370_eg5yl",
+        "status": "completed",
+        "result": {
+          "operationId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+          "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 69,
+        "timestamp": "2026-11-12T21:45:42.474Z",
+        "signature": "aa16ff90b7ca4ccbace5c73ef22fba3bbe510566921706ec52f1319053418afd"
+      },
+      "resolvedAt": 1794519942474
+    },
+    "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f": {
+      "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "operationId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "sessionId": "sess_f4f4d153e118b1063571b4fc",
+      "correlationId": "corr_1794587968916_kk250",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794587969025,
+      "expiresAt": 1794588269025,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+        "sessionId": "sess_f4f4d153e118b1063571b4fc",
+        "correlationId": "corr_1794587968916_kk250",
+        "status": "completed",
+        "result": {
+          "operationId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+          "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 74,
+        "timestamp": "2026-11-13T16:39:29.035Z",
+        "signature": "68b44c67d53c4205747564cfb1454f0e613b281cb95529495e635847d9883f0a"
+      },
+      "resolvedAt": 1794587969035
+    },
+    "task_27042c25-8675-4e59-a84c-0f888b668945": {
+      "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "operationId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "sessionId": "sess_9c94fc2340579c21327fc89a",
+      "correlationId": "corr_1794588087756_tvled",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794588087847,
+      "expiresAt": 1794588387847,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+        "sessionId": "sess_9c94fc2340579c21327fc89a",
+        "correlationId": "corr_1794588087756_tvled",
+        "status": "completed",
+        "result": {
+          "operationId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+          "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 67,
+        "timestamp": "2026-11-13T16:41:27.854Z",
+        "signature": "2e79bd8db8d6c5fa1ea75399b33249555cf4afb0a1f3a24be522e698c7b54c87"
+      },
+      "resolvedAt": 1794588087854
+    },
+    "task_44745638-a719-4cd2-8de5-df1c0caed2e5": {
+      "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "operationId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "sessionId": "sess_64885dc39bb5e506af7b16b6",
+      "correlationId": "corr_1794588135621_2ab5s",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794588135721,
+      "expiresAt": 1794588435721,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+        "sessionId": "sess_64885dc39bb5e506af7b16b6",
+        "correlationId": "corr_1794588135621_2ab5s",
+        "status": "completed",
+        "result": {
+          "operationId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+          "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 68,
+        "timestamp": "2026-11-13T16:42:15.727Z",
+        "signature": "63f49e77354e1eac69e5c9a762279be45718433e6bbb6cfebb5614d59712a7f5"
+      },
+      "resolvedAt": 1794588135727
+    },
+    "task_c1c94e05-5a15-4626-802b-0b439eb89963": {
+      "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "operationId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "sessionId": "sess_a2e576d7d7698c2822e65e6d",
+      "correlationId": "corr_1794588242895_ijh27",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794588243010,
+      "expiresAt": 1794588543010,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+        "sessionId": "sess_a2e576d7d7698c2822e65e6d",
+        "correlationId": "corr_1794588242895_ijh27",
+        "status": "completed",
+        "result": {
+          "operationId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+          "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 69,
+        "timestamp": "2026-11-13T16:44:03.019Z",
+        "signature": "e3edd9e1bd94d9409fc06390365a151d58ab2b6677ab6c72c54e04effb8ac30b"
+      },
+      "resolvedAt": 1794588243019
+    },
+    "task_9963c841-ab8f-40bf-be66-db19a864185e": {
+      "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "operationId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "sessionId": "sess_304c2164d1c3016b337eced7",
+      "correlationId": "corr_1794588435012_k0vf3",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794588435226,
+      "expiresAt": 1794588735226,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+        "sessionId": "sess_304c2164d1c3016b337eced7",
+        "correlationId": "corr_1794588435012_k0vf3",
+        "status": "completed",
+        "result": {
+          "operationId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+          "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 73,
+        "timestamp": "2026-11-13T16:47:15.236Z",
+        "signature": "4b4902ef4e3699a94644f444b393fc193d3e37599d8ecb45b0d2d425ca01a9be"
+      },
+      "resolvedAt": 1794588435236
+    },
+    "task_1cd1cdab-1edb-438d-9732-073a47f8aa23": {
+      "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "operationId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "sessionId": "sess_9909b3d2ed50441a10ac27fd",
+      "correlationId": "corr_1794588499621_uukn1",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794588499728,
+      "expiresAt": 1794588799728,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+        "sessionId": "sess_9909b3d2ed50441a10ac27fd",
+        "correlationId": "corr_1794588499621_uukn1",
+        "status": "completed",
+        "result": {
+          "operationId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+          "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 70,
+        "timestamp": "2026-11-13T16:48:19.738Z",
+        "signature": "c66ffacdfa9cf7a0e2aa0698710797651cd40d1884704b4d16486d1fa060a234"
+      },
+      "resolvedAt": 1794588499738
+    },
+    "task_f541f138-d07b-456b-a373-841ac74a7f00": {
+      "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "operationId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "sessionId": "sess_881c124e41e4923980fb2654",
+      "correlationId": "corr_1794588508352_s9jbz",
+      "modelName": "DestructiveCheckModel",
+      "partIdsToDelete": [
+        "part_to_delete_01"
+      ],
+      "expectedModelHash": "hash_after_delete_111",
+      "createdAt": 1794588508459,
+      "expiresAt": 1794588808459,
+      "status": "confirmed",
+      "latestResponse": {
+        "protocolVersion": "1.0",
+        "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+        "sessionId": "sess_881c124e41e4923980fb2654",
+        "correlationId": "corr_1794588508352_s9jbz",
+        "status": "completed",
+        "result": {
+          "operationId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+          "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+          "status": "completed",
+          "verified": true,
+          "modelName": "DestructiveCheckModel",
+          "expectedModelHash": "hash_after_delete_111",
+          "appliedModelHash": "hash_after_delete_111",
+          "expectedPartCount": 1,
+          "actualPartCount": 1,
+          "removedPartIds": [
+            "part_to_delete_01"
+          ],
+          "pendingDeletionPartIds": [],
+          "failedPartIds": [],
+          "verifiedGeometryPartIds": [
+            "part_kept_01"
+          ]
+        },
+        "error": null,
+        "executionTime": 70,
+        "timestamp": "2026-11-13T16:48:28.473Z",
+        "signature": "8a3785d84f4c80d3d8a5635a85f213c8a5edea0713f1e85f0c23c1023bc67a52"
+      },
+      "resolvedAt": 1794588508473
+    }
+  },
+  "resultHistory": [
+    {
+      "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "operationId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519313200
+    },
+    {
+      "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "operationId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519313201
+    },
+    {
+      "taskId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "operationId": "task_2000e699-50bd-420d-813f-55318141a557",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519313207
+    },
+    {
+      "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "operationId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519334654
+    },
+    {
+      "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "operationId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519334656
+    },
+    {
+      "taskId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "operationId": "task_4f29578f-c549-4305-a720-1189128f203b",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519334665
+    },
+    {
+      "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "operationId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519372417
+    },
+    {
+      "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "operationId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519372418
+    },
+    {
+      "taskId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "operationId": "task_4d974a50-b5e6-4fc0-8adf-3ed246bc3553",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519372425
+    },
+    {
+      "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "operationId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519378447
+    },
+    {
+      "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "operationId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519378448
+    },
+    {
+      "taskId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "operationId": "task_4b829e40-e4ba-4f64-9e33-7e944357e275",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519378456
+    },
+    {
+      "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "operationId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519566251
+    },
+    {
+      "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "operationId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519566252
+    },
+    {
+      "taskId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "operationId": "task_169e32d5-22d7-425c-9793-a0bad83ffc71",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519566259
+    },
+    {
+      "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "operationId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519757219
+    },
+    {
+      "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "operationId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519757220
+    },
+    {
+      "taskId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "operationId": "task_ba9e05ee-6941-47eb-b9a3-de3abd5897f3",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519757228
+    },
+    {
+      "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "operationId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519766453
+    },
+    {
+      "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "operationId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519766454
+    },
+    {
+      "taskId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "operationId": "task_653727be-1cee-4b52-a6f4-3256bf2fd332",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519766463
+    },
+    {
+      "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "operationId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519862221
+    },
+    {
+      "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "operationId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519862222
+    },
+    {
+      "taskId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "operationId": "task_1e193c8f-0795-4cf2-8eb4-d959708401bf",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519862229
+    },
+    {
+      "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "operationId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519869158
+    },
+    {
+      "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "operationId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519869159
+    },
+    {
+      "taskId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "operationId": "task_321cf133-5458-4538-9a68-423f2d314994",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519869166
+    },
+    {
+      "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "operationId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519936503
+    },
+    {
+      "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "operationId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519936504
+    },
+    {
+      "taskId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "operationId": "task_b74d6696-c517-4bc8-8d7c-bdc4fe4e3aa9",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519936511
+    },
+    {
+      "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "operationId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794519942464
+    },
+    {
+      "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "operationId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794519942465
+    },
+    {
+      "taskId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "operationId": "task_bf0a9400-4a86-4f7d-8946-5826bc114b73",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794519942475
+    },
+    {
+      "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "operationId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794587969022
+    },
+    {
+      "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "operationId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794587969025
+    },
+    {
+      "taskId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "operationId": "task_4afbf121-afb2-411d-aa8e-9ee9bf3aff0f",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794587969035
+    },
+    {
+      "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "operationId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794588087846
+    },
+    {
+      "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "operationId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794588087847
+    },
+    {
+      "taskId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "operationId": "task_27042c25-8675-4e59-a84c-0f888b668945",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794588087854
+    },
+    {
+      "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "operationId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794588135719
+    },
+    {
+      "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "operationId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794588135721
+    },
+    {
+      "taskId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "operationId": "task_44745638-a719-4cd2-8de5-df1c0caed2e5",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794588135728
+    },
+    {
+      "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "operationId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794588243009
+    },
+    {
+      "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "operationId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794588243010
+    },
+    {
+      "taskId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "operationId": "task_c1c94e05-5a15-4626-802b-0b439eb89963",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794588243019
+    },
+    {
+      "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "operationId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794588435224
+    },
+    {
+      "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "operationId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794588435226
+    },
+    {
+      "taskId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "operationId": "task_9963c841-ab8f-40bf-be66-db19a864185e",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794588435236
+    },
+    {
+      "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "operationId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794588499725
+    },
+    {
+      "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "operationId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794588499728
+    },
+    {
+      "taskId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "operationId": "task_1cd1cdab-1edb-438d-9732-073a47f8aa23",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794588499738
+    },
+    {
+      "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "operationId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_studio_confirmation",
+      "timestamp": 1794588508457
+    },
+    {
+      "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "operationId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "modelName": "DestructiveCheckModel",
+      "status": "awaiting_confirmation",
+      "timestamp": 1794588508459
+    },
+    {
+      "taskId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "operationId": "task_f541f138-d07b-456b-a373-841ac74a7f00",
+      "modelName": "DestructiveCheckModel",
+      "status": "completed",
+      "timestamp": 1794588508473
+    }
+  ]
+}

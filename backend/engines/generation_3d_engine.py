@@ -823,9 +823,13 @@ class PBRProfileSpec(BaseModel):
 
 
 class Generate3DEngineRequest(BaseModel):
-    prompt: str
+    prompt: str = "Procedural 3D Asset"
+    name: Optional[str] = None
     asset_type: Literal["Model3D", "Scene3D", "PBRMaterial"] = "Model3D"
-    category: str = "Sci-Fi"
+    category: str = "Props"
+    generation_mode: Optional[str] = None
+    seed: Optional[str] = None
+    tree_params: Optional[Dict[str, Any]] = None
     model_tier: Literal["fast", "pro"] = "fast"
     collision_fidelity: Literal["Default", "Box", "Hull", "PreciseConvexDecomposition"] = "Hull"
     target_poly_budget: int = 2500
@@ -846,8 +850,10 @@ class Generate3DEngineRequest(BaseModel):
 class Model3DResponse(BaseModel):
     id: Optional[str] = Field(default=None)
     name: str = Field(description="PascalCase 3D model name")
-    category: str = Field(default="Sci-Fi")
+    category: str = Field(default="Props")
     asset_type: Literal["Model3D", "Scene3D", "PBRMaterial"] = Field(default="Model3D")
+    generation_mode: Optional[str] = Field(default=None)
+    seed: Optional[str] = Field(default=None)
     poly_count: int = Field(description="Estimated triangle count (<10,000 per MeshPart)")
     collision_fidelity: Literal["Default", "Box", "Hull", "PreciseConvexDecomposition"] = Field(default="Hull")
     rojo_target_folder: str = Field(default="src/shared/Assets3D")
@@ -2532,6 +2538,183 @@ REQUIREMENTS:
         contents.append(prompt_text)
         return contents
 
+    def synthesize_seeded_procedural_asset(self, req: Generate3DEngineRequest) -> Model3DResponse:
+        raw_seed = str(req.seed or (req.tree_params or {}).get("seed") or f"{req.prompt}-2026")
+        seed_val = 0x811C9DC5
+        for ch in raw_seed:
+            seed_val ^= ord(ch) & 0xFF
+            seed_val = (seed_val * 0x01000193) & 0xFFFFFFFF
+        if seed_val == 0:
+            seed_val = 0x12345678
+
+        def rng() -> float:
+            nonlocal seed_val
+            seed_val = (seed_val + 0x6D2B79F5) & 0xFFFFFFFF
+            t = ((seed_val ^ (seed_val >> 15)) * (1 | seed_val)) & 0xFFFFFFFF
+            t = (t + (((t ^ (t >> 7)) * (61 | t)) & 0xFFFFFFFF)) ^ t
+            return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296.0
+
+        combined = f"{req.category} {req.prompt}".lower()
+        is_tree = any(k in combined for k in ("tree", "árbol", "arbol", "vegeta", "pine", "oak", "willow", "canopy")) or bool(req.tree_params)
+        raw_name = req.name or ("ProceduralRobloxTree" if is_tree else "".join(c for c in req.prompt.title() if c.isalnum())[:28] or "ProceduralAsset3D")
+        safe_name = "".join(c for c in raw_name if c.isalnum() or c == "_")[:28] or "ProceduralAsset3D"
+
+        tp = req.tree_params or {}
+        height = max(4.0, min(45.0, float(tp.get("height", 14.0))))
+        trunk_thick = max(0.4, min(6.0, float(tp.get("trunkThickness", 1.6))))
+        branch_count = max(1, min(12, int(tp.get("branchCount", 4))))
+        trunk_mat = str(tp.get("trunkMaterial", "Wood"))
+        leaf_mat = str(tp.get("leafMaterial", "Grass"))
+        trunk_col = str(tp.get("trunkColor", "#5c4033"))
+        leaf_col = str(tp.get("leafColor", "#2d6a4f"))
+
+        parts_specs: List[MeshPart3DSpec] = []
+        if is_tree:
+            flare_h = round(max(0.6, height * 0.08), 4)
+            trunk_h = round(height * 0.56, 4)
+            parts_specs.append(
+                MeshPart3DSpec(
+                    partId="part_1_rootflare",
+                    name="RootFlare",
+                    parentPath="Root",
+                    shape="MeshPart",
+                    size=[round(trunk_thick * 1.45, 4), flare_h, round(trunk_thick * 1.45, 4)],
+                    position=[0.0, round(flare_h * 0.5, 4), 0.0],
+                    rotation=[0.0, 0.0, 0.0],
+                    color=trunk_col,
+                    material=trunk_mat,
+                    roughness=0.85,
+                    metalness=0.05,
+                    canCollide=True,
+                    anchored=True,
+                    collisionFidelity=req.collision_fidelity,
+                )
+            )
+            parts_specs.append(
+                MeshPart3DSpec(
+                    partId="part_2_trunk",
+                    name="MainTrunk",
+                    parentPath="Root",
+                    shape="MeshPart",
+                    size=[trunk_thick, trunk_h, trunk_thick],
+                    position=[0.0, round(flare_h * 0.85 + trunk_h * 0.5, 4), 0.0],
+                    rotation=[0.0, round(rng() * 360.0, 4), 0.0],
+                    color=trunk_col,
+                    material=trunk_mat,
+                    roughness=0.82,
+                    metalness=0.04,
+                    canCollide=True,
+                    anchored=True,
+                    collisionFidelity=req.collision_fidelity,
+                )
+            )
+            for b_idx in range(branch_count):
+                angle = (b_idx / max(1, branch_count)) * math.pi * 2.0 + (rng() - 0.5) * 0.35
+                b_len = round(max(1.4, height * 0.22 * (0.9 + rng() * 0.2)), 4)
+                b_thk = round(max(0.28, trunk_thick * 0.42), 4)
+                bx = round(math.cos(angle) * (trunk_thick * 0.4 + b_len * 0.35), 4)
+                by = round(flare_h + trunk_h * 0.65 + (b_idx / max(1, branch_count)) * (trunk_h * 0.25), 4)
+                bz = round(math.sin(angle) * (trunk_thick * 0.4 + b_len * 0.35), 4)
+                parts_specs.append(
+                    MeshPart3DSpec(
+                        partId=f"part_branch_{b_idx + 1}",
+                        name=f"Branch_{b_idx + 1}",
+                        parentPath="Root/Branches",
+                        shape="MeshPart",
+                        size=[b_thk, b_len, b_thk],
+                        position=[bx, by, bz],
+                        rotation=[round(math.sin(angle) * 40.0, 4), round(math.degrees(angle), 4), round(-math.cos(angle) * 40.0, 4)],
+                        color=trunk_col,
+                        material=trunk_mat,
+                        roughness=0.8,
+                        metalness=0.04,
+                        canCollide=True,
+                        anchored=True,
+                        collisionFidelity=req.collision_fidelity,
+                    )
+                )
+            crown_w = round(max(2.6, height * 0.52), 4)
+            crown_h = round(max(2.2, height * 0.42), 4)
+            crown_y = round(flare_h + trunk_h * 0.88 + crown_h * 0.26, 4)
+            parts_specs.append(
+                MeshPart3DSpec(
+                    partId="part_canopy_main",
+                    name="CanopyCrown_Main",
+                    parentPath="Root/Canopy",
+                    shape="MeshPart",
+                    size=[crown_w, crown_h, crown_w],
+                    position=[0.0, crown_y, 0.0],
+                    rotation=[0.0, round(rng() * 360.0, 4), 0.0],
+                    color=leaf_col,
+                    material=leaf_mat,
+                    roughness=0.72,
+                    metalness=0.02,
+                    canCollide=True,
+                    anchored=True,
+                    collisionFidelity=req.collision_fidelity,
+                )
+            )
+        else:
+            parts_specs = [
+                MeshPart3DSpec(
+                    partId="part_1_base",
+                    name="BaseFoundation",
+                    parentPath="Root",
+                    shape="MeshPart",
+                    size=[round(3.4 + rng(), 4), 0.8, round(3.4 + rng(), 4)],
+                    position=[0.0, 0.4, 0.0],
+                    rotation=[0.0, 0.0, 0.0],
+                    color="#475569",
+                    material="Metal",
+                    roughness=0.5,
+                    metalness=0.5,
+                    canCollide=True,
+                    anchored=True,
+                    collisionFidelity=req.collision_fidelity,
+                ),
+                MeshPart3DSpec(
+                    partId="part_2_core",
+                    name="PrimaryCoreBody",
+                    parentPath="Root",
+                    shape="MeshPart",
+                    size=[round(2.4 + rng() * 0.6, 4), 3.6, round(2.4 + rng() * 0.6, 4)],
+                    position=[0.0, 2.6, 0.0],
+                    rotation=[0.0, round(rng() * 90.0, 4), 0.0],
+                    color="#64748b",
+                    material="Slate",
+                    roughness=0.6,
+                    metalness=0.35,
+                    canCollide=True,
+                    anchored=True,
+                    collisionFidelity=req.collision_fidelity,
+                ),
+            ]
+
+        parts_with_mesh = self.ensure_mesh_data_on_parts(safe_name, parts_specs)
+        luau_code = self.build_luau_from_parts(safe_name, parts_with_mesh, req.collision_fidelity)
+        total_tris = sum(len(p.meshData.faces) for p in parts_with_mesh if p.meshData)
+        return Model3DResponse(
+            id=f"asset-proc-{abs(hash(raw_seed)) % 100000000}",
+            name=safe_name,
+            category="Trees & Vegetation" if is_tree else req.category,
+            asset_type=req.asset_type,
+            generation_mode="procedural",
+            seed=raw_seed,
+            poly_count=total_tris,
+            collision_fidelity=req.collision_fidelity,
+            rojo_target_folder="src/shared/Assets3D",
+            file_name=f"{safe_name}.luau",
+            description=f"Asset 3D procedural determinista (seed={raw_seed}, {len(parts_with_mesh)} sub-mallas).",
+            pbr_profile=PBRProfileSpec(
+                albedo_hex=leaf_col if is_tree else "#475569",
+                roughness=0.75 if is_tree else 0.5,
+                metalness=0.04 if is_tree else 0.5,
+                roblox_material=leaf_mat if is_tree else "Metal",
+            ),
+            parts=parts_with_mesh,
+            luau_code=luau_code,
+        )
+
     def generate_3d_asset(
         self,
         req: Generate3DEngineRequest,
@@ -2569,8 +2752,19 @@ REQUIREMENTS:
                 save_library_fn(parsed.model_dump())
             return parsed
 
-        if not self.client:
-            raise RuntimeError("GEMINI_API_KEY is not configured on the backend.")
+        use_procedural = (
+            req.generation_mode == "procedural"
+            or req.seed is not None
+            or req.tree_params is not None
+            or not self.client
+        )
+        if use_procedural:
+            parsed = self.synthesize_seeded_procedural_asset(req)
+            if req.save_to_rojo and save_luau_fn:
+                parsed.saved_path = save_luau_fn(parsed.rojo_target_folder, parsed.file_name, parsed.luau_code)
+            if req.save_to_library and save_library_fn:
+                save_library_fn(parsed.model_dump())
+            return parsed
 
         model_name = self.resolve_model(req.model_tier)
         contents = self._build_contents(req, context_data)
@@ -2656,9 +2850,33 @@ REQUIREMENTS:
             })
             return
 
-        if not self.client:
-            err_msg = "GEMINI_API_KEY no está configurada en el servidor."
-            yield sse({"type": "error", "message": err_msg, "error": err_msg})
+        use_procedural = (
+            req.generation_mode == "procedural"
+            or req.seed is not None
+            or req.tree_params is not None
+            or not self.client
+        )
+        if use_procedural:
+            parsed = self.synthesize_seeded_procedural_asset(req)
+            if req.save_to_rojo and save_luau_fn:
+                parsed.saved_path = save_luau_fn(parsed.rojo_target_folder, parsed.file_name, parsed.luau_code)
+                yield sse({
+                    "type": "rojo_write",
+                    "saved": True,
+                    "path": parsed.saved_path,
+                    "message": "ROJO 3D SYNC CONFIRMADO: Módulo MeshPart procedural escrito en disco",
+                })
+            if req.save_to_library and save_library_fn:
+                save_library_fn(parsed.model_dump())
+            asset_dump = parsed.model_dump()
+            yield sse({
+                "type": "done",
+                "status": "complete",
+                "progress": 100,
+                "message": "Asset 3D procedural sintetizado y validado.",
+                "result": asset_dump,
+                "data": asset_dump,
+            })
             return
 
         model_name = self.resolve_model(req.model_tier)

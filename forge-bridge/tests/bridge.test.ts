@@ -168,6 +168,7 @@ test('Fase 10 — Recorrido Completo de Validación End-to-End (Cloud <-> Bridge
     ? 'src/shared/Utils/Maid.luau'
     : 'src/shared/Types.luau';
   const bridgePort = 48725;
+  const testStateFile = path.join(os.tmpdir(), `forge_bridge_e2e_state_${Date.now()}.json`);
   const bridge = createForgeLocalBridgeApp({
     port: bridgePort,
     rojoProjectPath: projectRoot,
@@ -176,6 +177,7 @@ test('Fase 10 — Recorrido Completo de Validación End-to-End (Cloud <-> Bridge
     pluginLocalToken: PLUGIN_TOKEN,
     heartbeatIntervalMs: 1000,
     autoConnectCloud: true,
+    stateFilePath: testStateFile,
   });
 
   await bridge.start();
@@ -383,6 +385,13 @@ test('Fase 10 — Recorrido Completo de Validación End-to-End (Cloud <-> Bridge
   } finally {
     await bridge.stop();
     await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
+    if (fs.existsSync(testStateFile)) {
+      try {
+        fs.unlinkSync(testStateFile);
+      } catch {
+        // ignore test cleanup error
+      }
+    }
   }
 });
 
