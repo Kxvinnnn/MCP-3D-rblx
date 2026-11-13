@@ -171,6 +171,16 @@ export function extractCanonicalRotationMatrix9(part: any): number[] {
 }
 
 export function normalizeColorRgb255(colorRaw: any): [number, number, number] {
+  if (typeof colorRaw === 'string') {
+    const clean = colorRaw.replace('#', '').trim();
+    if (/^[0-9a-fA-F]{6}$/.test(clean)) {
+      return [
+        parseInt(clean.slice(0, 2), 16),
+        parseInt(clean.slice(2, 4), 16),
+        parseInt(clean.slice(4, 6), 16),
+      ];
+    }
+  }
   if (!Array.isArray(colorRaw) || colorRaw.length < 3) {
     return [148, 163, 184];
   }
@@ -2656,7 +2666,7 @@ export function buildObjAndMtlFromPartsServer(
   expandedParts.forEach((p, idx) => {
     const partLabel = (p.name || `MeshPart_${idx + 1}`).replace(/[^a-zA-Z0-9_]/g, '_');
     const matName = `Mat_${partLabel}_${idx + 1}`;
-    const [cr = 148, cg = 163, cb = 184] = p.color || [148, 163, 184];
+    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(p.color);
     const [px = 0, py = 1, pz = 0] = p.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = p.rotation || [0, 0, 0];
     const rotMat = eulerDegToRotationMatrixServer(rx, ry, rz);
@@ -2879,7 +2889,7 @@ export function buildGltfFromPartsServer(
       type: 'SCALAR',
     });
 
-    const [cr = 148, cg = 163, cb = 184] = p.color || [148, 163, 184];
+    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(p.color);
     const pbrSpec: any = {
       baseColorFactor: [
         Number((cr / 255).toFixed(4)),

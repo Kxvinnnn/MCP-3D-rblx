@@ -214,6 +214,14 @@ local function createEditableMeshPartFromSpec(partSpec: any, idx: number): (Base
         local hasUvs = (rawUvs ~= nil) and (#uvs > 0)
 
         local okEditable, generatedOrErr = xpcall(function()
+            if #vertices > 20000 or #faces > 20000 then
+                error(string.format(
+                    "Límite de seguridad EditableMesh (20000) excedido en '%s': %d vértices, %d caras",
+                    partName,
+                    #vertices,
+                    #faces
+                ))
+            end
             if hasNormals and #normals ~= #vertices then
                 error(string.format(
                     "Cantidad de normales (%d) no coincide con la cantidad de vértices (%d) para '%s'",
@@ -3083,7 +3091,7 @@ local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
             local selInfo = inspectCurrentStudioSelection()
             return {
                 connected = true,
-                pluginVersion = "2.2.0",
+                pluginVersion = "2.3.0",
                 selectedModelName = selInfo.selectedModelName,
                 selectedPartCount = selInfo.selectedPartCount,
             }
@@ -3256,7 +3264,7 @@ task.spawn(function()
     while true do
         local selInfo = inspectCurrentStudioSelection()
         local okBridge, resp = requestLocalBridge("/local/plugin/heartbeat", "POST", {
-            pluginVersion = "2.2.0",
+            pluginVersion = "2.3.0",
             placeName = game.Name,
             selectedModelName = selInfo.selectedModelName,
             selectedPartCount = selInfo.selectedPartCount,

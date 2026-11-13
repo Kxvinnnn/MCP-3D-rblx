@@ -81,4 +81,16 @@ ROJO_PORT=34872
 ### 4.4 Verificador de Sincronización Rojo y Autoverificación
 - Consulta el manifiesto de Rojo y compara el hash FNV32 del código Luau en memoria y en disco.
 - Ejecuta autochequeos unitarios en Luau (`runForgePluginSelfVerification`) validando la sensibilidad de hashes ante mutaciones de vértices intermedios y renombrado de piezas.
-- **Estado de Validación**: La estructura Luau `--!strict`, los endpoints del Bridge y la reconciliación de recibos están **TESTEADOS** en la suite automatizada; la ejecución visual directa dentro de **Roblox Studio Desktop** en Windows permanece **PENDIENTE** de prueba manual interactiva con tu instancia local de Studio.
+- **Estado de Validación**: La estructura Luau `--!strict`, el límite de `20,000` vértices/caras, los endpoints del Bridge y la reconciliación de recibos están **TESTEADOS** en la suite automatizada; la ejecución visual directa dentro de **Roblox Studio Desktop** requiere validación manual interactiva.
+
+---
+
+## 5. Checklist de Validación Manual Real en Roblox Studio Desktop
+
+1. **Preparar entorno**: Inicia `npm run dev` (puerto `3000`) y `npm --prefix forge-bridge start` (`127.0.0.1:48720`) con el mismo token seguro en `.env` y `forge-bridge/.env`.
+2. **Habilitar permisos en Studio**: Abre un Place en Roblox Studio -> `Game Settings -> Security -> Allow HTTP Requests = ON`, y activa `EditableMesh` si tu canal de Studio lo requiere.
+3. **Conectar el Plugin v2.3.0**: Abre el DockWidget **Forge AI v2.3.0**, ingresa `http://127.0.0.1:48720` y tu `Security Token`, y verifica que el estado muestre **Conectado**.
+4. **Probar árbol 3D de punta a punta**:
+   - Genera un árbol en la web (ej. *"Genera un árbol de fantasía con tronco grueso, copa amplia, hojas rojizas y estilo low-poly"*).
+   - Pulsa **Enviar a Roblox Studio** y observa la creación de todas las `MeshPart` (`RootFlare`, `MainTrunk`, `Branch_*`, `CanopyCrown_Main`, `FoliageCluster_*`) en `Workspace` con pivote en `Y = 0`.
+5. **Verificar exportación y reconstrucción**: Comprueba en la ventana **Output** de Studio que no existan errores de `EditableMesh` / `SetFaceNormals` / `SetFaceUVs`, que la consola devuelva `verified: true` hacia Forge y que la importación manual del `.rbxmx` o `.luau` exportado genere exactamente la misma geometría.

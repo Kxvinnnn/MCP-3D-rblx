@@ -2,7 +2,7 @@
 
 **NIGHTMARE FORGE / Forge AI Studio v2.3.0** es una plataforma integral para crear, importar, editar, validar, exportar y sincronizar modelos y assets 3D destinados a **Roblox Studio**, diseñada bajo una arquitectura modular verificada con:
 - **3 Motores de Generación 3D integrados**:
-  1. **Motor 1 — Generación Procedural Parametrizada con Semillas Reproducibles (`seed`)**: funciona **100% en local/offline sin requerir claves de API de pago**, soportando las **8 categorías oficiales** (`Props`, `Trees & Vegetation`, `Rocks & Nature`, `Buildings & Structures`, `Furniture & Interior`, `Scene Elements`, `Stylized Assets`, `Ambient & Decoration`) y el **Generador Parametrizado de Árboles 3D** (`seed`, `height`, `trunkThickness`, `branchCount`, `canopyShape`, `leafDistribution`, `trunkMaterial`, `leafMaterial`, `variation`).
+  1. **Motor 1 — Generación Procedural Parametrizada con Semillas Reproducibles (`seed`)**: funciona **100% en local/offline sin requerir claves de API de pago**, soportando las **8 categorías oficiales** (`Props`, `Trees & Vegetation`, `Rocks & Nature`, `Buildings & Structures`, `Furniture & Interior`, `Scene Elements`, `Stylized Assets`, `Ambient & Decoration`), el **Generador Parametrizado de Árboles 3D** (23 parámetros configurables + LOD 0/1/2) y el conversor determinista de lenguaje natural a parámetros (`parseNaturalLanguageToTreeParams`).
   2. **Motor 2 — Generación Asistida por IA + Procedural**: utiliza el proveedor IA configurado (`GEMINI_API_KEY` opcional) con fallback automático al Motor 1 Procedural si no hay clave configurada.
   3. **Motor 3 — Importación, Conversión y Ensamblaje (`.OBJ`, `.GLTF`, `.GLB`, `.RBXMX`)**: normaliza escala en Studs, asienta el pivote inferior en `Y = 0` y divide automáticamente mallas mayores de 9,500 triángulos sin pérdida de caras.
 - **Sincronización Bidireccional Real con Roblox Studio**:
@@ -94,8 +94,10 @@
 │   │   ├── canonicalHash.ts                   # Hash SHA-256 canónico por pieza y por categoría
 │   │   ├── incrementalSync.ts                 # Motor de diferencias incrementales por partId estable
 │   │   ├── receiptVerification.ts             # Evaluador de recibos de reconstrucción del Plugin
-│   │   └── robloxGeometryValidator.ts         # Validador geométrico EditableMesh con tolerancia relativa
-│   └── components/                            # Vistas del Estudio 3D, Asistente, Visor WebGL y Rojo
+│   │   ├── robloxGeometryValidator.ts         # Validador geométrico EditableMesh con tolerancia relativa
+│   │   ├── treePromptParser.ts                # Conversor determinista de prompts ES/EN a parámetros de árbol
+│   │   └── roblox3DEngine.ts                  # Visor WebGL Three.js (LOD 0/1/2), exportación .luau/.rbxmx/.gltf/.obj
+│   └── components/                            # Vistas del Estudio 3D, Asistente, Comparador de Variantes y Rojo
 ├── tests/                                     # Suites de pruebas automatizadas (Node.js + Python E2E)
 └── server.ts                                  # Servidor Principal Express + Vite Middleware (:3000)
 ```
@@ -246,16 +248,18 @@ Abre **2 terminales PowerShell** en `C:\Users\dadada\Desktop\MCP-3D-rblx`:
 
 Ejecuta toda la batería de verificación desde la raíz del proyecto:
 
-### 8.1 Matriz Honesta de Estado (`v2.3.0`)
+### 8.1 Matriz Honesta de Clasificación y Estado (`v2.3.0`)
 
-| Capacidad / Subsistema | Estado | Evidencia Verificable |
+| Capacidad / Subsistema | Clasificación | Evidencia Verificable |
 | :--- | :---: | :--- |
-| **Motor 1 Procedural 3D (8 categorías + 14 params árbol + LOD 0/1/2)** | `TESTEADO` | `npm test` (`tests/nightmareForgeE2EAndSecurity.test.ts`), determinante por `seed` sin API key. |
-| **Gateway Express + Autenticación Fail-Closed + Confirmación Destructiva** | `TESTEADO` | `npm test` (`X-Forge-Token`, `?confirm=true`, CORS restringido en producción). |
-| **Forge Local Bridge (HMAC + Anti-Replay + Persistencia Atómica OS)** | `TESTEADO` | `npm --prefix forge-bridge test` (8/8 incluyendo reinicio real de proceso hijo con SIGTERM). |
-| **Hashing Canónico SHA-256, Validador Ear Clipping & Sync Incremental** | `TESTEADO` | `npm test` (61/61 pasando en Node test runner) y `python3 tests/test_e2e_bidirectional_sync.py`. |
-| **Plugin Luau `--!strict` (`ForgeAIStudioPlugin.server.luau`)** | `IMPLEMENTADO` | Validación sintáctica/estructural en CI; ejecución GUI interactiva en Roblox Studio Desktop: `PENDIENTE`. |
-| **Publicación PBR Cloud (`rbxassetid://` verificados)** | `IMPLEMENTADO` | Requiere `ROBLOX_OPEN_CLOUD_API_KEY` real en ejecución; localmente genera estado `local_saved`. |
+| **Motor 1 Procedural 3D (8 categorías + árbol 23 params + NLP + LOD 0/1/2)** | `Implementado y Testeado` | `npm test` (`tests/proceduralTreeAndE2EMission.test.ts` + `tests/nightmareForgeE2EAndSecurity.test.ts`), 7 presets + seed determinista sin API key. |
+| **Gateway Express (Fail-Closed, CORS Allowlist explícito, anti-path OS, confirmación destructiva)** | `Implementado y Testeado` | `npm test` (`tests/mainServerSecurity.test.ts`), `X-Forge-Token`, `?confirm=true`, sanitización de rutas locales. |
+| **Forge Local Bridge (HMAC + Anti-Replay + Persistencia Atómica OS + CORS Allowlist)** | `Implementado y Testeado` | `npm --prefix forge-bridge test` y `tests/proceduralTreeAndE2EMission.test.ts` (incluyendo reinicio OS con `SIGTERM` y flujo completo 13 pasos). |
+| **Visor Three.js, Editor 3D (smooth arreglado, bounds, comparador variantes) y Exportadores (.luau/.rbxmx/.gltf/.obj+.mtl)** | `Implementado y Testeado` | `npm run build`, `npm run lint`, pruebas de exportación en disco y resolución `#RRGGBB`. |
+| **Hashing Canónico SHA-256, Validador Ear Clipping & Sync Incremental** | `Implementado y Testeado` | `npm test` y `python3 tests/test_e2e_bidirectional_sync.py`. |
+| **Motor 2 IA / PBR Cloud Open Cloud (`GEMINI_API_KEY` / `ROBLOX_OPEN_CLOUD_API_KEY`)** | `Solo con API externa` | Usa fallback procedural local o estado `local_saved` cuando no hay claves configuradas. |
+| **Motor 3 Importación compleja y Escenarios Multi-Asset (`Scene3D`)** | `Experimental` | Soporta `.OBJ/.GLTF/.GLB/.RBXMX` y biomas; geometrías externas no uniformes requieren validación previa en Editor 3D. |
+| **Ejecución en vivo dentro de Roblox Studio Desktop (`ForgeAIStudioPlugin.server.luau` v2.3.0)** | `Validación manual en Roblox Studio` | Código `--!strict` y límite 20,000 vértices/caras verificado; la reconstrucción visual interactiva dentro de Roblox Studio Desktop en Windows/macOS debe validarse manualmente siguiendo `docs/ROBLOX_PLUGIN_AND_ROJO_GUIDE.md`. |
 
 ```powershell
 # 1. Verificación estática de tipos TypeScript (Frontend + Gateway + Bridge)

@@ -1,5 +1,15 @@
 import * as THREE from 'three';
 
+export interface SubMeshLODData {
+  level: 0 | 1 | 2;
+  vertexCount: number;
+  triangleCount: number;
+  vertices: number[][];
+  normals: number[][];
+  uvs: number[][];
+  faces: number[][];
+}
+
 export interface SubMeshGeometryData {
   vertices: number[][];
   normals?: number[][];
@@ -7,6 +17,40 @@ export interface SubMeshGeometryData {
   faces: number[][];
   vertexColors?: number[][];
   objFileName?: string;
+  lodLevels?: SubMeshLODData[];
+}
+
+export function resolveRgbTuple(color: any, fallback: [number, number, number] = [160, 170, 185]): [number, number, number] {
+  if (typeof color === 'string') {
+    const clean = color.replace('#', '').trim();
+    if (/^[0-9a-fA-F]{6}$/.test(clean)) {
+      return [
+        parseInt(clean.slice(0, 2), 16),
+        parseInt(clean.slice(2, 4), 16),
+        parseInt(clean.slice(4, 6), 16),
+      ];
+    }
+  }
+  if (Array.isArray(color) && color.length >= 3) {
+    const r = Number(color[0]);
+    const g = Number(color[1]);
+    const b = Number(color[2]);
+    if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
+      if (Math.max(r, g, b) <= 1.0 && (r < 1 || g < 1 || b < 1)) {
+        return [
+          Math.max(0, Math.min(255, Math.round(r * 255))),
+          Math.max(0, Math.min(255, Math.round(g * 255))),
+          Math.max(0, Math.min(255, Math.round(b * 255))),
+        ];
+      }
+      return [
+        Math.max(0, Math.min(255, Math.round(r))),
+        Math.max(0, Math.min(255, Math.round(g))),
+        Math.max(0, Math.min(255, Math.round(b))),
+      ];
+    }
+  }
+  return fallback;
 }
 
 export interface PartPBRMaterialSpec {
@@ -632,7 +676,7 @@ export function buildThreeGroupFromAsset(
     const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
     const [px = 0, py = 1, pz = 0] = part.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
-    const [r = 160, g = 170, b = 185] = part.color || [160, 170, 185];
+    const [r, g, b] = resolveRgbTuple(part.color);
 
     let geom: THREE.BufferGeometry;
     const hasCustomMeshData =
@@ -641,12 +685,26 @@ export function buildThreeGroupFromAsset(
       part.meshData.vertices.length >= 3;
 
     if (hasCustomMeshData && part.meshData) {
-      const effectivePart =
-        lodRatio < 0.99 ? decimateMeshPartGeometry(part, lodRatio) : part;
-      geom = buildBufferGeometryFromMeshData(
-        effectivePart.meshData || part.meshData,
-        [sx, sy, sz]
-      );
+      let selectedMeshData: SubMeshGeometryData = part.meshData;
+      const lodList = Array.isArray(part.meshData.lodLevels) ? part.meshData.lodLevels : [];
+      if (lodRatio < 0.99 && lodList.length > 0) {
+        const targetLvl = lodRatio <= 0.45 ? 2 : lodRatio <= 0.78 ? 1 : 0;
+        const matchedLod = lodList.find((l) => l.level === targetLvl);
+        if (matchedLod && matchedLod.vertices.length >= 3 && matchedLod.faces.length >= 1) {
+          selectedMeshData = {
+            ...part.meshData,
+            vertices: matchedLod.vertices,
+            normals: matchedLod.normals,
+            uvs: matchedLod.uvs,
+            faces: matchedLod.faces,
+          };
+        } else {
+          selectedMeshData = decimateMeshPartGeometry(part, lodRatio).meshData || part.meshData;
+        }
+      } else if (lodRatio < 0.99) {
+        selectedMeshData = decimateMeshPartGeometry(part, lodRatio).meshData || part.meshData;
+      }
+      geom = buildBufferGeometryFromMeshData(selectedMeshData, [sx, sy, sz]);
     } else if (part.shape === 'Cylinder') {
       geom = new THREE.CylinderGeometry(sx / 2, sx / 2, sy, cylRadialSegs);
     } else if (part.shape === 'Ball') {
@@ -1801,7 +1859,7 @@ export function generateEditableMeshLuauCode(
     const [sx, sy, sz] = sub.size;
     const [px, py, pz] = sub.position;
     const [rx, ry, rz] = sub.rotation;
-    const [cr, cg, cb] = sub.color;
+    const [cr, cg, cb] = resolveRgbTuple(sub.color);
     const fidelity = sub.collisionFidelity || 'Hull';
     const renderFid = sub.renderFidelity || 'Precise';
 
@@ -1854,14 +1912,22 @@ export function generateEditableMeshLuauCode(
   lines.push(
     '}',
     '',
+    'local function isFiniteNum(v: any): boolean',
+    '    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge',
+    'end',
+    '',
     'local function buildMeshPartFromPayload(payload: SubMeshPayload, overrideAssetId: string?): (MeshPart, boolean, string?)',
     '    local editableMeshInstance: EditableMesh? = nil',
+    '    local createdMeshPartTemp: MeshPart? = nil',
     '    local expectedTriCount = #payload.faces',
     '    local addedTriCount = 0',
     '    local lastErrorReason: string? = nil',
     '',
     '    if #payload.vertices >= 3 and expectedTriCount >= 1 then',
     '        local okEditable, generatedOrErr = xpcall(function()',
+    '            if #payload.vertices > 20000 or expectedTriCount > 20000 then',
+    '                error(string.format("EditableMesh safety limit (20000) exceeded for %s: %d verts, %d tris", payload.name, #payload.vertices, expectedTriCount))',
+    '            end',
     '            local editableMesh = AssetService:CreateEditableMesh()',
     '            if not editableMesh then',
     '                error("AssetService:CreateEditableMesh() returned nil for " .. tostring(payload.name))',
@@ -1871,32 +1937,62 @@ export function generateEditableMeshLuauCode(
     '            local normalIds: { number } = table.create(#payload.normals)',
     '            local uvIds: { number } = table.create(#payload.uvs)',
     '            for i, v in ipairs(payload.vertices) do',
+    '                if type(v) ~= "table" or not isFiniteNum(v[1]) or not isFiniteNum(v[2]) or not isFiniteNum(v[3]) then',
+    '                    error(string.format("Invalid/non-finite vertex at index %d for %s", i, payload.name))',
+    '                end',
     '                vertexIds[i] = editableMesh:AddVertex(Vector3.new(v[1], v[2], v[3]))',
     '            end',
     '            for i, n in ipairs(payload.normals) do',
-    '                normalIds[i] = editableMesh:AddNormal(Vector3.new(n[1], n[2], n[3]))',
+    '                if type(n) == "table" and isFiniteNum(n[1]) and isFiniteNum(n[2]) and isFiniteNum(n[3]) then',
+    '                    local magSq = n[1] * n[1] + n[2] * n[2] + n[3] * n[3]',
+    '                    local vec = if magSq > 1e-12 then Vector3.new(n[1], n[2], n[3]).Unit else Vector3.new(0, 1, 0)',
+    '                    normalIds[i] = editableMesh:AddNormal(vec)',
+    '                end',
     '            end',
     '            for i, uv in ipairs(payload.uvs) do',
-    '                uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1], uv[2]))',
+    '                if type(uv) == "table" and isFiniteNum(uv[1]) and isFiniteNum(uv[2]) then',
+    '                    uvIds[i] = editableMesh:AddUV(Vector2.new(uv[1], uv[2]))',
+    '                end',
     '            end',
-    '            for _, tri in ipairs(payload.faces) do',
+    '            for fIdx, tri in ipairs(payload.faces) do',
     '                local i1, i2, i3 = tri[1], tri[2], tri[3]',
+    '                if type(i1) ~= "number" or type(i2) ~= "number" or type(i3) ~= "number" or (i1 % 1 ~= 0) or (i2 % 1 ~= 0) or (i3 % 1 ~= 0) then',
+    '                    error(string.format("Non-integer face index at triangle %d for %s", fIdx, payload.name))',
+    '                end',
     '                local id1, id2, id3 = vertexIds[i1], vertexIds[i2], vertexIds[i3]',
-    '                if id1 and id2 and id3 and id1 ~= id2 and id2 ~= id3 and id1 ~= id3 then',
-    '                    local fid = editableMesh:AddTriangle(id1, id2, id3)',
-    '                    if fid then',
-    '                        addedTriCount += 1',
-    '                        if normalIds[i1] and normalIds[i2] and normalIds[i3] then',
-    '                            pcall(function() editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] }) end)',
-    '                        end',
-    '                        if uvIds[i1] and uvIds[i2] and uvIds[i3] then',
-    '                            pcall(function() editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] }) end)',
-    '                        end',
+    '                if not id1 or not id2 or not id3 or id1 == id2 or id2 == id3 or id1 == id3 then',
+    '                    error(string.format("Invalid or degenerate triangle vertex mapping at face %d for %s", fIdx, payload.name))',
+    '                end',
+    '                local fid = editableMesh:AddTriangle(id1, id2, id3)',
+    '                if not fid then',
+    '                    error(string.format("EditableMesh:AddTriangle returned nil at face %d for %s", fIdx, payload.name))',
+    '                end',
+    '                addedTriCount += 1',
+    '                if #payload.normals == #payload.vertices then',
+    '                    if not normalIds[i1] or not normalIds[i2] or not normalIds[i3] then',
+    '                        error(string.format("Missing normalIds for face %d on %s", fIdx, payload.name))',
+    '                    end',
+    '                    local okNorm, normErr = pcall(function() editableMesh:SetFaceNormals(fid, { normalIds[i1], normalIds[i2], normalIds[i3] }) end)',
+    '                    if not okNorm then',
+    '                        error(string.format("EditableMesh:SetFaceNormals failed at face %d for %s: %s", fIdx, payload.name, tostring(normErr)))',
+    '                    end',
+    '                end',
+    '                if #payload.uvs == #payload.vertices then',
+    '                    if not uvIds[i1] or not uvIds[i2] or not uvIds[i3] then',
+    '                        error(string.format("Missing uvIds for face %d on %s", fIdx, payload.name))',
+    '                    end',
+    '                    local okUv, uvErr = pcall(function() editableMesh:SetFaceUVs(fid, { uvIds[i1], uvIds[i2], uvIds[i3] }) end)',
+    '                    if not okUv then',
+    '                        error(string.format("EditableMesh:SetFaceUVs failed at face %d for %s: %s", fIdx, payload.name, tostring(uvErr)))',
     '                    end',
     '                end',
     '            end',
     '            if addedTriCount == 0 or addedTriCount < expectedTriCount then',
     '                error(string.format("Incomplete triangle creation for %s: created %d of %d expected", payload.name, addedTriCount, expectedTriCount))',
+    '            end',
+    '            local meshVertices = editableMesh:GetVertices()',
+    '            if type(meshVertices) == "table" and #meshVertices < #payload.vertices then',
+    '                error(string.format("EditableMesh:GetVertices() count mismatch for %s: got %d of %d", payload.name, #meshVertices, #payload.vertices))',
     '            end',
     '            local meshTriangles = editableMesh:GetTriangles()',
     '            if type(meshTriangles) == "table" and #meshTriangles < expectedTriCount then',
@@ -1909,12 +2005,17 @@ export function generateEditableMeshLuauCode(
     '            if not createdPart then',
     '                error("AssetService:CreateMeshPartAsync() returned nil for " .. tostring(payload.name))',
     '            end',
+    '            createdMeshPartTemp = createdPart',
     '            return createdPart',
     '        end, debug.traceback)',
     '',
     '        if editableMeshInstance then',
     '            pcall(function() editableMeshInstance:Destroy() end)',
     '            editableMeshInstance = nil',
+    '        end',
+    '        if not okEditable and createdMeshPartTemp then',
+    '            pcall(function() createdMeshPartTemp:Destroy() end)',
+    '            createdMeshPartTemp = nil',
     '        end',
     '',
     '        if okEditable and generatedOrErr and typeof(generatedOrErr) == "Instance" and generatedOrErr:IsA("MeshPart") then',
@@ -2334,7 +2435,7 @@ export function exportAssetToOBJWithMTL(asset: Forge3DAsset): {
     const part = asset.parts[idx];
     const partName = (part.name || `MeshPart_${idx + 1}`).replace(/\s+/g, '_');
     const matName = `${partName}_Mat`;
-    const [r = 160, g = 170, b = 185] = part.color || [160, 170, 185];
+    const [r, g, b] = resolveRgbTuple(part.color);
     const kdR = (r / 255).toFixed(4);
     const kdG = (g / 255).toFixed(4);
     const kdB = (b / 255).toFixed(4);
@@ -2533,7 +2634,7 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
     const [px = 0, py = 1, pz = 0] = part.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
-    const [cr = 160, cg = 170, cb = 185] = part.color || [160, 170, 185];
+    const [cr, cg, cb] = resolveRgbTuple(part.color);
 
     let r00: string, r01: string, r02: string;
     let r10: string, r11: string, r12: string;
@@ -3400,7 +3501,7 @@ export function exportAssetToGLTF(
       type: 'SCALAR',
     });
 
-    const [cr = 160, cg = 170, cb = 185] = part.color || [160, 170, 185];
+    const [cr, cg, cb] = resolveRgbTuple(part.color);
     const alpha = Math.max(0.05, Math.min(1, 1 - (part.transparency || 0)));
     const effMetalness = part.pbrMaterial?.metalness ?? part.metalness ?? 0.65;
     const effRoughness = part.pbrMaterial?.roughness ?? part.roughness ?? 0.35;

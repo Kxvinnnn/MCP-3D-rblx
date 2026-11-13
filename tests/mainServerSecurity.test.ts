@@ -159,6 +159,61 @@ test('Etapa 3 — Seguridad del Servidor Principal (server.ts): startup prod, to
     const delJson = (await delConfirmedRes.json()) as Record<string, any>;
     assert.equal(delJson.deleted_ok, true);
     assert.equal(delJson.deleted, 'asset-sec-delete-target');
+
+    // 9. Política CORS estricta: rechazar *.run.app arbitrario y no filtrar rutas internas en /health
+    const untrustedCorsOptions = await fetch(`${baseUrl}/api/v1/health`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://evil-attacker.run.app' },
+    });
+    assert.equal(untrustedCorsOptions.status, 403);
+
+    const untrustedCorsGet = await fetch(`${baseUrl}/api/v1/health`, {
+      headers: { Origin: 'https://evil-attacker.run.app' },
+    });
+    assert.equal(untrustedCorsGet.status, 200);
+    assert.equal(untrustedCorsGet.headers.get('access-control-allow-origin'), null);
+    const healthJson = (await untrustedCorsGet.json()) as Record<string, any>;
+    assert.equal(healthJson.rojo_project_path, undefined);
+    assert.ok(healthJson.rojo_workspace);
+
+    // 10. Bloqueo de rutas de sistema operativo en /api/v1/rojo/configure
+    const sysPathRes = await fetch(`${baseUrl}/api/v1/rojo/configure`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forge-Token': validSecret,
+      },
+      body: JSON.stringify({ rojo_project_path: '/etc/forge-blocked', initialize_if_missing: false }),
+    });
+    assert.equal(sysPathRes.status, 403);
+
+    // 11. Rechazo de firma HMAC incorrecta en handshake y sesión expirada en heartbeat
+    const badSigRes = await fetch(`${baseUrl}/api/v1/bridge/auth/handshake`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forge-Token': validBridgeSecret,
+      },
+      body: JSON.stringify({
+        bridgeVersion: '2.3.0',
+        protocolVersion: '1.0',
+        timestamp: new Date().toISOString(),
+        nonce: crypto.randomUUID(),
+        signature: '0'.repeat(64),
+      }),
+    });
+    assert.equal(badSigRes.status, 401);
+
+    const expiredSessRes = await fetch(`${baseUrl}/api/v1/bridge/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer expired-session-token-000',
+        'X-Bridge-Session': 'sess_expired_999',
+      },
+      body: JSON.stringify({ bridgeVersion: '2.3.0' }),
+    });
+    assert.equal(expiredSessRes.status, 401);
   } finally {
     if (srv) {
       await new Promise<void>((resolve) => srv!.close(() => resolve()));

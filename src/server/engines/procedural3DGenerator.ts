@@ -28,6 +28,8 @@ import {
   normalizePartsWithSyncMetadata,
 } from './worldAndModelEditorEngine.ts';
 
+import { parseNaturalLanguageToTreeParams } from '../../utils/treePromptParser.ts';
+
 export const FORGE_ASSET_CATEGORIES = [
   'Props',
   'Trees & Vegetation',
@@ -44,11 +46,15 @@ export type ForgeAssetCategory = (typeof FORGE_ASSET_CATEGORIES)[number];
 export type CanopyShapeType = 'spherical' | 'conical' | 'layered' | 'weeping';
 export type LeafDistributionType = 'dense' | 'balanced' | 'sparse' | 'clustered';
 export type BranchDistributionType = 'tiered' | 'whorled' | 'alternating' | 'canopy_top';
+export type TreeDetailLevel = 'low' | 'medium' | 'high' | 'ultra';
 
 export interface TreeProceduralParams {
   seed?: string | number;
   height?: number;
+  width?: number;
   trunkThickness?: number;
+  trunkLean?: number;
+  trunkCurvature?: number;
   branchCount?: number;
   branchLength?: number;
   branchDistribution?: BranchDistributionType;
@@ -56,12 +62,16 @@ export interface TreeProceduralParams {
   canopyShape?: CanopyShapeType;
   canopySize?: number;
   foliageCount?: number;
+  foliageDensity?: number;
   trunkMaterial?: string;
   leafMaterial?: string;
   trunkColor?: string;
   leafColor?: string;
   variation?: number;
   leafVariation?: number;
+  colorVariation?: number;
+  detailLevel?: TreeDetailLevel;
+  lodLevel?: 0 | 1 | 2;
 }
 
 export interface Procedural3DGenerationRequest {
@@ -135,6 +145,52 @@ function modulateHexColor(hex: string, factor: number): string {
   return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
+/**
+ * Recalcula normales suaves ponderadas por área de cada triángulo válido y garantiza vector unitario finito.
+ */
+function recomputeSmoothNormals(
+  vertices: [number, number, number][],
+  faces: [number, number, number][],
+  fallbackNormals: [number, number, number][]
+): [number, number, number][] {
+  const accum: [number, number, number][] = vertices.map(() => [0, 0, 0]);
+  for (const [i0, i1, i2] of faces) {
+    const a = vertices[i0];
+    const b = vertices[i1];
+    const c = vertices[i2];
+    if (!a || !b || !c) continue;
+    const e1x = b[0] - a[0];
+    const e1y = b[1] - a[1];
+    const e1z = b[2] - a[2];
+    const e2x = c[0] - a[0];
+    const e2y = c[1] - a[1];
+    const e2z = c[2] - a[2];
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(nz)) continue;
+    accum[i0][0] += nx;
+    accum[i0][1] += ny;
+    accum[i0][2] += nz;
+    accum[i1][0] += nx;
+    accum[i1][1] += ny;
+    accum[i1][2] += nz;
+    accum[i2][0] += nx;
+    accum[i2][1] += ny;
+    accum[i2][2] += nz;
+  }
+
+  return accum.map((acc, idx) => {
+    const len = Math.hypot(acc[0], acc[1], acc[2]);
+    if (len > 1e-8 && Number.isFinite(len)) {
+      return [round4(acc[0] / len), round4(acc[1] / len), round4(acc[2] / len)];
+    }
+    const fb = fallbackNormals[idx] || [0, 1, 0];
+    const fbLen = Math.hypot(fb[0], fb[1], fb[2]) || 1;
+    return [round4(fb[0] / fbLen), round4(fb[1] / fbLen), round4(fb[2] / fbLen)];
+  });
+}
+
 function buildCylinderBuffers(params: {
   size: [number, number, number];
   bottomScaleRatio: number;
@@ -142,6 +198,9 @@ function buildCylinderBuffers(params: {
   radialSegments: number;
   heightSegments: number;
   jitterAmount: number;
+  bendOffsetX?: number;
+  bendOffsetZ?: number;
+  curvatureAmount?: number;
   rng: () => number;
 }): RawProceduralGeometry {
   const [sx, sy, sz] = params.size;
@@ -149,7 +208,10 @@ function buildCylinderBuffers(params: {
   const rzBase = Math.max(0.15, sz * 0.5);
   const halfY = Math.max(0.15, sy * 0.5);
   const radial = clamp(Math.round(params.radialSegments), 4, 16);
-  const rings = clamp(Math.round(params.heightSegments), 1, 8);
+  const rings = clamp(Math.round(params.heightSegments), 1, 10);
+  const bendX = Number(params.bendOffsetX || 0);
+  const bendZ = Number(params.bendOffsetZ || 0);
+  const curv = clamp(Number(params.curvatureAmount || 0), 0, 1);
 
   const vertices: [number, number, number][] = [];
   const normals: [number, number, number][] = [];
@@ -161,6 +223,8 @@ function buildCylinderBuffers(params: {
     const y = round4(-halfY + vRatio * sy);
     const radiusScale =
       params.bottomScaleRatio + (params.topScaleRatio - params.bottomScaleRatio) * vRatio;
+    const spineShiftX = bendX * (vRatio * vRatio) + Math.sin(vRatio * Math.PI) * curv * sx * 0.45;
+    const spineShiftZ = bendZ * (vRatio * vRatio) + Math.sin(vRatio * Math.PI * 1.5) * curv * sz * 0.25;
 
     for (let s = 0; s < radial; s++) {
       const uRatio = s / radial;
@@ -169,15 +233,15 @@ function buildCylinderBuffers(params: {
         r > 0 && r < rings
           ? 1 + (params.rng() - 0.5) * 2 * clamp(params.jitterAmount, 0, 0.35)
           : 1;
-      const vx = round4(Math.cos(angle) * rxBase * radiusScale * jitter);
-      const vz = round4(Math.sin(angle) * rzBase * radiusScale * jitter);
+      const vx = round4(spineShiftX + Math.cos(angle) * rxBase * radiusScale * jitter);
+      const vz = round4(spineShiftZ + Math.sin(angle) * rzBase * radiusScale * jitter);
       vertices.push([vx, y, vz]);
 
       const nx = Math.cos(angle);
       const nz = Math.sin(angle);
       const nLen = Math.hypot(nx, 0.15, nz) || 1;
       normals.push([round4(nx / nLen), round4(0.15 / nLen), round4(nz / nLen)]);
-      uvs.push([round4(uRatio), round4(vRatio)]);
+      uvs.push([round4(clamp(uRatio, 0, 1)), round4(clamp(vRatio, 0, 1))]);
     }
   }
 
@@ -199,7 +263,9 @@ function buildCylinderBuffers(params: {
   uvs.push([0.5, 0]);
 
   const topCenterIdx = vertices.length;
-  vertices.push([0, round4(halfY), 0]);
+  const topSpineX = round4(bendX);
+  const topSpineZ = round4(bendZ + Math.sin(Math.PI * 1.5) * curv * sz * 0.25);
+  vertices.push([topSpineX, round4(halfY), topSpineZ]);
   normals.push([0, 1, 0]);
   uvs.push([0.5, 1]);
 
@@ -210,7 +276,12 @@ function buildCylinderBuffers(params: {
     faces.push([topCenterIdx, topRingOffset + s, topRingOffset + nextS]);
   }
 
-  return { vertices, normals, uvs, faces };
+  return {
+    vertices,
+    normals: recomputeSmoothNormals(vertices, faces, normals),
+    uvs,
+    faces,
+  };
 }
 
 /**
@@ -227,6 +298,10 @@ export function buildTaperedCylinderMesh(params: {
   heightSegments: number;
   jitterAmount: number;
   colorHex: string;
+  bendOffsetX?: number;
+  bendOffsetZ?: number;
+  curvatureAmount?: number;
+  activeLod?: 0 | 1 | 2;
   rng: () => number;
 }) {
   const lod0 = buildCylinderBuffers(params);
@@ -256,7 +331,8 @@ export function buildTaperedCylinderMesh(params: {
     lod0.faces,
     params.colorHex,
     lod1,
-    lod2
+    lod2,
+    params.activeLod
   );
 }
 
@@ -353,7 +429,12 @@ function buildOrganicCanopyOrRockBuffers(params: {
     faces.push([topPoleIdx, lastRingStart + lon, lastRingStart + nextLon]);
   }
 
-  return { vertices, normals, uvs, faces };
+  return {
+    vertices,
+    normals: recomputeSmoothNormals(vertices, faces, normals),
+    uvs,
+    faces,
+  };
 }
 
 /**
@@ -369,6 +450,7 @@ export function buildOrganicCanopyOrRockMesh(params: {
   latSegments: number;
   jitterAmount: number;
   colorHex: string;
+  activeLod?: 0 | 1 | 2;
   rng: () => number;
 }) {
   const lod0 = buildOrganicCanopyOrRockBuffers(params);
@@ -398,7 +480,8 @@ export function buildOrganicCanopyOrRockMesh(params: {
     lod0.faces,
     params.colorHex,
     lod1,
-    lod2
+    lod2,
+    params.activeLod
   );
 }
 
@@ -565,10 +648,18 @@ function finalizeProceduralMeshData(
   faces: [number, number, number][],
   colorHex: string,
   lod1Geom?: RawProceduralGeometry,
-  lod2Geom?: RawProceduralGeometry
+  lod2Geom?: RawProceduralGeometry,
+  activeLod: 0 | 1 | 2 = 0
 ) {
+  const safeLod0: RawProceduralGeometry = { vertices, normals, uvs, faces };
+  const safeLod1 = lod1Geom || safeLod0;
+  const safeLod2 = lod2Geom || safeLod1;
+
+  const chosenGeom =
+    activeLod === 2 ? safeLod2 : activeLod === 1 ? safeLod1 : safeLod0;
+
   const rgb = hexToRgbNormalized(colorHex);
-  const vertexColors: [number, number, number][] = vertices.map((_, idx) => {
+  const vertexColors: [number, number, number][] = chosenGeom.vertices.map((_, idx) => {
     const shade = 0.94 + (idx % 5) * 0.015;
     return [
       round4(clamp(rgb[0] * shade, 0, 1)),
@@ -580,18 +671,17 @@ function finalizeProceduralMeshData(
   const geometrySignature = JSON.stringify({
     modelName,
     partName,
-    vertices,
-    normals,
-    uvs,
-    faces,
+    activeLod,
+    vertices: chosenGeom.vertices,
+    normals: chosenGeom.normals,
+    uvs: chosenGeom.uvs,
+    faces: chosenGeom.faces,
   });
   const partGeometryHash = crypto
     .createHash('sha256')
     .update(geometrySignature, 'utf-8')
     .digest('hex');
 
-  const safeLod1 = lod1Geom || { vertices, normals, uvs, faces };
-  const safeLod2 = lod2Geom || safeLod1;
   const baseCount = Math.max(1, faces.length);
 
   return {
@@ -602,11 +692,12 @@ function finalizeProceduralMeshData(
     geometrySource: 'EditableMeshBuffers' as const,
     geometryHash: partGeometryHash,
     sourceFormat: 'PROC',
-    vertices,
-    normals,
-    uvs,
+    activeLod,
+    vertices: chosenGeom.vertices,
+    normals: chosenGeom.normals,
+    uvs: chosenGeom.uvs,
     vertexColors,
-    faces,
+    faces: chosenGeom.faces,
     lodLevels: [
       {
         level: 0,
@@ -679,16 +770,12 @@ export function resolveCanonicalAssetCategory(
 }
 
 /**
- * Fase 7 — Generador Procedural Parametrizado de Árboles 3D para Roblox.
+ * Fase 3 & Fase 7 — Generador Procedural Parametrizado de Árboles 3D para Roblox.
  *
- * Soporta:
- * - Altura (`height`)
- * - Grosor de tronco (`trunkThickness`)
- * - Ramas (`branchCount`)
- * - Distribución de hojas (`leafDistribution`: `'dense' | 'balanced' | 'sparse' | 'clustered'`)
- * - Forma de copa (`canopyShape`: `'spherical' | 'conical' | 'layered' | 'weeping'`)
- * - Materiales (`trunkMaterial`, `leafMaterial`)
- * - Variación aleatoria controlada por semilla (`seed`, `variation`)
+ * Soporta 14+ parámetros configurables y reproducibles por semilla (`seed`):
+ * altura, ancho/expansión horizontal, grosor, inclinación, curvatura del tronco,
+ * cantidad/longitud/distribución de ramas, forma/tamaño de copa, cantidad/densidad de follaje,
+ * materiales, colores, variación tonal/orgánica, nivel de detalle y nivel LOD activo (0/1/2).
  */
 export function generateParameterizedTree3DParts(
   modelName: string,
@@ -700,6 +787,8 @@ export function generateParameterizedTree3DParts(
 
   const height = clamp(Number(params.height ?? 14), 4, 45);
   const trunkThickness = clamp(Number(params.trunkThickness ?? 1.6), 0.4, 6.0);
+  const trunkLeanDeg = clamp(Number(params.trunkLean ?? 0), -28, 28);
+  const trunkCurvature = clamp(Number(params.trunkCurvature ?? 0), 0, 1);
   const branchCount = clamp(Math.round(Number(params.branchCount ?? 4)), 1, 12);
   const explicitBranchLength =
     params.branchLength !== undefined && Number.isFinite(Number(params.branchLength)) && Number(params.branchLength) > 0
@@ -726,18 +815,48 @@ export function generateParameterizedTree3DParts(
     params.canopyShape === 'weeping'
       ? params.canopyShape
       : 'spherical';
-  const canopySize = clamp(Number(params.canopySize ?? 1.0), 0.4, 2.2);
+  const canopySize = clamp(Number(params.canopySize ?? 1.0), 0.35, 2.4);
+  const foliageDensity = clamp(Number(params.foliageDensity ?? 1.0), 0.25, 2.2);
+
+  const detailLevel: TreeDetailLevel =
+    params.detailLevel === 'low' ||
+    params.detailLevel === 'high' ||
+    params.detailLevel === 'ultra' ||
+    params.detailLevel === 'medium'
+      ? params.detailLevel
+      : 'medium';
+
+  const activeLod: 0 | 1 | 2 =
+    params.lodLevel === 2 ? 2 : params.lodLevel === 1 ? 1 : 0;
+
+  const detailSegMap: Record<TreeDetailLevel, { trunkRad: number; trunkRings: number; branchRad: number; canopyRad: number; canopyLat: number }> = {
+    low: { trunkRad: 5, trunkRings: 2, branchRad: 4, canopyRad: 6, canopyLat: 3 },
+    medium: { trunkRad: 8, trunkRings: 4, branchRad: 6, canopyRad: 10, canopyLat: 6 },
+    high: { trunkRad: 11, trunkRings: 6, branchRad: 8, canopyRad: 12, canopyLat: 8 },
+    ultra: { trunkRad: 14, trunkRings: 8, branchRad: 10, canopyRad: 15, canopyLat: 10 },
+  };
+  const segSpec = detailSegMap[detailLevel];
 
   const trunkMaterial = String(params.trunkMaterial || 'Wood');
   const leafMaterial = String(params.leafMaterial || 'Grass');
-  const trunkColor = String(params.trunkColor || '#5c4033');
-  const leafColor = String(params.leafColor || '#2d6a4f');
+  const baseTrunkColor = String(params.trunkColor || '#5c4033');
+  const baseLeafColor = String(params.leafColor || '#2d6a4f');
   const variation = clamp(Number(params.variation ?? 0.22), 0, 1);
   const leafVariation = clamp(
     Number(params.leafVariation !== undefined ? params.leafVariation : variation),
     0,
     1
   );
+  const colorVariation = clamp(
+    Number(params.colorVariation !== undefined ? params.colorVariation : leafVariation),
+    0,
+    1
+  );
+
+  const trunkColor =
+    colorVariation > 0.05
+      ? modulateHexColor(baseTrunkColor, 1 + (rng() - 0.5) * 0.22 * colorVariation)
+      : baseTrunkColor;
 
   const parts: any[] = [];
 
@@ -772,15 +891,16 @@ export function generateParameterizedTree3DParts(
       size: rootFlareSize,
       bottomScaleRatio: 1.25,
       topScaleRatio: 0.82,
-      radialSegments: 8,
+      radialSegments: segSpec.trunkRad,
       heightSegments: 2,
       jitterAmount: variation * 0.18,
       colorHex: trunkColor,
+      activeLod,
       rng,
     }),
   });
 
-  // 2. Tronco principal articulado
+  // 2. Tronco principal articulado (con soporte de inclinación y curvatura orgánica)
   const trunkHeight = round4(height * 0.56);
   const trunkSize: [number, number, number] = [
     round4(trunkThickness),
@@ -788,6 +908,14 @@ export function generateParameterizedTree3DParts(
     round4(trunkThickness),
   ];
   const trunkCenterY = round4(rootFlareHeight * 0.85 + trunkHeight * 0.5);
+  const leanAzimuth = rng() * Math.PI * 2;
+  const leanRad = (trunkLeanDeg * Math.PI) / 180;
+  const leanShiftMag = Math.tan(leanRad) * trunkHeight * 0.45;
+  const trunkBendX = round4(Math.cos(leanAzimuth) * leanShiftMag);
+  const trunkBendZ = round4(Math.sin(leanAzimuth) * leanShiftMag);
+  const trunkTopOffsetX = trunkBendX;
+  const trunkTopOffsetZ = round4(trunkBendZ + Math.sin(Math.PI * 1.5) * trunkCurvature * trunkThickness * 0.25);
+
   parts.push({
     partId: 'part_2_trunk',
     name: 'MainTrunk',
@@ -796,7 +924,7 @@ export function generateParameterizedTree3DParts(
     size: trunkSize,
     position: [0, trunkCenterY, 0],
     rotation: [
-      round4((rng() - 0.5) * 4 * variation),
+      round4((rng() - 0.5) * 4 * variation + trunkLeanDeg * 0.15),
       round4(rng() * 360),
       round4((rng() - 0.5) * 4 * variation),
     ],
@@ -815,20 +943,30 @@ export function generateParameterizedTree3DParts(
       size: trunkSize,
       bottomScaleRatio: 1.0,
       topScaleRatio: 0.62,
-      radialSegments: 8,
-      heightSegments: 4,
+      radialSegments: segSpec.trunkRad,
+      heightSegments: segSpec.trunkRings,
       jitterAmount: variation * 0.22,
       colorHex: trunkColor,
+      bendOffsetX: trunkBendX,
+      bendOffsetZ: trunkBendZ,
+      curvatureAmount: trunkCurvature,
+      activeLod,
       rng,
     }),
   });
 
-  // 3. Ramas secundarias parametrizadas (`branchCount`, `branchLength`, `branchDistribution`)
+  // Factor de escala horizontal del parámetro width respecto a la proporción natural de altura
+  const widthScaleFactor =
+    params.width !== undefined && Number.isFinite(Number(params.width)) && Number(params.width) > 0
+      ? clamp(Number(params.width) / Math.max(2.0, height * 0.56), 0.4, 2.5)
+      : 1.0;
+
+  // 3. Ramas secundarias parametrizadas (`branchCount`, `branchLength`, `branchDistribution`, `width`)
   const branchStartHeight =
     branchDistribution === 'canopy_top'
       ? rootFlareHeight + trunkHeight * 0.78
       : rootFlareHeight + trunkHeight * 0.58;
-  const branchSpreadRadius = Math.max(1.2, height * 0.18);
+  const branchSpreadRadius = Math.max(1.2, height * 0.18 * widthScaleFactor);
   const branchEndpoints: [number, number, number][] = [];
 
   for (let i = 0; i < branchCount; i++) {
@@ -852,8 +990,8 @@ export function generateParameterizedTree3DParts(
 
     const computedBranchLen =
       explicitBranchLength !== null
-        ? explicitBranchLength * (1 - tierFactor * 0.12) * (0.94 + rng() * 0.16 * variation)
-        : height * (0.24 - tierFactor * 0.06) * (0.9 + rng() * 0.25 * variation);
+        ? explicitBranchLength * widthScaleFactor * (1 - tierFactor * 0.12) * (0.94 + rng() * 0.16 * variation)
+        : height * (0.24 - tierFactor * 0.06) * widthScaleFactor * (0.9 + rng() * 0.25 * variation);
     const branchLength = round4(Math.max(1.2, computedBranchLen));
     const branchThick = round4(Math.max(0.28, trunkThickness * (0.48 - tierFactor * 0.12)));
     const pitchDeg = canopyShape === 'weeping' ? 58 : canopyShape === 'conical' ? 32 : 42;
@@ -861,22 +999,29 @@ export function generateParameterizedTree3DParts(
 
     const radialOffset = Math.sin(tiltRad) * branchLength * 0.5;
     const verticalOffset = Math.cos(tiltRad) * branchLength * 0.5;
+    const attachFactor = clamp(0.6 + tierFactor * 0.4, 0, 1);
+    const anchorShiftX = trunkTopOffsetX * attachFactor;
+    const anchorShiftZ = trunkTopOffsetZ * attachFactor;
 
-    const bx = round4(Math.cos(angle) * (trunkThickness * 0.25 + radialOffset));
+    const bx = round4(anchorShiftX + Math.cos(angle) * (trunkThickness * 0.25 + radialOffset));
     const by = round4(branchStartHeight + heightSpan + verticalOffset);
-    const bz = round4(Math.sin(angle) * (trunkThickness * 0.25 + radialOffset));
+    const bz = round4(anchorShiftZ + Math.sin(angle) * (trunkThickness * 0.25 + radialOffset));
 
-    const tipX = round4(Math.cos(angle) * (trunkThickness * 0.3 + radialOffset * 1.85));
+    const tipX = round4(anchorShiftX + Math.cos(angle) * (trunkThickness * 0.3 + radialOffset * 1.85));
     const tipY = round4(
       branchStartHeight +
         heightSpan +
         verticalOffset * (canopyShape === 'weeping' ? 1.2 : 1.75)
     );
-    const tipZ = round4(Math.sin(angle) * (trunkThickness * 0.3 + radialOffset * 1.85));
+    const tipZ = round4(anchorShiftZ + Math.sin(angle) * (trunkThickness * 0.3 + radialOffset * 1.85));
     branchEndpoints.push([tipX, tipY, tipZ]);
 
     const branchName = `Branch_${i + 1}`;
     const branchSize: [number, number, number] = [branchThick, branchLength, branchThick];
+    const branchColor =
+      colorVariation > 0.08
+        ? modulateHexColor(trunkColor, 1 + (rng() - 0.5) * 0.16 * colorVariation)
+        : trunkColor;
     parts.push({
       partId: `part_branch_${i + 1}`,
       name: branchName,
@@ -889,7 +1034,7 @@ export function generateParameterizedTree3DParts(
         round4((angle * 180) / Math.PI),
         round4(-Math.cos(angle) * pitchDeg),
       ],
-      color: trunkColor,
+      color: branchColor,
       material: trunkMaterial,
       transparency: 0,
       reflectance: 0.02,
@@ -904,27 +1049,36 @@ export function generateParameterizedTree3DParts(
         size: branchSize,
         bottomScaleRatio: 1.0,
         topScaleRatio: 0.45,
-        radialSegments: 6,
-        heightSegments: 3,
+        radialSegments: segSpec.branchRad,
+        heightSegments: Math.max(2, Math.floor(segSpec.trunkRings * 0.75)),
         jitterAmount: variation * 0.2,
-        colorHex: trunkColor,
+        curvatureAmount: trunkCurvature * 0.35,
+        colorHex: branchColor,
+        activeLod,
         rng,
       }),
     });
   }
 
-  // 4. Copa principal (`CanopyCrown_Main`) según `canopyShape`, `canopySize` y `leafDistribution`
+  // 4. Copa principal (`CanopyCrown_Main`) según `canopyShape`, `canopySize`, `width`, `leafDistribution` y `foliageDensity`
   const densityMultiplier =
-    leafDistribution === 'dense'
+    (leafDistribution === 'dense'
       ? 1.25
       : leafDistribution === 'sparse'
       ? 0.75
       : leafDistribution === 'clustered'
       ? 1.05
-      : 1.0;
+      : 1.0) * (0.7 + foliageDensity * 0.3);
 
+  const computedDefaultCrownW =
+    height * (canopyShape === 'conical' ? 0.46 : 0.56) * densityMultiplier * canopySize;
   const crownWidth = round4(
-    Math.max(2.0, height * (canopyShape === 'conical' ? 0.46 : 0.56) * densityMultiplier * canopySize)
+    Math.max(
+      2.0,
+      params.width !== undefined && Number.isFinite(Number(params.width)) && Number(params.width) > 0
+        ? Number(params.width) * densityMultiplier * canopySize
+        : computedDefaultCrownW
+    )
   );
   const crownHeight = round4(
     Math.max(
@@ -950,9 +1104,9 @@ export function generateParameterizedTree3DParts(
     parentPath: 'Root/Canopy',
     shape: 'MeshPart',
     size: crownSize,
-    position: [0, crownCenterY, 0],
+    position: [round4(trunkTopOffsetX), crownCenterY, round4(trunkTopOffsetZ)],
     rotation: [0, round4(rng() * 360), 0],
-    color: leafColor,
+    color: baseLeafColor,
     material: leafMaterial,
     transparency: 0,
     reflectance: 0.04,
@@ -966,34 +1120,37 @@ export function generateParameterizedTree3DParts(
       partName: 'CanopyCrown_Main',
       size: crownSize,
       shapeStyle: canopyShape,
-      radialSegments: 10,
-      latSegments: 6,
+      radialSegments: segSpec.canopyRad,
+      latSegments: segSpec.canopyLat,
       jitterAmount: Math.max(variation, leafVariation) * 0.28,
-      colorHex: leafColor,
+      colorHex: baseLeafColor,
+      activeLod,
       rng,
     }),
   });
 
-  // 5. Racimos de follaje secundarios (`FoliageCluster_1..N`) controlados por `foliageCount`, `leafDistribution` y `leafVariation`
+  // 5. Racimos de follaje secundarios (`FoliageCluster_1..N`) controlados por `foliageCount`, `foliageDensity`, `leafDistribution` y `colorVariation`
   const defaultClusterCount =
     leafDistribution === 'dense'
-      ? Math.max(4, branchCount)
+      ? Math.max(4, Math.round(branchCount * foliageDensity))
       : leafDistribution === 'sparse'
-      ? Math.max(1, Math.floor(branchCount * 0.5))
-      : Math.max(2, Math.min(6, branchCount));
+      ? Math.max(1, Math.floor(branchCount * 0.5 * foliageDensity))
+      : Math.max(2, Math.min(8, Math.round(Math.min(6, branchCount) * foliageDensity)));
   const clusterCount =
     params.foliageCount !== undefined && Number.isFinite(Number(params.foliageCount))
       ? clamp(Math.round(Number(params.foliageCount)), 0, 16)
-      : defaultClusterCount;
+      : clamp(defaultClusterCount, 0, 16);
 
   for (let c = 0; c < clusterCount; c++) {
     const anchor = branchEndpoints[c % branchEndpoints.length] || [
-      round4(Math.cos(c) * branchSpreadRadius),
+      round4(trunkTopOffsetX + Math.cos(c) * branchSpreadRadius),
       crownCenterY,
-      round4(Math.sin(c) * branchSpreadRadius),
+      round4(trunkTopOffsetZ + Math.sin(c) * branchSpreadRadius),
     ];
     const clusterScale = round4(
-      (0.45 + (rng() * 0.24 * leafVariation)) * (leafDistribution === 'clustered' ? 1.15 : 1.0)
+      (0.45 + rng() * 0.24 * leafVariation) *
+        (leafDistribution === 'clustered' ? 1.15 : 1.0) *
+        (0.85 + foliageDensity * 0.15)
     );
     const clusterSize: [number, number, number] = [
       round4(Math.max(1.2, crownWidth * clusterScale)),
@@ -1005,8 +1162,8 @@ export function generateParameterizedTree3DParts(
       round4(clusterSize[1] * 0.5 + 0.5),
       round4(anchor[1] + (canopyShape === 'weeping' ? -0.35 : 0.45))
     );
-    const leafTintFactor = 1 + (rng() - 0.5) * 0.26 * leafVariation;
-    const clusterColor = modulateHexColor(leafColor, leafTintFactor);
+    const leafTintFactor = 1 + (rng() - 0.5) * 0.34 * colorVariation;
+    const clusterColor = modulateHexColor(baseLeafColor, leafTintFactor);
 
     parts.push({
       partId: `part_foliage_${c + 1}`,
@@ -1034,10 +1191,11 @@ export function generateParameterizedTree3DParts(
         partName: clusterName,
         size: clusterSize,
         shapeStyle: canopyShape,
-        radialSegments: 8,
-        latSegments: 5,
+        radialSegments: Math.max(5, Math.round(segSpec.canopyRad * 0.8)),
+        latSegments: Math.max(3, Math.round(segSpec.canopyLat * 0.85)),
         jitterAmount: leafVariation * 0.32,
         colorHex: clusterColor,
+        activeLod,
         rng,
       }),
     });
@@ -1482,12 +1640,25 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   const collisionFidelity = req.collision_fidelity || 'Hull';
   const assetType = req.asset_type || 'Model3D';
 
+  const promptTreeParsed =
+    canonicalCategory === 'Trees & Vegetation' && req.prompt
+      ? parseNaturalLanguageToTreeParams(req.prompt).params
+      : undefined;
+  const effectiveTreeParams: TreeProceduralParams | undefined =
+    canonicalCategory === 'Trees & Vegetation'
+      ? {
+          seed,
+          ...(promptTreeParsed || {}),
+          ...(req.tree_params || {}),
+        }
+      : req.tree_params;
+
   const generated = generateSeededCategoryParts(
     safeModelName,
     canonicalCategory,
     seed,
     collisionFidelity,
-    req.tree_params
+    effectiveTreeParams
   );
 
   const normalizedParts = normalizePartsWithSyncMetadata(generated.parts, safeModelName).map(

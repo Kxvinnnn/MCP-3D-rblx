@@ -9,7 +9,7 @@
 | Dominio | Motor | Módulo TypeScript (`src/server/engines/`) | Módulo Python (`backend/engines/`) | Responsabilidad Única y Exportaciones Clave |
 | :--- | :--- | :--- | :--- | :--- |
 | **Context Pruner** | `ContextPruner` | `contextPrunerEngine.ts` | `context_pruner.py` | Recorta `project_context.md` según el dominio (`3d`, `pbr`, `luau`, `ui`, `world`, `agents`), ahorrando **~65% de tokens** de contexto por consulta a Gemini. Exporta `buildPrunedDomainContext`, `buildAiSelfUnderstandingManifest`. |
-| **1. 3D Procedural & Geometry** | `3D Generation Engine` | `procedural3DGenerator.ts` & `generation3DEngine.ts` | `generation_3d_engine.py` | Motor 1 procedural determinista por `seed` (8 categorías, 14 params de árbol, LOD 0/1/2 cerrados), extracción de buffers reales, partición `>9,000` vértices y generación Luau `--!strict` con `AssetService:CreateEditableMesh()`. |
+| **1. 3D Procedural & Geometry** | `3D Generation Engine` | `procedural3DGenerator.ts` & `generation3DEngine.ts` | `generation_3d_engine.py` | Motor 1 procedural determinista por `seed` (8 categorías, árbol configurable 23 params + LOD 0/1/2 cerrados), extracción de buffers reales, partición `>9,000` vértices, límite estricto 20,000 vértices/caras `EditableMesh` y generación Luau `--!strict`. |
 | **2. Assets & PBR** | `Asset Engine` | `assetEngine.ts` & `worldAndModelEditorEngine.ts` | `asset_engine.py` | Exportador/Parser `.RBXMX`, `.glTF 2.0`, `.OBJ/.MTL`, publicación PBR 4 canales Open Cloud (`local_saved` vs `cloud_published`), escritura atómica (`openSync`+`fsyncSync`+`renameSync`) e historial de 25 versiones. |
 | **3. Luau Code** | `Luau Engine` | `luauEngine.ts` | `luau_engine.py` | Enrutamiento estricto `Server` (`src/server/*.server.luau`), `Client` (`src/client/*.client.luau`), `Module` (`src/shared/*.luau`) con `--!strict`, `task.*` y limpieza `Maid`. |
 | **4. ForgeGUI** | `UI Engine` | `uiEngine.ts` | `ui_engine.py` | Generación de `ScreenGui` 100% responsive (`UDim2.fromScale` + `AnchorPoint = Vector2.new(0.5, 0.5)`), `ViewportFrame` 3D y árbol `ui_tree` en vivo. |
@@ -27,6 +27,7 @@
 | `src/utils/robloxGeometryValidator.ts` | Triangulación 3D Ear Clipping (Newell Normal + 2D Projection + Ear Clipping con tolerancia relativa a la escala del polígono) y reporte estricto de restricciones Roblox (`meshData` y `baseMeshData`). | `validateRobloxGeometry`, `triangulatePolygonFace3D`, `countValidTrianglesInFace`, `computeTriangleArea3D`. |
 | `src/utils/incrementalSync.ts` | Diferenciación incremental quirúrgica de piezas 3D (`added`, `removed`, `modified`, `unchanged`) con detección de duplicados por `partId` y desambiguación jerárquica. | `computeIncrementalDiff`, `buildCollisionSafePartMap`. |
 | `src/utils/receiptVerification.ts` | Verificación estricta de recibos de reconstrucción de Roblox Studio (rechaza recibos incompletos o parciales sin hash coincidente). | `evaluateStudioReconstructionReceipt`, `reconcileReconstructedModelFromStudio`. |
+| `src/utils/treePromptParser.ts` | Conversor determinista ES/EN de lenguaje natural a parámetros estructurados del generador de árboles (`height`, `width`, `trunkThickness`, `canopyShape`, `leafColor`, `detailLevel`, etc.). | `parseNaturalLanguageToTreeParams`. |
 
 ---
 
@@ -46,8 +47,9 @@
    - `pushToStudio()` mantiene `pendingChanges = true` cuando la tarea queda en cola (`queued`) o `awaiting_confirmation`, y sólo limpia cambios tras verificación estricta del recibo (`reconcileStudioTaskReceipt`).
 4. **Seguridad Fail-Closed e Identificadores Honestos**:
    - Producción (`NODE_ENV=production`) rechaza secretos vacíos o tokens placeholder conocidos.
+   - CORS restringido a allowlist explícita (`ALLOWED_ORIGINS` / `FORGE_ALLOWED_ORIGINS` + loopback), sin wildcards `.run.app`.
    - `EditableMeshBuffers` locales usan `forgeAssetId` + `geometryHash`/`contentHash` y mantienen `robloxAssetId: null` hasta una publicación verificada en Roblox Cloud.
-   - Toda geometría editable se reconstruye desde buffers (`vertices`, `normals`, `uvs`, `faces`) mediante `AssetService:CreateEditableMesh()` + `AssetService:CreateMeshPartAsync()`.
+   - Toda geometría editable se reconstruye desde buffers (`vertices`, `normals`, `uvs`, `faces`) mediante `AssetService:CreateEditableMesh()` + `AssetService:CreateMeshPartAsync()` respetando el límite duro de 20,000 vértices y 20,000 caras por sub-malla.
 
 ---
 

@@ -14,10 +14,10 @@ Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.3.0*
 
 ### 1.1 `3D Generation Engine` (`backend/engines/generation_3d_engine.py` | `src/server/engines/generation3DEngine.ts` & `procedural3DGenerator.ts`)
 - **Responsabilidades**:
-  - **Motor 1 Procedural Parametrizado** (sin claves de API): soporta 8 categorías y el generador de árboles 3D con 14 parámetros + mallas cerradas LOD 0/1/2.
+  - **Motor 1 Procedural Parametrizado** (sin claves de API): soporta 8 categorías y el generador de árboles 3D configurable (23 parámetros: dimensiones, curvatura/inclinación de tronco, densidad de follaje, colores hex + variación, nivel de detalle y LOD 0/1/2 cerrados), integrado con `parseNaturalLanguageToTreeParams` (`src/utils/treePromptParser.ts`).
   - Extracción de buffers geométricos reales (`vertices`, `normals`, `uvs`, `faces` 0-based) desde `.OBJ` o sub-mallas procesadas, exponiendo `forgeAssetId` y manteniendo `robloxAssetId: null` hasta publicación cloud.
-  - División inteligente de mallas densas (`>9,000` vértices o `>9,500` caras) en sub-partes contiguas sin descartar ningún triángulo (`splitOversizedMeshPartInput`).
-  - Generación de módulos Luau `--!strict` que reconstruyen `MeshPart` reales mediante `AssetService:CreateEditableMesh()`, verifican `#editableMesh:GetTriangles()`, liberan memoria con `editableMesh:Destroy()` y nunca asignan la propiedad de solo lectura `MeshPart.MeshId` ni inventan hashes `rbxassetid://`.
+  - División inteligente de mallas densas (`>9,000` vértices o `>9,500` caras) y protección estricta contra el límite Roblox `EditableMesh` (`<= 20,000` vértices y caras por sub-malla).
+  - Generación de módulos Luau `--!strict` que reconstruyen `MeshPart` reales mediante `AssetService:CreateEditableMesh()`, propagan errores de `SetFaceNormals`/`SetFaceUVs`, verifican `#editableMesh:GetVertices()` y `#editableMesh:GetTriangles()`, destruyen huérfanos en caso de fallo y nunca asignan la propiedad de solo lectura `MeshPart.MeshId`.
 
 ### 1.2 `Asset Engine` (`backend/engines/asset_engine.py` | `src/server/engines/assetEngine.ts`)
 - **Responsabilidades**:

@@ -88,17 +88,40 @@ export function createMainServerApp(options: MainServerOptions = {}) {
   // 1. Security Hardening: Restricted CORS, Rate Limiting & Path Validation
   // -----------------------------------------------------------------------------
 
-  const ALLOWED_ORIGINS = new Set([
+  const ALLOWED_ORIGINS = new Set<string>([
     'http://localhost:3000',
     'http://127.0.0.1:3000',
     'http://localhost:8000',
     'http://127.0.0.1:8000',
   ]);
+  const envOriginSources = [
+    process.env.APP_URL,
+    process.env.SHARED_APP_URL,
+    process.env.FORGE_CLOUD_URL,
+    ...(process.env.FORGE_ALLOWED_ORIGINS || '').split(','),
+  ];
+  for (const rawOrigin of envOriginSources) {
+    const cleanedOrigin = String(rawOrigin || '').trim();
+    if (!cleanedOrigin) continue;
+    try {
+      const parsedOrigin = new URL(cleanedOrigin);
+      ALLOWED_ORIGINS.add(parsedOrigin.origin);
+    } catch {
+      // Ignore malformed origin URL
+    }
+  }
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin && (ALLOWED_ORIGINS.has(origin) || origin.endsWith('.run.app'))) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
+    if (origin) {
+      if (!ALLOWED_ORIGINS.has(origin)) {
+        if (req.method === 'OPTIONS') {
+          return res.status(403).json({ error: 'Origin no autorizado por política CORS.' });
+        }
+      } else {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Vary', 'Origin');
+      }
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader(
@@ -564,7 +587,7 @@ app.get('/api/v1/health', async (_req, res) => {
       pro: 'gemini-2.5-pro',
       fast: 'gemini-2.5-flash',
     },
-    rojo_project_path: rojoStatus.rojo_project_path,
+    rojo_workspace: path.basename(rojoStatus.rojo_project_path || 'rojo_workspace'),
     rojo_path_exists: rojoStatus.path_exists,
     default_project_json_found: rojoStatus.default_project_json_found,
     rojo_server_active: rojoStatus.rojo_server_active,
@@ -573,17 +596,26 @@ app.get('/api/v1/health', async (_req, res) => {
   });
 });
 
-app.get('/api/v1/rojo/status', async (_req, res) => {
+app.get('/api/v1/rojo/status', async (req, res) => {
   const localStatus = await getRojoFullStatus();
   const bridgeStatus = cloudBridgeCoordinator.getPublicBridgeStatus();
+  const isTokenAuthorized =
+    !runtimeSecurityToken ||
+    verifyTokenConstantTime(String(req.headers['x-forge-token'] || '').trim(), runtimeSecurityToken);
+  const sanitizedStatus = isTokenAuthorized
+    ? localStatus
+    : {
+        ...localStatus,
+        rojo_project_path: path.basename(localStatus.rojo_project_path || 'rojo_workspace'),
+      };
   if (bridgeStatus.bridgeConnected && bridgeStatus.rojo) {
     return res.json({
-      ...localStatus,
-      rojo_cli_installed: bridgeStatus.rojo.rojoCliInstalled || localStatus.rojo_cli_installed,
-      rojo_version: bridgeStatus.rojo.rojoVersion || localStatus.rojo_version,
-      rojo_serve_port: bridgeStatus.rojo.rojoServePort || localStatus.rojo_serve_port,
-      rojo_server_active: bridgeStatus.rojo.rojoServerListening || localStatus.rojo_server_active,
-      rojo_server_listening: bridgeStatus.rojo.rojoServerListening || localStatus.rojo_server_active,
+      ...sanitizedStatus,
+      rojo_cli_installed: bridgeStatus.rojo.rojoCliInstalled || sanitizedStatus.rojo_cli_installed,
+      rojo_version: bridgeStatus.rojo.rojoVersion || sanitizedStatus.rojo_version,
+      rojo_serve_port: bridgeStatus.rojo.rojoServePort || sanitizedStatus.rojo_serve_port,
+      rojo_server_active: bridgeStatus.rojo.rojoServerListening || sanitizedStatus.rojo_server_active,
+      rojo_server_listening: bridgeStatus.rojo.rojoServerListening || sanitizedStatus.rojo_server_active,
       default_project_name: bridgeStatus.rojo.projectName,
       synced_files_count: bridgeStatus.rojo.syncedFilesCount,
       bridge_connected: true,
@@ -591,7 +623,7 @@ app.get('/api/v1/rojo/status', async (_req, res) => {
     });
   }
   res.json({
-    ...localStatus,
+    ...sanitizedStatus,
     bridge_connected: false,
     bridge_status: bridgeStatus,
   });
@@ -702,6 +734,14 @@ app.post('/api/v1/rojo/configure', async (req, res) => {
         return res.status(400).json({ error: 'Ruta inválida.' });
       }
       const resolved = path.resolve(process.cwd(), cleaned);
+      const lowerResolved = resolved.toLowerCase();
+      const forbiddenPrefixes = ['/etc', '/bin', '/sbin', '/usr', '/boot', '/dev', '/proc', '/sys', 'c:\\windows', 'c:\\program files'];
+      if (
+        lowerResolved === '/' ||
+        forbiddenPrefixes.some((p) => lowerResolved === p || lowerResolved.startsWith(`${p}/`) || lowerResolved.startsWith(`${p}\\`))
+      ) {
+        return res.status(403).json({ error: 'Seguridad: Directorio del sistema no permitido para Rojo.' });
+      }
       if (initialize_if_missing) {
         const subDirs = [
           'src/server',
@@ -2958,7 +2998,10 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       seed,
       tree_params,
       height,
+      width,
       trunkThickness,
+      trunkLean,
+      trunkCurvature,
       branchCount,
       branchLength,
       branchDistribution,
@@ -2966,12 +3009,16 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       canopyShape,
       canopySize,
       foliageCount,
+      foliageDensity,
       trunkMaterial,
       leafMaterial,
       trunkColor,
       leafColor,
       variation,
       leafVariation,
+      colorVariation,
+      detailLevel,
+      lodLevel,
       reference_image_base64,
       reference_image_mime_type = 'image/png',
       uploaded_mesh_obj,
@@ -3059,7 +3106,10 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
     const effectiveTreeParams =
       tree_params ||
       (height !== undefined ||
+      width !== undefined ||
       trunkThickness !== undefined ||
+      trunkLean !== undefined ||
+      trunkCurvature !== undefined ||
       branchCount !== undefined ||
       branchLength !== undefined ||
       branchDistribution !== undefined ||
@@ -3067,11 +3117,18 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       canopyShape !== undefined ||
       canopySize !== undefined ||
       foliageCount !== undefined ||
-      leafVariation !== undefined
+      foliageDensity !== undefined ||
+      leafVariation !== undefined ||
+      colorVariation !== undefined ||
+      detailLevel !== undefined ||
+      lodLevel !== undefined
         ? {
             seed,
             height,
+            width,
             trunkThickness,
+            trunkLean,
+            trunkCurvature,
             branchCount,
             branchLength,
             branchDistribution,
@@ -3079,12 +3136,16 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
             canopyShape,
             canopySize,
             foliageCount,
+            foliageDensity,
             trunkMaterial,
             leafMaterial,
             trunkColor,
             leafColor,
             variation,
             leafVariation,
+            colorVariation,
+            detailLevel,
+            lodLevel,
           }
         : undefined);
 
@@ -3313,7 +3374,10 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       seed,
       tree_params,
       height,
+      width,
       trunkThickness,
+      trunkLean,
+      trunkCurvature,
       branchCount,
       branchLength,
       branchDistribution,
@@ -3321,12 +3385,16 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       canopyShape,
       canopySize,
       foliageCount,
+      foliageDensity,
       trunkMaterial,
       leafMaterial,
       trunkColor,
       leafColor,
       variation,
       leafVariation,
+      colorVariation,
+      detailLevel,
+      lodLevel,
       reference_image_base64,
       uploaded_mesh_obj,
       uploaded_sub_meshes,
@@ -3395,7 +3463,10 @@ app.post('/api/v1/generate-3d', async (req, res) => {
     const effectiveTreeParams =
       tree_params ||
       (height !== undefined ||
+      width !== undefined ||
       trunkThickness !== undefined ||
+      trunkLean !== undefined ||
+      trunkCurvature !== undefined ||
       branchCount !== undefined ||
       branchLength !== undefined ||
       branchDistribution !== undefined ||
@@ -3403,11 +3474,18 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       canopyShape !== undefined ||
       canopySize !== undefined ||
       foliageCount !== undefined ||
-      leafVariation !== undefined
+      foliageDensity !== undefined ||
+      leafVariation !== undefined ||
+      colorVariation !== undefined ||
+      detailLevel !== undefined ||
+      lodLevel !== undefined
         ? {
             seed,
             height,
+            width,
             trunkThickness,
+            trunkLean,
+            trunkCurvature,
             branchCount,
             branchLength,
             branchDistribution,
@@ -3415,12 +3493,16 @@ app.post('/api/v1/generate-3d', async (req, res) => {
             canopyShape,
             canopySize,
             foliageCount,
+            foliageDensity,
             trunkMaterial,
             leafMaterial,
             trunkColor,
             leafColor,
             variation,
             leafVariation,
+            colorVariation,
+            detailLevel,
+            lodLevel,
           }
         : undefined);
 

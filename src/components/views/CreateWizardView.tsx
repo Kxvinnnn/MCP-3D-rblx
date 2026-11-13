@@ -26,6 +26,7 @@ import {
   convertImageTo3DHeightmapMesh,
 } from '../../utils/roblox3DEngine.ts';
 import { SseStreamParser, SseMessage } from '../../utils/sseParser.ts';
+import { parseNaturalLanguageToTreeParams } from '../../utils/treePromptParser.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
 import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
 
@@ -58,9 +59,12 @@ export const CreateWizardView: React.FC = () => {
   const [generationMode, setGenerationMode] = useState<'procedural' | 'ai'>('procedural');
   const [seed, setSeed] = useState<string>('forge-tree-2026');
 
-  // Tree Procedural Parameters (Fase 7 & Etapa 6)
+  // Tree Procedural Parameters (Fase 7 & Etapa 6 + Fase 3 Expansion)
   const [treeHeight, setTreeHeight] = useState<number>(14);
+  const [treeWidth, setTreeWidth] = useState<number>(10);
   const [trunkThickness, setTrunkThickness] = useState<number>(1.6);
+  const [trunkLean, setTrunkLean] = useState<number>(0);
+  const [trunkCurvature, setTrunkCurvature] = useState<number>(0.15);
   const [branchCount, setBranchCount] = useState<number>(4);
   const [branchLength, setBranchLength] = useState<number>(4.0);
   const [branchDistribution, setBranchDistribution] = useState<'tiered' | 'whorled' | 'alternating' | 'canopy_top'>('tiered');
@@ -68,10 +72,16 @@ export const CreateWizardView: React.FC = () => {
   const [canopySize, setCanopySize] = useState<number>(1.0);
   const [leafDistribution, setLeafDistribution] = useState<'dense' | 'balanced' | 'sparse' | 'clustered'>('balanced');
   const [foliageCount, setFoliageCount] = useState<number>(4);
+  const [foliageDensity, setFoliageDensity] = useState<number>(1.0);
   const [trunkMaterial, setTrunkMaterial] = useState<string>('Wood');
   const [leafMaterial, setLeafMaterial] = useState<string>('Grass');
+  const [trunkColor, setTrunkColor] = useState<string>('#6e482b');
+  const [leafColor, setLeafColor] = useState<string>('#34843d');
   const [treeVariation, setTreeVariation] = useState<number>(0.25);
   const [leafVariation, setLeafVariation] = useState<number>(0.25);
+  const [colorVariation, setColorVariation] = useState<number>(0.2);
+  const [lodLevel, setLodLevel] = useState<0 | 1 | 2>(0);
+  const [parsedPromptBadges, setParsedPromptBadges] = useState<string[]>([]);
 
   // Input states
   const [prompt, setPrompt] = useState<string>(
@@ -215,7 +225,10 @@ export const CreateWizardView: React.FC = () => {
               ? {
                   seed: seed.trim() || 'forge-tree-2026',
                   height: treeHeight,
+                  width: treeWidth,
                   trunkThickness,
+                  trunkLean,
+                  trunkCurvature,
                   branchCount,
                   branchLength,
                   branchDistribution,
@@ -223,12 +236,20 @@ export const CreateWizardView: React.FC = () => {
                   canopySize,
                   leafDistribution,
                   foliageCount,
+                  foliageDensity,
                   trunkMaterial,
                   leafMaterial,
+                  trunkColor,
+                  leafColor,
                   variation: treeVariation,
                   leafVariation,
+                  colorVariation,
+                  detailLevel,
+                  lodLevel,
                 }
               : undefined,
+          lodLevel,
+          detailLevel,
           target_poly_budget: polyBudgets[detailLevel].tris,
           collision_fidelity: collisionFidelity,
           save_to_rojo: saveToRojo,
@@ -538,7 +559,50 @@ export const CreateWizardView: React.FC = () => {
 
                 {/* Inspiration Tags for Category */}
                 <div className="space-y-1.5">
-                  <span className="text-[11px] text-slate-500 font-medium">Sugerencias para {category}:</span>
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <span className="text-[11px] text-slate-500 font-medium">Sugerencias para {category}:</span>
+                    {category === 'Trees & Vegetation' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const parsed = parseNaturalLanguageToTreeParams(prompt);
+                          const p = parsed.params;
+                          if (p.height !== undefined) setTreeHeight(p.height);
+                          if (p.width !== undefined) setTreeWidth(p.width);
+                          if (p.trunkThickness !== undefined) setTrunkThickness(p.trunkThickness);
+                          if (p.trunkLean !== undefined) setTrunkLean(p.trunkLean);
+                          if (p.trunkCurvature !== undefined) setTrunkCurvature(p.trunkCurvature);
+                          if (p.branchCount !== undefined) setBranchCount(p.branchCount);
+                          if (p.branchLength !== undefined) setBranchLength(p.branchLength);
+                          if (p.branchDistribution) setBranchDistribution(p.branchDistribution);
+                          if (p.canopyShape) setCanopyShape(p.canopyShape);
+                          if (p.canopySize !== undefined) setCanopySize(p.canopySize);
+                          if (p.leafDistribution) setLeafDistribution(p.leafDistribution);
+                          if (p.foliageCount !== undefined) setFoliageCount(p.foliageCount);
+                          if (p.foliageDensity !== undefined) setFoliageDensity(p.foliageDensity);
+                          if (p.trunkMaterial) setTrunkMaterial(p.trunkMaterial);
+                          if (p.leafMaterial) setLeafMaterial(p.leafMaterial);
+                          if (p.trunkColor) setTrunkColor(p.trunkColor);
+                          if (p.leafColor) setLeafColor(p.leafColor);
+                          if (p.variation !== undefined) setTreeVariation(p.variation);
+                          if (p.leafVariation !== undefined) setLeafVariation(p.leafVariation);
+                          if (p.colorVariation !== undefined) setColorVariation(p.colorVariation);
+                          if (p.detailLevel) setDetailLevel(p.detailLevel);
+                          setParsedPromptBadges(parsed.detectedKeywords);
+                          setNotification({
+                            type: 'success',
+                            message:
+                              parsed.detectedKeywords.length > 0
+                                ? `Parámetros extraídos del texto (${parsed.detectedKeywords.join(', ')}).`
+                                : 'No se detectaron modificadores específicos; ajusta los deslizadores en el Paso 3.',
+                          });
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/70 border border-emerald-700/60 text-[11px] font-semibold text-emerald-300 cursor-pointer transition"
+                      >
+                        Aplicar texto a parámetros del árbol
+                      </button>
+                    )}
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {categorySuggestions[category]?.map((sug, idx) => (
                       <button
@@ -551,6 +615,11 @@ export const CreateWizardView: React.FC = () => {
                       </button>
                     ))}
                   </div>
+                  {parsedPromptBadges.length > 0 && category === 'Trees & Vegetation' && (
+                    <div className="text-[11px] text-emerald-400 font-mono">
+                      Rasgos detectados: {parsedPromptBadges.join(' · ')}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1010,6 +1079,125 @@ export const CreateWizardView: React.FC = () => {
                         onChange={(e) => setLeafVariation(parseFloat(e.target.value))}
                         className="w-full accent-emerald-500 mt-1.5"
                       />
+                    </div>
+                  </div>
+
+                  {/* Controles avanzados de curvatura, anchura, colores, densidad y LOD */}
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800/60">
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Ancho copa: <span className="text-white font-mono">{treeWidth} studs</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={4}
+                        max={26}
+                        step={1}
+                        value={treeWidth}
+                        onChange={(e) => setTreeWidth(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Inclinación tronco: <span className="text-white font-mono">{trunkLean}°</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={-25}
+                        max={25}
+                        step={1}
+                        value={trunkLean}
+                        onChange={(e) => setTrunkLean(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Curvatura tronco: <span className="text-white font-mono">{Math.round(trunkCurvature * 100)}%</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={trunkCurvature}
+                        onChange={(e) => setTrunkCurvature(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Densidad follaje: <span className="text-white font-mono">{foliageDensity.toFixed(2)}x</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0.3}
+                        max={2.0}
+                        step={0.05}
+                        value={foliageDensity}
+                        onChange={(e) => setFoliageDensity(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">Color tronco:</label>
+                      <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg px-2 py-1">
+                        <input
+                          type="color"
+                          value={trunkColor}
+                          onChange={(e) => setTrunkColor(e.target.value)}
+                          className="w-6 h-5 bg-transparent cursor-pointer"
+                        />
+                        <span className="text-[11px] font-mono text-slate-300">{trunkColor}</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">Color hojas:</label>
+                      <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg px-2 py-1">
+                        <input
+                          type="color"
+                          value={leafColor}
+                          onChange={(e) => setLeafColor(e.target.value)}
+                          className="w-6 h-5 bg-transparent cursor-pointer"
+                        />
+                        <span className="text-[11px] font-mono text-slate-300">{leafColor}</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Variación color: <span className="text-white font-mono">{Math.round(colorVariation * 100)}%</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0}
+                        max={0.6}
+                        step={0.05}
+                        value={colorVariation}
+                        onChange={(e) => setColorVariation(parseFloat(e.target.value))}
+                        className="w-full accent-emerald-500 mt-1.5"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">LOD Exportación:</label>
+                      <select
+                        value={lodLevel}
+                        onChange={(e) => setLodLevel(Number(e.target.value) as 0 | 1 | 2)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
+                      >
+                        <option value={0}>LOD 0 (Máxima calidad)</option>
+                        <option value={1}>LOD 1 (Medio optimizado)</option>
+                        <option value={2}>LOD 2 (Ligero / Mobile)</option>
+                      </select>
                     </div>
                   </div>
                 </div>

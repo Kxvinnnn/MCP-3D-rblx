@@ -180,17 +180,40 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
     }
 
     // Bloquear orígenes web arbitrarios (DNS rebinding / CSRF desde sitios externos)
+    const allowedRemoteOrigins = new Set<string>();
+    for (const candidate of [
+      cloudUrl,
+      process.env.APP_URL,
+      process.env.SHARED_APP_URL,
+      ...(process.env.FORGE_ALLOWED_ORIGINS || '').split(','),
+    ]) {
+      const cleaned = String(candidate || '').trim();
+      if (!cleaned) continue;
+      try {
+        allowedRemoteOrigins.add(new URL(cleaned).origin);
+      } catch {
+        // Ignore malformed URL
+      }
+    }
+
     const origin = req.headers.origin;
     if (origin) {
-      const allowedOrigin =
-        origin.startsWith('http://localhost:') ||
-        origin.startsWith('http://127.0.0.1:') ||
-        origin.endsWith('.run.app');
+      let isLoopbackOrigin = false;
+      try {
+        const parsed = new URL(origin);
+        isLoopbackOrigin =
+          (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+          (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1');
+      } catch {
+        isLoopbackOrigin = false;
+      }
+      const allowedOrigin = isLoopbackOrigin || allowedRemoteOrigins.has(origin);
       if (!allowedOrigin) {
         logActivity('warn', `Bloqueado Origin no autorizado: ${origin}`);
         return res.status(403).json({ error: 'Origin no autorizado por política local.' });
       }
       res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader(

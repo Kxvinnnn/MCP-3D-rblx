@@ -386,6 +386,11 @@ test('Fase 10 — Recorrido Completo de Validación End-to-End (Cloud <-> Bridge
       headers: { Origin: 'https://evil-attacker.example.com' },
     });
     assert.equal(csrfRes.status, 403, 'Debe bloquear peticiones cross-origin desde navegadores externos');
+
+    const untrustedRunAppRes = await fetch(`${bridgeBaseUrl}/local/status`, {
+      headers: { Origin: 'https://untrusted-spoof.run.app' },
+    });
+    assert.equal(untrustedRunAppRes.status, 403, 'Debe bloquear orígenes .run.app no autorizados explícitamente');
   } finally {
     await bridge.stop();
     await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
