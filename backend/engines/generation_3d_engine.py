@@ -521,10 +521,10 @@ def synthesize_procedural_mesh_data(shape: str = "MeshPart", size: Optional[List
             nxt = (i + 1) % segments
             b0, t0 = i * 2, i * 2 + 1
             b1, t1 = nxt * 2, nxt * 2 + 1
-            faces.append([b0, b1, t1])
-            faces.append([b0, t1, t0])
-            faces.append([bottom_center_idx, b1, b0])
-            faces.append([top_center_idx, t0, t1])
+            faces.append([b0, t1, b1])
+            faces.append([b0, t0, t1])
+            faces.append([bottom_center_idx, b0, b1])
+            faces.append([top_center_idx, t1, t0])
 
         return SubMeshGeometrySpec(
             vertices=vertices,

@@ -20,7 +20,7 @@ import {
   BridgeMessageEnvelope,
   validateBridgeMessageEnvelope,
 } from './protocol.js';
-import { verifyTokenConstantTime } from './security.js';
+import { isPlaceholderOrWeakSecret, verifyTokenConstantTime } from './security.js';
 import { LocalRojoManager } from './rojoHandler.js';
 import { TaskExecutionCoordinator } from './studioQueue.js';
 import { ForgeCloudOutboundClient } from './cloudClient.js';
@@ -172,8 +172,11 @@ export function createForgeLocalBridgeApp(options?: BridgeServerOptions) {
 
   // Validación de token para rutas del plugin y mutaciones locales
   const requireLocalAuth: express.RequestHandler = (req, res, next) => {
-    if (!pluginLocalToken) {
-      return next();
+    if (!pluginLocalToken || isPlaceholderOrWeakSecret(pluginLocalToken)) {
+      logActivity('warn', `Petición bloqueada en ${req.path}: Token local del puente no configurado o débil.`);
+      return res.status(503).json({
+        error: 'Seguridad no configurada: Define FORGE_PLUGIN_LOCAL_TOKEN con un secreto válido.',
+      });
     }
     const provided = String(
       req.headers['x-plugin-token'] || req.headers['x-forge-token'] || ''

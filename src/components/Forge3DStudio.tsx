@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { forgeFetch } from '../utils/forgeApi';
 import {
   Box,
   Sparkles,
@@ -237,7 +238,7 @@ export const Forge3DStudio: React.FC = () => {
       let savedRojoPath: string | undefined;
       if (saveToRojo) {
         try {
-          const resp = await fetch('/api/v1/assets/process-meshpart', {
+          const resp = await forgeFetch('/api/v1/assets/process-meshpart', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -512,7 +513,7 @@ export const Forge3DStudio: React.FC = () => {
     );
 
     try {
-      const response = await fetch('/api/v1/generate-3d-stream', {
+      const response = await forgeFetch('/api/v1/generate-3d-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -601,7 +602,7 @@ export const Forge3DStudio: React.FC = () => {
     e.stopPropagation();
     if (!id) return;
     try {
-      await fetch(`/api/v1/assets/${id}`, { method: 'DELETE' });
+      await forgeFetch(`/api/v1/assets/${id}`, { method: 'DELETE' });
       setAssetLibrary((prev) => prev.filter((item) => item.id !== id));
     } catch (err) {
       console.error('Error deleting asset:', err);
@@ -1081,7 +1082,7 @@ export const Forge3DStudio: React.FC = () => {
         'info',
         `Exportando y verificando paquete de 5 archivos Roblox Studio (.rbxmx + .gltf + .obj + .mtl + .luau) para '${activeAsset.name}'...`
       );
-      const res = await fetch('/api/v1/assets/export-roblox-package', {
+      const res = await forgeFetch('/api/v1/assets/export-roblox-package', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1143,7 +1144,7 @@ export const Forge3DStudio: React.FC = () => {
       if (selectedCompareTarget.startsWith('v:')) {
         payload.restore_version = Number(selectedCompareTarget.replace('v:', ''));
       }
-      const res = await fetch('/api/v1/assets/pull-from-rojo', {
+      const res = await forgeFetch('/api/v1/assets/pull-from-rojo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1209,7 +1210,7 @@ export const Forge3DStudio: React.FC = () => {
         setSelectedPart(report.healedAsset.parts?.[0] || null);
       }
 
-      const rojoRes = await fetch('/api/v1/assets/validate-rojo-build', {
+      const rojoRes = await forgeFetch('/api/v1/assets/validate-rojo-build', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1241,7 +1242,7 @@ export const Forge3DStudio: React.FC = () => {
     if (!activeAsset) return;
     try {
       addLog('info', `Recompilando script Luau --!strict para '${activeAsset.name}' (${activeAsset.parts.length} piezas)...`);
-      const res = await fetch('/api/v1/assets/rebuild-luau', {
+      const res = await forgeFetch('/api/v1/assets/rebuild-luau', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -27,17 +27,19 @@ local Workspace = game:GetService("Workspace")
 local savedBackendUrl = ""
 local savedBridgeUrl = ""
 local savedSecurityToken = ""
+local savedPluginLocalToken = ""
 pcall(function()
     if plugin and type(plugin.GetSetting) == "function" then
         savedBackendUrl = tostring(plugin:GetSetting("ForgeBackendUrl") or "")
         savedBridgeUrl = tostring(plugin:GetSetting("ForgeLocalBridgeUrl") or "")
         savedSecurityToken = tostring(plugin:GetSetting("ForgeSecurityToken") or "")
+        savedPluginLocalToken = tostring(plugin:GetSetting("ForgePluginLocalToken") or "")
     end
 end)
-local BACKEND_URL = if #savedBackendUrl > 0 then savedBackendUrl else "http://127.0.0.1:8000"
+local BACKEND_URL = if #savedBackendUrl > 0 then savedBackendUrl else "http://127.0.0.1:3000"
 local LOCAL_BRIDGE_URL = if #savedBridgeUrl > 0 then savedBridgeUrl else "http://127.0.0.1:48720"
-local DEFAULT_LOCAL_TOKEN = "forge-local-dev-token-2026"
-local FORGE_SECURITY_TOKEN = if #savedSecurityToken > 0 then savedSecurityToken else DEFAULT_LOCAL_TOKEN
+local FORGE_SECURITY_TOKEN = savedSecurityToken
+local FORGE_PLUGIN_LOCAL_TOKEN = if #savedPluginLocalToken > 0 then savedPluginLocalToken else FORGE_SECURITY_TOKEN
 
 -- Pending destructive operations queue (Fase 6: Never execute destructive deletions automatically without user confirmation)
 local pendingDestructiveOperations: {
@@ -114,9 +116,10 @@ local function requestLocalBridge(path: string, method: "GET" | "POST", bodyTabl
     local headers: { [string]: string } = {
         ["Content-Type"] = "application/json",
     }
-    if #FORGE_SECURITY_TOKEN > 0 then
-        headers["X-Plugin-Token"] = FORGE_SECURITY_TOKEN
-        headers["X-Forge-Token"] = FORGE_SECURITY_TOKEN
+    local activeBridgeToken = if #FORGE_PLUGIN_LOCAL_TOKEN > 0 then FORGE_PLUGIN_LOCAL_TOKEN else FORGE_SECURITY_TOKEN
+    if #activeBridgeToken > 0 then
+        headers["X-Plugin-Token"] = activeBridgeToken
+        headers["X-Forge-Token"] = activeBridgeToken
     end
 
     local ok, response = pcall(function()
@@ -139,6 +142,42 @@ local function requestLocalBridge(path: string, method: "GET" | "POST", bodyTabl
         return false, "Invalid JSON from Bridge"
     end
     return true, decoded
+end
+
+local function resolveRgbTupleLuau(colorRaw: any): (number, number, number)
+    if type(colorRaw) == "string" then
+        local clean = string.gsub(string.gsub(colorRaw, "^%s+", ""), "%s+$", "")
+        clean = string.gsub(clean, "^#", "")
+        if #clean == 6 and string.match(clean, "^[0-9a-fA-F]+$") then
+            return tonumber(string.sub(clean, 1, 2), 16) or 180,
+                tonumber(string.sub(clean, 3, 4), 16) or 180,
+                tonumber(string.sub(clean, 5, 6), 16) or 180
+        elseif #clean == 3 and string.match(clean, "^[0-9a-fA-F]+$") then
+            local rHex = string.sub(clean, 1, 1)
+            local gHex = string.sub(clean, 2, 2)
+            local bHex = string.sub(clean, 3, 3)
+            return tonumber(rHex .. rHex, 16) or 180,
+                tonumber(gHex .. gHex, 16) or 180,
+                tonumber(bHex .. bHex, 16) or 180
+        end
+        return 180, 180, 180
+    end
+    if type(colorRaw) ~= "table" then
+        return 180, 180, 180
+    end
+    local r = tonumber(colorRaw[1] or colorRaw.r or colorRaw.R or 180) or 180
+    local g = tonumber(colorRaw[2] or colorRaw.g or colorRaw.G or 180) or 180
+    local b = tonumber(colorRaw[3] or colorRaw.b or colorRaw.B or 180) or 180
+    local allUnit = (r >= 0 and r <= 1) and (g >= 0 and g <= 1) and (b >= 0 and b <= 1)
+    local hasFrac = (r % 1 ~= 0) or (g % 1 ~= 0) or (b % 1 ~= 0)
+    if allUnit and (hasFrac or r < 1 or g < 1 or b < 1) then
+        return math.clamp(math.floor(r * 255 + 0.5), 0, 255),
+            math.clamp(math.floor(g * 255 + 0.5), 0, 255),
+            math.clamp(math.floor(b * 255 + 0.5), 0, 255)
+    end
+    return math.clamp(math.floor(r + 0.5), 0, 255),
+        math.clamp(math.floor(g + 0.5), 0, 255),
+        math.clamp(math.floor(b + 0.5), 0, 255)
 end
 
 local function isVerifiedRobloxAssetUri(uri: any): boolean
@@ -825,8 +864,8 @@ local function construct3DModelFromSpec(assetData: any, targetParent: Instance?,
         )
         part.CFrame = spawnOrigin * localCF
 
-        local col = partSpec.color or { 160, 165, 175 }
-        part.Color = Color3.fromRGB(col[1] or 160, col[2] or 165, col[3] or 175)
+        local cr, cg, cb = resolveRgbTupleLuau(partSpec.color or { 160, 165, 175 })
+        part.Color = Color3.fromRGB(cr, cg, cb)
 
         local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
         if matEnum then
@@ -1459,8 +1498,8 @@ local function applyIncrementalModelUpdateInStudio(
                 rotMat[7], rotMat[8], rotMat[9]
             )
             newPart.CFrame = originCFrame * localCF
-            local col = partSpec.color or { 148, 163, 184 }
-            newPart.Color = Color3.fromRGB(col[1] or 148, col[2] or 163, col[3] or 184)
+            local cr, cg, cb = resolveRgbTupleLuau(partSpec.color or { 148, 163, 184 })
+            newPart.Color = Color3.fromRGB(cr, cg, cb)
             local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
             if matEnum then newPart.Material = matEnum end
             newPart.Transparency = tonumber(partSpec.transparency) or 0
@@ -1526,8 +1565,8 @@ local function applyIncrementalModelUpdateInStudio(
                     activePart.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
                 end
                 if matChanged then
-                    local col = partSpec.color or { 148, 163, 184 }
-                    activePart.Color = Color3.fromRGB(col[1] or 148, col[2] or 163, col[3] or 184)
+                    local cr, cg, cb = resolveRgbTupleLuau(partSpec.color or { 148, 163, 184 })
+                    activePart.Color = Color3.fromRGB(cr, cg, cb)
                     local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
                     if matEnum then activePart.Material = matEnum end
                     activePart.Transparency = tonumber(partSpec.transparency) or 0
@@ -2040,6 +2079,30 @@ tokenBox.FocusLost:Connect(function()
     end)
 end)
 
+local bridgeTokenBox = Instance.new("TextBox")
+bridgeTokenBox.PlaceholderText = "X-Plugin-Token Local Bridge (si difiere de X-Forge-Token)"
+bridgeTokenBox.Text = savedPluginLocalToken
+bridgeTokenBox.ClearTextOnFocus = false
+bridgeTokenBox.Font = Enum.Font.Code
+bridgeTokenBox.TextSize = 11
+bridgeTokenBox.TextColor3 = Color3.fromRGB(226, 232, 240)
+bridgeTokenBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+bridgeTokenBox.Size = UDim2.new(1, 0, 0, 26)
+bridgeTokenBox.TextXAlignment = Enum.TextXAlignment.Left
+bridgeTokenBox.LayoutOrder = 10
+bridgeTokenBox.Parent = root
+
+bridgeTokenBox.FocusLost:Connect(function()
+    local cleaned = string.match(bridgeTokenBox.Text or "", "^%s*(.-)%s*$") or ""
+    savedPluginLocalToken = cleaned
+    FORGE_PLUGIN_LOCAL_TOKEN = if #cleaned > 0 then cleaned else FORGE_SECURITY_TOKEN
+    pcall(function()
+        if plugin and type(plugin.SetSetting) == "function" then
+            plugin:SetSetting("ForgePluginLocalToken", cleaned)
+        end
+    end)
+end)
+
 local outputLog = Instance.new("TextLabel")
 outputLog.Text = "Listo. Conecta FastAPI/Express en " .. BACKEND_URL
 outputLog.Font = Enum.Font.Code
@@ -2260,11 +2323,20 @@ local function inspectCurrentStudioSelection(): {
     }
 end
 
+local processedBridgeTaskIds: { [string]: number } = {}
+
 -- Ejecuta tareas seguras recibidas desde el Puente Local (Fase 6: lista cerrada de operaciones, sin ejecutar código arbitrario)
 local function executeBridgeTaskInStudio(taskEnvelope: { [string]: any })
     local taskId = tostring(taskEnvelope.taskId or "")
     local operation = tostring(taskEnvelope.operation or "")
     local payload = if type(taskEnvelope.payload) == "table" then taskEnvelope.payload else {}
+
+    if #taskId > 0 and processedBridgeTaskIds[taskId] then
+        return
+    end
+    if #taskId > 0 then
+        processedBridgeTaskIds[taskId] = os.clock()
+    end
 
     local okExec, resultOrErr = xpcall(function(): any
         if operation == "studio.ping" then

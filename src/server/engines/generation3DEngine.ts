@@ -698,10 +698,10 @@ export function synthesizeProceduralMeshData(
       const t0 = i * 2 + 1;
       const b1 = nxt * 2;
       const t1 = nxt * 2 + 1;
-      faces.push([b0, b1, t1]);
-      faces.push([b0, t1, t0]);
-      faces.push([bottomCenterIdx, b1, b0]);
-      faces.push([topCenterIdx, t0, t1]);
+      faces.push([b0, t1, b1]);
+      faces.push([b0, t0, t1]);
+      faces.push([bottomCenterIdx, b0, b1]);
+      faces.push([topCenterIdx, t1, t0]);
     }
 
     return { vertices, normals, uvs, faces, indices: faces.flat() };
@@ -826,6 +826,58 @@ export function synthesizeProceduralMeshData(
  * validates triangle creation, destroys temporary `EditableMesh` resources, and
  * exposes `.Spawn(origin: CFrame?): Model` and `.ReconstructInPlace(targetModel: Model)`.
  */
+export function resolveRgbTupleLuau(colorRaw: any): [number, number, number] {
+  if (typeof colorRaw === 'string') {
+    const clean = colorRaw.trim().replace(/^#/, '');
+    if (/^[0-9a-fA-F]{6}$/.test(clean)) {
+      return [
+        parseInt(clean.slice(0, 2), 16),
+        parseInt(clean.slice(2, 4), 16),
+        parseInt(clean.slice(4, 6), 16),
+      ];
+    }
+    if (/^[0-9a-fA-F]{3}$/.test(clean)) {
+      return [
+        parseInt(clean[0] + clean[0], 16),
+        parseInt(clean[1] + clean[1], 16),
+        parseInt(clean[2] + clean[2], 16),
+      ];
+    }
+    return [180, 180, 180];
+  }
+  let rawTriple: any[] | null = null;
+  if (Array.isArray(colorRaw) && colorRaw.length >= 3) {
+    rawTriple = colorRaw;
+  } else if (colorRaw && typeof colorRaw === 'object') {
+    if ('r' in colorRaw && 'g' in colorRaw && 'b' in colorRaw) {
+      rawTriple = [colorRaw.r, colorRaw.g, colorRaw.b];
+    } else if ('R' in colorRaw && 'G' in colorRaw && 'B' in colorRaw) {
+      rawTriple = [colorRaw.R, colorRaw.G, colorRaw.B];
+    }
+  }
+  if (!rawTriple) return [180, 180, 180];
+  let v0 = Number(rawTriple[0] ?? 180);
+  let v1 = Number(rawTriple[1] ?? 180);
+  let v2 = Number(rawTriple[2] ?? 180);
+  if (!Number.isFinite(v0)) v0 = 180;
+  if (!Number.isFinite(v1)) v1 = 180;
+  if (!Number.isFinite(v2)) v2 = 180;
+  const allInUnitRange = [v0, v1, v2].every((x) => x >= 0 && x <= 1);
+  const hasFractional = [v0, v1, v2].some((x) => !Number.isInteger(x));
+  if (allInUnitRange && (hasFractional || v0 < 1 || v1 < 1 || v2 < 1)) {
+    return [
+      Math.max(0, Math.min(255, Math.floor(v0 * 255 + 0.5))),
+      Math.max(0, Math.min(255, Math.floor(v1 * 255 + 0.5))),
+      Math.max(0, Math.min(255, Math.floor(v2 * 255 + 0.5))),
+    ];
+  }
+  return [
+    Math.max(0, Math.min(255, Math.floor(v0 + 0.5))),
+    Math.max(0, Math.min(255, Math.floor(v1 + 0.5))),
+    Math.max(0, Math.min(255, Math.floor(v2 + 0.5))),
+  ];
+}
+
 export function buildStrictLuauFromEditedParts(
   modelName: string,
   parts: MeshPartInput[],
@@ -1056,7 +1108,7 @@ export function buildStrictLuauFromEditedParts(
     const [sx = 2, sy = 2, sz = 2] = p.size || [2, 2, 2];
     const [px = 0, py = 1, pz = 0] = p.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = p.rotation || [0, 0, 0];
-    const [cr = 180, cg = 180, cb = 180] = p.color || [180, 180, 180];
+    const [cr, cg, cb] = resolveRgbTupleLuau(p.color ?? [180, 180, 180]);
     const vName = `meshPart_${idx + 1}`;
     const okFlag = `isVerified_${idx + 1}`;
     const cfMode = p.collisionFidelity || collisionFidelity || 'Hull';

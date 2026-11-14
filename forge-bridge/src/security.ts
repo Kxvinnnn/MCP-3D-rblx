@@ -164,13 +164,40 @@ export function computeSha256Short(content: Buffer | string): string {
   return crypto.createHash('sha256').update(content).digest('hex').slice(0, 12);
 }
 
+const PLACEHOLDER_SECRETS = new Set([
+  'reemplazar-con-secreto-aleatorio-de-32-bytes',
+  'your_token_here',
+  'your_api_key_here',
+  'your_secret_here',
+  'changeme',
+  'placeholder',
+  'my_secret',
+  'secret',
+  'none',
+]);
+
+export function isPlaceholderOrWeakSecret(
+  secret: string | undefined | null,
+  options?: { isProduction?: boolean }
+): boolean {
+  const normalized = String(secret || '').trim();
+  if (!normalized || normalized.length < 8) return true;
+  const lower = normalized.toLowerCase();
+  if (PLACEHOLDER_SECRETS.has(lower)) return true;
+  const isProd = options?.isProduction ?? process.env.NODE_ENV === 'production';
+  if (isProd && lower === 'forge-local-dev-token-2026') return true;
+  return false;
+}
+
 /**
  * Comparación en tiempo constante para tokens de autenticación.
  */
 export function verifyTokenConstantTime(provided: string, expected: string): boolean {
-  if (!expected) return false;
-  const a = Buffer.from(String(provided || ''), 'utf-8');
-  const b = Buffer.from(String(expected), 'utf-8');
+  const cleanExpected = String(expected || '').trim();
+  const cleanProvided = String(provided || '').trim();
+  if (!cleanExpected || !cleanProvided) return false;
+  const a = Buffer.from(cleanProvided, 'utf-8');
+  const b = Buffer.from(cleanExpected, 'utf-8');
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }

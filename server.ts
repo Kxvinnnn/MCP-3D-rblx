@@ -14,6 +14,12 @@ import {
 } from './src/server/engines/architectureManifest.ts';
 import { cloudBridgeCoordinator } from './src/server/engines/bridgeCoordinatorEngine.ts';
 import {
+  isPlaceholderOrWeakSecret,
+  resolveBackendApiToken,
+  verifyTokenConstantTime,
+} from './src/server/engines/securityAuth.ts';
+import { generateProceduralTree, type TreePreset } from './src/server/engines/treeGenerator.ts';
+import {
   AI_MODULE_CONTRACTS,
   buildAiSelfUnderstandingManifest,
   buildGltfFromPartsServer,
@@ -78,7 +84,14 @@ app.use((req, res, next) => {
 const rateBuckets = new Map<string, number[]>();
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MINUTE || 45);
 let runtimeRojoPath = path.resolve(process.cwd(), process.env.ROJO_PROJECT_PATH || './rojo_workspace');
-let runtimeSecurityToken = process.env.FORGE_LOCAL_TOKEN || '';
+let runtimeSecurityToken = resolveBackendApiToken();
+
+const BRIDGE_COORDINATOR_AUTH_ROUTES = new Set([
+  '/bridge/auth/handshake',
+  '/bridge/heartbeat',
+  '/bridge/task-ack',
+  '/bridge/task-result',
+]);
 
 app.use('/api/v1', (req, res, next) => {
   const ip = req.ip || '127.0.0.1';
@@ -93,9 +106,21 @@ app.use('/api/v1', (req, res, next) => {
   recent.push(now);
   rateBuckets.set(ip, recent);
 
-  if (runtimeSecurityToken && ['POST', 'DELETE', 'PUT'].includes(req.method)) {
-    const provided = req.headers['x-forge-token'] || '';
-    if (provided !== runtimeSecurityToken) {
+  // Los endpoints del protocolo Bridge se autentican mediante HMAC/sesión en cloudBridgeCoordinator
+  if (BRIDGE_COORDINATOR_AUTH_ROUTES.has(req.path)) {
+    return next();
+  }
+
+  if (['POST', 'DELETE', 'PUT'].includes(req.method)) {
+    const activeToken = runtimeSecurityToken || resolveBackendApiToken();
+    if (!activeToken || isPlaceholderOrWeakSecret(activeToken)) {
+      return res.status(503).json({
+        error:
+          'Seguridad no configurada: Define FORGE_LOCAL_TOKEN o FORGE_SECURITY_TOKEN con un secreto válido.',
+      });
+    }
+    const provided = String(req.headers['x-forge-token'] || '').trim();
+    if (!verifyTokenConstantTime(provided, activeToken)) {
       return res.status(401).json({
         error: 'Acceso denegado: Cabecera X-Forge-Token inválida o ausente.',
       });
@@ -803,7 +828,7 @@ app.post('/api/v1/assets', (req, res) => {
 });
 
 // P2 Interactive 3D Model Editor: Rebuild --!strict Luau from edited 3D parts & save to Rojo/Library
-app.post('/api/v1/assets/rebuild-luau', (req, res) => {
+app.post('/api/v1/assets/rebuild-luau', async (req, res) => {
   try {
     const {
       asset,
@@ -987,7 +1012,7 @@ app.post('/api/v1/assets/process-meshpart', (req, res) => {
 });
 
 // Bidirectional Roblox Studio Package Exporter (.rbxmx, .gltf, .obj + .mtl, .luau) -> Rojo & Library
-app.post('/api/v1/assets/export-roblox-package', (req, res) => {
+app.post('/api/v1/assets/export-roblox-package', async (req, res) => {
   try {
     const {
       asset,
@@ -2313,9 +2338,20 @@ app.post('/api/v1/world/build-scene', (req, res) => {
 // Helper: Synthesize prompt-specific 3D sub-parts when offline or as fallback
 function synthesizePromptReactive3DParts(promptText: string, systemSlug: string) {
   const lower = promptText.toLowerCase();
+  const isTree = /\b(tree|arbol|árbol|pine|pino|oak|roble|willow|sauce|bonsai)\b/.test(lower);
   const isVehicle = /ship|nave|car|auto|vehiculo|drone|mech|hover|jet|avion/.test(lower);
-  const isNature = /tree|arbol|island|isla|temple|templo|forest|ruin|altar|crystal|cristal/.test(lower);
+  const isNature = /island|isla|temple|templo|forest|ruin|altar|crystal|cristal/.test(lower);
   const isWeapon = /sword|espada|rifle|blaster|canon|cannon|bow|staff|axe|hacha/.test(lower);
+
+  if (isTree) {
+    let preset: TreePreset = 'simple';
+    if (/fantas|magic|mágico|mystic|glow|neon/.test(lower)) preset = 'fantasy';
+    else if (/colgant|weeping|sauce|willow/.test(lower)) preset = 'weeping';
+    else if (/frondos|leafy|dense|denso|oak|roble/.test(lower)) preset = 'leafy';
+    else if (/low|baja|lod/.test(lower)) preset = 'low';
+    else if (/high|alta|detail/.test(lower)) preset = 'high';
+    return generateProceduralTree(systemSlug, { preset, seed: 2026 }).parts;
+  }
 
   if (isVehicle) {
     return [

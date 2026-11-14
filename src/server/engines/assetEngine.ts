@@ -22,6 +22,7 @@ import {
   buildStrictLuauFromEditedParts,
   extractGeometryFromProcessedMesh,
   MeshPartInput,
+  resolveRgbTupleLuau as resolveRgbTupleLuauFrom3D,
   splitOversizedMeshPartInput,
   SubMeshGeometryInput,
   synthesizeProceduralMeshData,
@@ -171,31 +172,7 @@ export function extractCanonicalRotationMatrix9(part: any): number[] {
 }
 
 export function normalizeColorRgb255(colorRaw: any): [number, number, number] {
-  if (!Array.isArray(colorRaw) || colorRaw.length < 3) {
-    return [148, 163, 184];
-  }
-  let v0 = Number(colorRaw[0] ?? 148);
-  let v1 = Number(colorRaw[1] ?? 163);
-  let v2 = Number(colorRaw[2] ?? 184);
-  if (!Number.isFinite(v0)) v0 = 148;
-  if (!Number.isFinite(v1)) v1 = 163;
-  if (!Number.isFinite(v2)) v2 = 184;
-  const isFloat01 =
-    [v0, v1, v2].every((x) => x >= 0 && x <= 1) &&
-    ([colorRaw[0], colorRaw[1], colorRaw[2]].some((x) => typeof x === 'number' && !Number.isInteger(x)) ||
-      Math.max(v0, v1, v2) <= 1.0);
-  if (isFloat01 && Math.max(v0, v1, v2) <= 1.0 && (v0 < 1.0 || v1 < 1.0 || v2 < 1.0)) {
-    return [
-      Math.max(0, Math.min(255, Math.floor(v0 * 255 + 0.5))),
-      Math.max(0, Math.min(255, Math.floor(v1 * 255 + 0.5))),
-      Math.max(0, Math.min(255, Math.floor(v2 * 255 + 0.5))),
-    ];
-  }
-  return [
-    Math.max(0, Math.min(255, Math.floor(v0 + 0.5))),
-    Math.max(0, Math.min(255, Math.floor(v1 + 0.5))),
-    Math.max(0, Math.min(255, Math.floor(v2 + 0.5))),
-  ];
+  return resolveRgbTupleLuauFrom3D(colorRaw);
 }
 
 export function normalizeHierarchyMetadata(

@@ -14,6 +14,7 @@
  */
 
 import crypto from 'crypto';
+import { isPlaceholderOrWeakSecret, verifyTokenConstantTime } from './securityAuth.ts';
 
 export const BRIDGE_PROTOCOL_VERSION = '1.0';
 
@@ -70,6 +71,7 @@ export class CloudBridgeCoordinator {
   private readonly pendingQueue: Map<string, PendingTaskWaiter> = new Map();
   private readonly recentResults: RemoteBridgeTaskResult[] = [];
   private readonly recentErrors: Array<{ taskId: string; operation: string; error: string; timestamp: string }> = [];
+  private readonly usedHandshakeNonces: Map<string, number> = new Map();
 
   private getSharedSecret(): string {
     return String(
@@ -104,23 +106,50 @@ export class CloudBridgeCoordinator {
     wsSupported?: boolean;
   } {
     const secret = this.getSharedSecret();
+    if (!secret || isPlaceholderOrWeakSecret(secret)) {
+      return {
+        accepted: false,
+        error: 'Seguridad del puente no configurada o usando secreto de ejemplo/débil.',
+      };
+    }
+
     const bridgeVersion = String(body.bridgeVersion || '1.0.0').trim();
     const protocolVersion = String(body.protocolVersion || '1.0').trim();
     const timestamp = String(body.timestamp || '').trim();
     const nonce = String(body.nonce || '').trim();
     const signature = String(body.signature || '').trim();
 
-    if (secret) {
-      const canonical = `${bridgeVersion}|${protocolVersion}|${timestamp}|${nonce}`;
-      const expectedSig = crypto.createHmac('sha256', secret).update(canonical, 'utf-8').digest('hex');
-      const sigMatches =
-        signature.length === expectedSig.length &&
-        crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig));
-      const tokenMatches = providedHeaderToken === secret;
-      if (!sigMatches && !tokenMatches) {
-        return { accepted: false, error: 'Firma HMAC o token compartido inválido en handshake.' };
+    const parsedTs = Date.parse(timestamp);
+    if (!timestamp || !Number.isFinite(parsedTs) || Math.abs(Date.now() - parsedTs) > 5 * 60 * 1000) {
+      return { accepted: false, error: 'Timestamp de handshake inválido o expirado.' };
+    }
+
+    if (!nonce || nonce.length < 8) {
+      return { accepted: false, error: 'Nonce de handshake ausente o inválido.' };
+    }
+
+    const now = Date.now();
+    for (const [seenNonce, seenAt] of this.usedHandshakeNonces.entries()) {
+      if (now - seenAt > 10 * 60 * 1000) {
+        this.usedHandshakeNonces.delete(seenNonce);
       }
     }
+    if (this.usedHandshakeNonces.has(nonce)) {
+      return { accepted: false, error: 'Nonce repetido detectado (posible ataque replay).' };
+    }
+
+    const canonical = `${bridgeVersion}|${protocolVersion}|${timestamp}|${nonce}`;
+    const expectedSig = crypto.createHmac('sha256', secret).update(canonical, 'utf-8').digest('hex');
+    const sigMatches = verifyTokenConstantTime(signature, expectedSig);
+    if (!sigMatches) {
+      return { accepted: false, error: 'Firma HMAC inválida en handshake.' };
+    }
+
+    if (providedHeaderToken && !verifyTokenConstantTime(providedHeaderToken, secret)) {
+      return { accepted: false, error: 'Token compartido inválido en cabecera de handshake.' };
+    }
+
+    this.usedHandshakeNonces.set(nonce, now);
 
     this.sessionId = `sess_${crypto.randomBytes(12).toString('hex')}`;
     this.sessionToken = crypto.randomBytes(24).toString('hex');
@@ -160,21 +189,32 @@ export class CloudBridgeCoordinator {
   }
 
   public verifySessionRequest(authHeader?: string, sessionHeader?: string, forgeTokenHeader?: string): boolean {
-    if (!this.sessionId || Date.now() > this.sessionExpiresAt) {
+    const secret = this.getSharedSecret();
+    if (!secret || isPlaceholderOrWeakSecret(secret)) {
+      return false;
+    }
+    if (!this.sessionId || !this.sessionToken || Date.now() > this.sessionExpiresAt) {
       return false;
     }
     if (this.reconnectRequested) {
       return false;
     }
+    if (sessionHeader && !verifyTokenConstantTime(sessionHeader, this.sessionId)) {
+      return false;
+    }
     const bearer = String(authHeader || '').replace(/^Bearer\s+/i, '').trim();
-    if (bearer && this.sessionToken && bearer === this.sessionToken) {
+    if (bearer && verifyTokenConstantTime(bearer, this.sessionToken)) {
       return true;
     }
-    const secret = this.getSharedSecret();
-    if (secret && forgeTokenHeader === secret && (!sessionHeader || sessionHeader === this.sessionId)) {
+    if (
+      forgeTokenHeader &&
+      sessionHeader &&
+      verifyTokenConstantTime(forgeTokenHeader, secret) &&
+      verifyTokenConstantTime(sessionHeader, this.sessionId)
+    ) {
       return true;
     }
-    return !secret && Boolean(this.sessionId);
+    return false;
   }
 
   public handleHeartbeat(body: Record<string, any>): {

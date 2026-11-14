@@ -15,12 +15,40 @@ Covers all P0 & P1 requirements from the architecture & synchronization audit:
 
 import json
 import math
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import types as py_types
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+NPX_CMD = shutil.which("npx") or ("npx.cmd" if os.name == "nt" else "npx")
+
+
+def _run_ts_with_stdin(ts_body: str, payload: Any) -> Any:
+    """Executes TypeScript via local tsx with JSON payload delivered via stdin (avoids Windows CLI length limits)."""
+    tsx_bin = ROOT_DIR / "node_modules" / ".bin" / ("tsx.cmd" if os.name == "nt" else "tsx")
+    cmd = [str(tsx_bin)] if tsx_bin.is_file() else [NPX_CMD, "tsx"]
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".ts", dir=str(ROOT_DIR), delete=False, encoding="utf-8"
+    ) as tmp:
+        tmp.write(ts_body)
+        tmp_path = Path(tmp.name)
+    try:
+        res = subprocess.run(
+            cmd + [str(tmp_path)],
+            cwd=str(ROOT_DIR),
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        return json.loads(res.stdout.strip().splitlines()[-1])
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = ROOT_DIR / "backend"
@@ -326,28 +354,21 @@ def test_1_canonical_hash_parity_and_middle_vertex_sensitivity():
 
     # Verify TypeScript produces the exact same hashes via npx tsx
     ts_script = """
+import fs from 'node:fs';
 import { computePartSyncHashes, computeFnv1a32Hex } from './src/server/engines/assetEngine.ts';
-const input = JSON.parse(process.argv[1]);
+const input = JSON.parse(fs.readFileSync(0, 'utf-8'));
 const orig = computePartSyncHashes(input.sample, 0, 'CyberHoverTank');
 const mut = computePartSyncHashes(input.mutated, 0, 'CyberHoverTank');
 const lfHash = computeFnv1a32Hex(input.luauLf);
 const crlfHash = computeFnv1a32Hex(input.luauCrlf);
 console.log(JSON.stringify({ orig, mut, lfHash, crlfHash }));
 """
-    payload_arg = json.dumps({
+    ts_out = _run_ts_with_stdin(ts_script, {
         "sample": sample_part,
         "mutated": mutated_part,
         "luauLf": luau_lf,
         "luauCrlf": luau_crlf,
     })
-    res = subprocess.run(
-        ["npx", "tsx", "-e", ts_script, payload_arg],
-        cwd=str(ROOT_DIR),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    ts_out = json.loads(res.stdout.strip().splitlines()[-1])
 
     assert ts_out["orig"]["geometryHash"] == py_hashes["geometryHash"], (
         f"TS geometryHash {ts_out['orig']['geometryHash']} != PY {py_hashes['geometryHash']}"
@@ -651,9 +672,10 @@ def test_3_external_meshparts_never_replaced_with_cube_and_safety_guards():
 
             # Verify TypeScript extractGeometryFromProcessedMesh and buildRbxmxFromPartsServer also preserve external MeshParts
             ts_ext_check = """
+import fs from 'node:fs';
 import { extractGeometryFromProcessedMesh } from './src/server/engines/generation3DEngine.ts';
 import { buildRbxmxFromPartsServer, parseRbxmxFromPartsServer } from './src/server/engines/assetEngine.ts';
-const parts = JSON.parse(process.argv[1]);
+const parts = JSON.parse(fs.readFileSync(0, 'utf-8'));
 const g0 = extractGeometryFromProcessedMesh(parts[0], 'ExternalStudioAsset.obj', 'ExternalStudioAsset');
 const g1 = extractGeometryFromProcessedMesh(parts[1], 'ExternalStudioAsset.obj', 'ExternalStudioAsset');
 const xml = buildRbxmxFromPartsServer('ExternalStudioAsset', parts, 'Hull', 'Studio Synced Asset', '--!strict\\nreturn {}\\n');
@@ -669,14 +691,7 @@ console.log(JSON.stringify({
   })),
 }));
 """
-            res_ts = subprocess.run(
-                ["npx", "tsx", "-e", ts_ext_check, json.dumps(ext_data["asset"]["parts"])],
-                cwd=str(ROOT_DIR),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            ts_ext_out = json.loads(res_ts.stdout.strip().splitlines()[-1])
+            ts_ext_out = _run_ts_with_stdin(ts_ext_check, ext_data["asset"]["parts"])
             assert ts_ext_out["g0Faces"] == 0, "TS extractGeometryFromProcessedMesh must not invent cube faces for PublishedCloudMeshId"
             assert ts_ext_out["g1Faces"] == 0, "TS extractGeometryFromProcessedMesh must not invent cube faces for StudioExternalUnreadable"
             parsed_map = {p["name"]: p for p in ts_ext_out["parsedParts"]}
@@ -882,8 +897,9 @@ def test_4_shared_equivalence_vectors_and_png_validation():
 
     # Verify TypeScript matches all 9 vectors byte-for-byte
     ts_vec_script = """
+import fs from 'node:fs';
 import { computePartSyncHashes, computeFnv1a32Hex, validateHierarchyDag } from './src/server/engines/assetEngine.ts';
-const inp = JSON.parse(process.argv[1]);
+const inp = JSON.parse(fs.readFileSync(0, 'utf-8'));
 const out: Record<string, any> = {
   ascii: computeFnv1a32Hex(inp.vec_ascii),
   unicode: computeFnv1a32Hex(inp.vec_unicode),
@@ -904,27 +920,14 @@ console.log(JSON.stringify(out));
     py_dag = validate_hierarchy_dag(cyclic_parts)
     assert py_dag["valid"] is False and len(py_dag["cycles"]) > 0
 
-    res = subprocess.run(
-        [
-            "npx",
-            "tsx",
-            "-e",
-            ts_vec_script,
-            json.dumps({
-                "vec_ascii": vec_ascii,
-                "vec_unicode": vec_unicode,
-                "vec_lf": vec_lf,
-                "vec_crlf": vec_crlf,
-                "variants": variants,
-                "cyclicParts": cyclic_parts,
-            }),
-        ],
-        cwd=str(ROOT_DIR),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    ts_vec_out = json.loads(res.stdout.strip().splitlines()[-1])
+    ts_vec_out = _run_ts_with_stdin(ts_vec_script, {
+        "vec_ascii": vec_ascii,
+        "vec_unicode": vec_unicode,
+        "vec_lf": vec_lf,
+        "vec_crlf": vec_crlf,
+        "variants": variants,
+        "cyclicParts": cyclic_parts,
+    })
     assert ts_vec_out["ascii"] == py_ascii
     assert ts_vec_out["unicode"] == py_unicode
     assert ts_vec_out["lf"] == py_lf

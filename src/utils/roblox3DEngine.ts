@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { resolveRgbTupleLuau } from '../server/engines/generation3DEngine';
 
 export interface SubMeshGeometryData {
   vertices: number[][];
@@ -1789,7 +1790,7 @@ export function generateEditableMeshLuauCode(
     const [sx, sy, sz] = sub.size;
     const [px, py, pz] = sub.position;
     const [rx, ry, rz] = sub.rotation;
-    const [cr, cg, cb] = sub.color;
+    const [cr, cg, cb] = resolveRgbTupleLuau(sub.color);
     const fidelity = sub.collisionFidelity || 'Hull';
     const renderFid = sub.renderFidelity || 'Precise';
 

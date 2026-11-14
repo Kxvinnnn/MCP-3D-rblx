@@ -5,12 +5,14 @@ import {
   CheckCircle2,
   Clock,
   FolderGit2,
+  KeyRound,
   PlugZap,
   RefreshCw,
   ShieldCheck,
   Wifi,
   WifiOff,
 } from 'lucide-react';
+import { forgeFetch, getForgeApiToken, setForgeApiToken } from '../utils/forgeApi';
 
 interface BridgeStatusResponse {
   bridgeConnected: boolean;
@@ -59,6 +61,16 @@ export const LocalBridgeStatusPanel: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [reconnecting, setReconnecting] = useState<boolean>(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [apiTokenInput, setApiTokenInput] = useState<string>(() => getForgeApiToken());
+
+  const handleSaveToken = () => {
+    setForgeApiToken(apiTokenInput);
+    setActionMessage(
+      apiTokenInput.trim()
+        ? 'Token X-Forge-Token guardado en este navegador.'
+        : 'Token X-Forge-Token eliminado.'
+    );
+  };
 
   const fetchBridgeStatus = async () => {
     try {
@@ -84,10 +96,13 @@ export const LocalBridgeStatusPanel: React.FC = () => {
     setReconnecting(true);
     setActionMessage(null);
     try {
-      const res = await fetch('/api/v1/bridge/reconnect', { method: 'POST' });
+      const res = await forgeFetch('/api/v1/bridge/reconnect', { method: 'POST' });
       if (res.ok) {
         setActionMessage('Solicitud de reconexión y renovación de sesión enviada al puente local.');
         await fetchBridgeStatus();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setActionMessage(err.error || `Error HTTP ${res.status}`);
       }
     } finally {
       setReconnecting(false);
@@ -97,7 +112,7 @@ export const LocalBridgeStatusPanel: React.FC = () => {
   const handleCheckRojoBuild = async () => {
     setActionMessage('Verificando compilación en el puente local...');
     try {
-      const res = await fetch('/api/v1/bridge/enqueue', {
+      const res = await forgeFetch('/api/v1/bridge/enqueue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -190,6 +205,30 @@ export const LocalBridgeStatusPanel: React.FC = () => {
           <span>{actionMessage}</span>
         </div>
       )}
+
+      {/* Token de autenticación para acciones del Backend (X-Forge-Token) */}
+      <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs text-slate-300">
+          <KeyRound className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="font-semibold">Token API (`FORGE_LOCAL_TOKEN`):</span>
+        </div>
+        <div className="flex items-center gap-2 flex-1 max-w-md">
+          <input
+            type="password"
+            value={apiTokenInput}
+            onChange={(e) => setApiTokenInput(e.target.value)}
+            placeholder="Pega tu FORGE_LOCAL_TOKEN para habilitar envíos"
+            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+          />
+          <button
+            type="button"
+            onClick={handleSaveToken}
+            className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-cyan-300 font-semibold cursor-pointer"
+          >
+            Guardar
+          </button>
+        </div>
+      </div>
 
       {/* Tarjetas de Estado en Vivo */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">

@@ -1,0 +1,87 @@
+name: NIGHTMARE FORGE CI
+
+on:
+  push:
+    branches: ["main", "audit/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  frontend-and-backend:
+    name: Typecheck, Build & Core Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install root dependencies
+        run: npm install --no-package-lock
+      - name: Typecheck (tsc --noEmit)
+        run: npm run lint
+      - name: Production build (vite build)
+        run: npm run build
+      - name: Run security, RGB color, and 3D geometry/export tests
+        run: npx tsx --test tests/security_auth.test.ts tests/rgb_colors.test.ts tests/geometry_and_export.test.ts
+
+  forge-local-bridge:
+    name: Forge Local Bridge Typecheck & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install bridge dependencies
+        run: npm --prefix forge-bridge install --no-package-lock
+      - name: Bridge typecheck
+        run: npm --prefix forge-bridge run typecheck
+      - name: Bridge integration tests
+        run: npm --prefix forge-bridge test
+
+  python-e2e-sync:
+    name: Python <-> TypeScript Bidirectional Sync E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install root dependencies (for tsx parity checks)
+        run: npm install --no-package-lock
+      - name: Run bidirectional sync E2E suite
+        run: python tests/test_e2e_bidirectional_sync.py
+
+  luau-static-validation:
+    name: Luau Plugin & Rojo Workspace Static Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Luau --!strict headers and forbidden primitives
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re, sys
+
+          files = [Path("backend/roblox_plugin/ForgeAIStudioPlugin.server.luau")]
+          files.extend(Path("rojo_workspace/src").rglob("*.luau"))
+          forbidden = [re.compile(r"\bloadstring\s*\("), re.compile(r"\bgetfenv\s*\("), re.compile(r"\bsetfenv\s*\(")]
+          errors = []
+          for f in files:
+              text = f.read_text(encoding="utf-8")
+              if not text.lstrip().startswith("--!strict"):
+                  errors.append(f"{f}: missing --!strict header")
+              for pat in forbidden:
+                  if pat.search(text):
+                      errors.append(f"{f}: forbidden primitive {pat.pattern}")
+          if errors:
+              print("\n".join(errors))
+              sys.exit(1)
+          print(f"Validated {len(files)} Luau files (--!strict + security primitives).")
+          PY
