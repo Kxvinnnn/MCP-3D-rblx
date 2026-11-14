@@ -10,6 +10,7 @@ import {
   PackageCheck,
   Wrench,
 } from 'lucide-react';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 interface AuditedModule {
   module_name: string;
@@ -30,8 +31,8 @@ export const ContextEditor: React.FC = () => {
     setLoading(true);
     try {
       const [ctxRes, auditRes] = await Promise.all([
-        fetch('/api/v1/context'),
-        fetch('/api/v1/context/audit'),
+        forgeFetch('/api/v1/context'),
+        forgeFetch('/api/v1/context/audit'),
       ]);
       const ctxData = await ctxRes.json();
       const auditData = await auditRes.json();
@@ -51,7 +52,7 @@ export const ContextEditor: React.FC = () => {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const res = await fetch('/api/v1/context', {
+      const res = await forgeFetch('/api/v1/context', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
@@ -59,7 +60,7 @@ export const ContextEditor: React.FC = () => {
       if (res.ok) {
         setSavedSuccess(true);
         setTimeout(() => setSavedSuccess(false), 2500);
-        const auditRes = await fetch('/api/v1/context/audit');
+        const auditRes = await forgeFetch('/api/v1/context/audit');
         const auditData = await auditRes.json();
         setAuditedModules(auditData.modules || []);
       }
@@ -73,11 +74,11 @@ export const ContextEditor: React.FC = () => {
   const handleBootstrapModules = async () => {
     setBootstrapping(true);
     try {
-      const res = await fetch('/api/v1/context/bootstrap-modules', {
+      const res = await forgeFetch('/api/v1/context/bootstrap-modules', {
         method: 'POST',
       });
       if (res.ok) {
-        const auditRes = await fetch('/api/v1/context/audit');
+        const auditRes = await forgeFetch('/api/v1/context/audit');
         const auditData = await auditRes.json();
         setAuditedModules(auditData.modules || []);
       }

@@ -8,6 +8,7 @@ import {
   SubMeshGeometryData,
   generateEditableMeshLuauCode,
 } from '../../utils/roblox3DEngine.ts';
+import { forgeFetch } from '../../utils/forgeApiClient.ts';
 
 export type RobloxCollisionFidelity =
   | 'Default'
@@ -1198,7 +1199,7 @@ export class ThreeDEngineProcessor {
     );
 
     try {
-      const response = await fetch(endpoint, {
+      const response = await forgeFetch(endpoint, {
         method,
         headers:
           method === 'POST'
@@ -2000,7 +2001,7 @@ export class ThreeDEngineProcessor {
     );
 
     try {
-      const response = await fetch(endpoint, {
+      const response = await forgeFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),

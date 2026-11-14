@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Copy, Check, Download, FileCode, Terminal, FolderTree, Cpu, ShieldCheck } from 'lucide-react';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 export const BackendExplorer: React.FC = () => {
   const [files, setFiles] = useState<Record<string, string>>({});
@@ -8,7 +9,7 @@ export const BackendExplorer: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    fetch('/api/v1/files')
+    forgeFetch('/api/v1/files')
       .then((res) => res.json())
       .then((data) => {
         if (data.files) {

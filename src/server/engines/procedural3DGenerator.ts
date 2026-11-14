@@ -24,6 +24,7 @@
 import crypto from 'crypto';
 import {
   buildStrictLuauFromEditedParts,
+  canonicalEulerToMatrix9,
   computeFnv1a32Hex,
   normalizePartsWithSyncMetadata,
 } from './worldAndModelEditorEngine.ts';
@@ -55,6 +56,7 @@ export interface TreeProceduralParams {
   trunkThickness?: number;
   trunkLean?: number;
   trunkCurvature?: number;
+  rootFlareScale?: number;
   branchCount?: number;
   branchLength?: number;
   branchDistribution?: BranchDistributionType;
@@ -201,6 +203,8 @@ function buildCylinderBuffers(params: {
   bendOffsetX?: number;
   bendOffsetZ?: number;
   curvatureAmount?: number;
+  radialLobeAmplitude?: number;
+  radialLobeCount?: number;
   rng: () => number;
 }): RawProceduralGeometry {
   const [sx, sy, sz] = params.size;
@@ -212,6 +216,8 @@ function buildCylinderBuffers(params: {
   const bendX = Number(params.bendOffsetX || 0);
   const bendZ = Number(params.bendOffsetZ || 0);
   const curv = clamp(Number(params.curvatureAmount || 0), 0, 1);
+  const lobeAmp = clamp(Number(params.radialLobeAmplitude || 0), 0, 0.35);
+  const lobeCount = clamp(Math.round(Number(params.radialLobeCount || 5)), 3, 8);
 
   const vertices: [number, number, number][] = [];
   const normals: [number, number, number][] = [];
@@ -223,8 +229,10 @@ function buildCylinderBuffers(params: {
     const y = round4(-halfY + vRatio * sy);
     const radiusScale =
       params.bottomScaleRatio + (params.topScaleRatio - params.bottomScaleRatio) * vRatio;
-    const spineShiftX = bendX * (vRatio * vRatio) + Math.sin(vRatio * Math.PI) * curv * sx * 0.45;
-    const spineShiftZ = bendZ * (vRatio * vRatio) + Math.sin(vRatio * Math.PI * 1.5) * curv * sz * 0.25;
+    const spineShiftX =
+      bendX * (vRatio * vRatio) + Math.sin(vRatio * Math.PI) * curv * Math.max(sx * 0.75, sy * 0.12);
+    const spineShiftZ =
+      bendZ * (vRatio * vRatio) + Math.sin(vRatio * Math.PI * 1.5) * curv * Math.max(sz * 0.35, sy * 0.05);
 
     for (let s = 0; s < radial; s++) {
       const uRatio = s / radial;
@@ -233,8 +241,12 @@ function buildCylinderBuffers(params: {
         r > 0 && r < rings
           ? 1 + (params.rng() - 0.5) * 2 * clamp(params.jitterAmount, 0, 0.35)
           : 1;
-      const vx = round4(spineShiftX + Math.cos(angle) * rxBase * radiusScale * jitter);
-      const vz = round4(spineShiftZ + Math.sin(angle) * rzBase * radiusScale * jitter);
+      const lobeFactor =
+        lobeAmp > 0 && r < rings
+          ? Math.max(0.55, 1 + lobeAmp * (1 - vRatio * 0.85) * Math.sin(angle * lobeCount))
+          : 1;
+      const vx = round4(spineShiftX + Math.cos(angle) * rxBase * radiusScale * jitter * lobeFactor);
+      const vz = round4(spineShiftZ + Math.sin(angle) * rzBase * radiusScale * jitter * lobeFactor);
       vertices.push([vx, y, vz]);
 
       const nx = Math.cos(angle);
@@ -301,6 +313,8 @@ export function buildTaperedCylinderMesh(params: {
   bendOffsetX?: number;
   bendOffsetZ?: number;
   curvatureAmount?: number;
+  radialLobeAmplitude?: number;
+  radialLobeCount?: number;
   activeLod?: 0 | 1 | 2;
   rng: () => number;
 }) {
@@ -861,8 +875,9 @@ export function generateParameterizedTree3DParts(
   const parts: any[] = [];
 
   // 1. Base radicular asentada exactamente en Y = 0
-  const rootFlareHeight = round4(Math.max(0.6, height * 0.08));
-  const rootFlareWidth = round4(trunkThickness * 1.45);
+  const rootFlareScale = clamp(Number(params.rootFlareScale ?? 1.0), 0.75, 2.2);
+  const rootFlareHeight = round4(Math.max(0.6, height * 0.08 * (rootFlareScale > 1.1 ? 1.15 : 1.0)));
+  const rootFlareWidth = round4(trunkThickness * 1.45 * rootFlareScale);
   const rootFlareSize: [number, number, number] = [
     rootFlareWidth,
     rootFlareHeight,
@@ -889,11 +904,13 @@ export function generateParameterizedTree3DParts(
       modelName,
       partName: 'RootFlare',
       size: rootFlareSize,
-      bottomScaleRatio: 1.25,
-      topScaleRatio: 0.82,
-      radialSegments: segSpec.trunkRad,
+      bottomScaleRatio: rootFlareScale > 1.1 ? 1.38 : 1.25,
+      topScaleRatio: 0.78,
+      radialSegments: rootFlareScale > 1.1 ? Math.max(8, segSpec.trunkRad) : segSpec.trunkRad,
       heightSegments: 2,
       jitterAmount: variation * 0.18,
+      radialLobeAmplitude: rootFlareScale > 1.1 ? 0.24 : 0.1,
+      radialLobeCount: 5,
       colorHex: trunkColor,
       activeLod,
       rng,
@@ -915,6 +932,7 @@ export function generateParameterizedTree3DParts(
   const trunkBendZ = round4(Math.sin(leanAzimuth) * leanShiftMag);
   const trunkTopOffsetX = trunkBendX;
   const trunkTopOffsetZ = round4(trunkBendZ + Math.sin(Math.PI * 1.5) * trunkCurvature * trunkThickness * 0.25);
+  const trunkRings = trunkCurvature > 0.08 ? Math.max(4, segSpec.trunkRings) : segSpec.trunkRings;
 
   parts.push({
     partId: 'part_2_trunk',
@@ -944,7 +962,7 @@ export function generateParameterizedTree3DParts(
       bottomScaleRatio: 1.0,
       topScaleRatio: 0.62,
       radialSegments: segSpec.trunkRad,
-      heightSegments: segSpec.trunkRings,
+      heightSegments: trunkRings,
       jitterAmount: variation * 0.22,
       colorHex: trunkColor,
       bendOffsetX: trunkBendX,
@@ -1147,15 +1165,21 @@ export function generateParameterizedTree3DParts(
       crownCenterY,
       round4(trunkTopOffsetZ + Math.sin(c) * branchSpreadRadius),
     ];
+    const alternatingScaleBias = 1 + (c % 2 === 0 ? -0.22 : 0.24) * leafVariation;
     const clusterScale = round4(
-      (0.45 + rng() * 0.24 * leafVariation) *
-        (leafDistribution === 'clustered' ? 1.15 : 1.0) *
-        (0.85 + foliageDensity * 0.15)
+      clamp(
+        (0.46 + (rng() - 0.3) * 0.36 * leafVariation) *
+          alternatingScaleBias *
+          (leafDistribution === 'clustered' ? 1.12 : 1.0) *
+          (0.85 + foliageDensity * 0.15),
+        0.26,
+        0.95
+      )
     );
     const clusterSize: [number, number, number] = [
-      round4(Math.max(1.2, crownWidth * clusterScale)),
-      round4(Math.max(1.0, crownHeight * clusterScale * (canopyShape === 'layered' ? 0.65 : 0.85))),
-      round4(Math.max(1.2, crownWidth * clusterScale)),
+      round4(Math.max(1.1, crownWidth * clusterScale)),
+      round4(Math.max(0.95, crownHeight * clusterScale * (canopyShape === 'layered' ? 0.65 : 0.85))),
+      round4(Math.max(1.1, crownWidth * clusterScale)),
     ];
     const clusterName = `FoliageCluster_${c + 1}`;
     const clusterY = Math.max(
@@ -1201,19 +1225,128 @@ export function generateParameterizedTree3DParts(
     });
   }
 
-  return groundAndNormalizeParts(parts);
+  return groundAndNormalizeParts(parts.map((p) => centerProceduralPartGeometry(modelName, p)));
 }
 
 /**
- * Ajusta todas las piezas para que el punto más bajo del modelo descanse exactamente en `Y = 0`.
+ * Centra el bounding box local de `meshData` en `(0, 0, 0)`, actualiza `part.size` al tamaño
+ * exacto `[spanX, spanY, spanZ]` y traslada `part.position` en coordenadas del modelo para
+ * garantizar paridad geométrica exacta 1:1 entre Three.js y Roblox Studio `CreateMeshPartAsync`.
+ */
+export function centerProceduralPartGeometry(modelName: string, part: any): any {
+  const verts: [number, number, number][] | undefined = part?.meshData?.vertices;
+  if (!Array.isArray(verts) || verts.length === 0) {
+    return part;
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (const v of verts) {
+    const x = Number(v[0] ?? 0);
+    const y = Number(v[1] ?? 0);
+    const z = Number(v[2] ?? 0);
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) {
+    return part;
+  }
+
+  const cx = (minX + maxX) * 0.5;
+  const cy = (minY + maxY) * 0.5;
+  const cz = (minZ + maxZ) * 0.5;
+  const spanX = round4(Math.max(0.2, maxX - minX));
+  const spanY = round4(Math.max(0.2, maxY - minY));
+  const spanZ = round4(Math.max(0.2, maxZ - minZ));
+
+  const shiftVerts = (list: any[] | undefined): [number, number, number][] =>
+    Array.isArray(list)
+      ? list.map((v) => [
+          round4(Number(v[0] ?? 0) - cx),
+          round4(Number(v[1] ?? 0) - cy),
+          round4(Number(v[2] ?? 0) - cz),
+        ])
+      : [];
+
+  const centeredVertices = shiftVerts(verts);
+  const centeredLodLevels = Array.isArray(part.meshData.lodLevels)
+    ? part.meshData.lodLevels.map((lod: any) => ({
+        ...lod,
+        vertices: shiftVerts(lod.vertices),
+      }))
+    : part.meshData.lodLevels;
+
+  const rot = Array.isArray(part.rotation) ? part.rotation : [0, 0, 0];
+  const m = canonicalEulerToMatrix9(Number(rot[0] ?? 0), Number(rot[1] ?? 0), Number(rot[2] ?? 0));
+  const worldShiftX = m[0] * cx + m[1] * cy + m[2] * cz;
+  const worldShiftY = m[3] * cx + m[4] * cy + m[5] * cz;
+  const worldShiftZ = m[6] * cx + m[7] * cy + m[8] * cz;
+
+  const px = Number(part.position?.[0] ?? 0);
+  const py = Number(part.position?.[1] ?? 0);
+  const pz = Number(part.position?.[2] ?? 0);
+
+  const geometrySignature = JSON.stringify({
+    modelName,
+    partName: part.name || 'Part',
+    activeLod: part.meshData.activeLod ?? 0,
+    vertices: centeredVertices,
+    normals: part.meshData.normals || [],
+    uvs: part.meshData.uvs || [],
+    faces: part.meshData.faces || [],
+  });
+  const updatedGeometryHash = crypto
+    .createHash('sha256')
+    .update(geometrySignature, 'utf-8')
+    .digest('hex');
+
+  return {
+    ...part,
+    size: [spanX, spanY, spanZ],
+    position: [
+      round4(px + worldShiftX),
+      round4(py + worldShiftY),
+      round4(pz + worldShiftZ),
+    ],
+    meshData: {
+      ...part.meshData,
+      geometryHash: updatedGeometryHash,
+      vertices: centeredVertices,
+      lodLevels: centeredLodLevels,
+    },
+  };
+}
+
+/**
+ * Ajusta todas las piezas para que el punto más bajo real del modelo (en coordenadas transformadas)
+ * descanse exactamente en `Y = 0`.
  */
 export function groundAndNormalizeParts(parts: any[]): any[] {
   let minY = Infinity;
   for (const p of parts) {
     const py = Number(p.position?.[1] ?? 0);
-    const sy = Number(p.size?.[1] ?? 1);
-    const bottom = py - sy * 0.5;
-    if (bottom < minY) minY = bottom;
+    const verts: [number, number, number][] | undefined = p?.meshData?.vertices;
+    if (Array.isArray(verts) && verts.length > 0) {
+      const rot = Array.isArray(p.rotation) ? p.rotation : [0, 0, 0];
+      const m = canonicalEulerToMatrix9(Number(rot[0] ?? 0), Number(rot[1] ?? 0), Number(rot[2] ?? 0));
+      for (const v of verts) {
+        const wy = py + (m[3] * Number(v[0] ?? 0) + m[4] * Number(v[1] ?? 0) + m[5] * Number(v[2] ?? 0));
+        if (wy < minY) minY = wy;
+      }
+    } else {
+      const sy = Number(p.size?.[1] ?? 1);
+      const bottom = py - sy * 0.5;
+      if (bottom < minY) minY = bottom;
+    }
   }
   if (!Number.isFinite(minY)) minY = 0;
   const shiftY = -minY;
@@ -1597,7 +1730,7 @@ export function generateSeededCategoryParts(
   ];
 
   return {
-    parts: groundAndNormalizeParts(parts),
+    parts: groundAndNormalizeParts(parts.map((p) => centerProceduralPartGeometry(modelName, p))),
     pbrProfile: {
       albedo_hex: pal.primary,
       roughness: 0.48,

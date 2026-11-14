@@ -20,6 +20,7 @@ import {
 } from '../../utils/roblox3DEngine.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
 import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
+import { forgeFetch } from '../../utils/forgeApiClient.ts';
 
 interface MaterialPreset {
   id: string;
@@ -248,7 +249,7 @@ export const MaterialsView: React.FC = () => {
       const pattern = preset?.pattern || 'HexPlate';
 
       // Endpoint /api/v1/assets/publish-pbr
-      const res = await fetch('/api/v1/assets/publish-pbr', {
+      const res = await forgeFetch('/api/v1/assets/publish-pbr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

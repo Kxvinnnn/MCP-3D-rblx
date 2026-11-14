@@ -5,12 +5,18 @@ import {
   CheckCircle2,
   Clock,
   FolderGit2,
+  KeyRound,
   PlugZap,
   RefreshCw,
   ShieldCheck,
   Wifi,
   WifiOff,
 } from 'lucide-react';
+import {
+  forgeFetch,
+  getStoredForgeToken,
+  setStoredForgeToken,
+} from '../utils/forgeApiClient.ts';
 
 interface BridgeStatusResponse {
   bridgeConnected: boolean;
@@ -60,10 +66,18 @@ export const LocalBridgeStatusPanel: React.FC = () => {
   const [reconnecting, setReconnecting] = useState<boolean>(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
+  const [tokenInput, setTokenInput] = useState<string>(() => getStoredForgeToken());
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const fetchBridgeStatus = async () => {
     try {
-      const res = await fetch('/api/v1/bridge/status');
-      if (res.ok) {
+      const res = await forgeFetch('/api/v1/bridge/status');
+      if (res.status === 401 || res.status === 403) {
+        setAuthError(
+          'El backend requirió X-Forge-Token válido (HTTP 401). Configura el token arriba y pulsa "Guardar Token".'
+        );
+      } else if (res.ok) {
+        setAuthError(null);
         const data = await res.json();
         setStatus(data);
       }
@@ -80,12 +94,25 @@ export const LocalBridgeStatusPanel: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
+  const handleSaveToken = async () => {
+    setStoredForgeToken(tokenInput);
+    setAuthError(null);
+    setActionMessage(
+      tokenInput.trim()
+        ? 'Token X-Forge-Token guardado en este navegador. Verificando conexión...'
+        : 'Token limpiado de este navegador.'
+    );
+    await fetchBridgeStatus();
+  };
+
   const handleRequestReconnect = async () => {
     setReconnecting(true);
     setActionMessage(null);
     try {
-      const res = await fetch('/api/v1/bridge/reconnect', { method: 'POST' });
-      if (res.ok) {
+      const res = await forgeFetch('/api/v1/bridge/reconnect', { method: 'POST' });
+      if (res.status === 401 || res.status === 403) {
+        setActionMessage('HTTP 401: Verifica tu X-Forge-Token antes de reconectar.');
+      } else if (res.ok) {
         setActionMessage('Solicitud de reconexión y renovación de sesión enviada al puente local.');
         await fetchBridgeStatus();
       }
@@ -97,7 +124,7 @@ export const LocalBridgeStatusPanel: React.FC = () => {
   const handleCheckRojoBuild = async () => {
     setActionMessage('Verificando compilación en el puente local...');
     try {
-      const res = await fetch('/api/v1/bridge/enqueue', {
+      const res = await forgeFetch('/api/v1/bridge/enqueue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -108,7 +135,9 @@ export const LocalBridgeStatusPanel: React.FC = () => {
         }),
       });
       const data = await res.json();
-      if (data.status === 'completed' && data.result) {
+      if (res.status === 401 || res.status === 403) {
+        setActionMessage('HTTP 401: Configura un X-Forge-Token válido para consultar el puente.');
+      } else if (data.status === 'completed' && data.result) {
         setActionMessage(
           data.result.valid
             ? `Compilación Rojo verificada (${data.result.checkedFilesCount} módulos Luau validados).`
@@ -183,6 +212,34 @@ export const LocalBridgeStatusPanel: React.FC = () => {
           </button>
         </div>
       </div>
+
+      <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+        <div className="flex items-center gap-2 text-xs text-slate-300 shrink-0">
+          <KeyRound className="w-4 h-4 text-cyan-400" />
+          <span className="font-mono font-semibold">X-Forge-Token:</span>
+        </div>
+        <input
+          type="password"
+          value={tokenInput}
+          onChange={(e) => setTokenInput(e.target.value)}
+          placeholder="Ingresa el token de seguridad del Bridge / Backend (opcional en dev)"
+          className="flex-1 rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs font-mono text-cyan-200 focus:outline-none focus:border-cyan-500"
+        />
+        <button
+          type="button"
+          onClick={handleSaveToken}
+          className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white cursor-pointer shrink-0"
+        >
+          Guardar Token
+        </button>
+      </div>
+
+      {authError && (
+        <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+          <span>{authError}</span>
+        </div>
+      )}
 
       {actionMessage && (
         <div className="p-3 rounded-xl bg-cyan-950/50 border border-cyan-500/40 text-cyan-200 text-xs flex items-center gap-2">

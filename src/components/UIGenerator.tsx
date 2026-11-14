@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Sparkles, Image as ImageIcon, Upload, Play, Download, Copy, Check, Info, Palette, Folder } from 'lucide-react';
 import { RobloxCanvasPreview, UINodeData } from './RobloxCanvasPreview.tsx';
 import { FloatingTerminalLog, TerminalLogEntry } from './FloatingTerminalLog.tsx';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 interface UIResult {
   file_name: string;
@@ -80,7 +81,7 @@ export const UIGenerator: React.FC = () => {
     );
 
     try {
-      const res = await fetch('/api/v1/generate-ui-stream', {
+      const res = await forgeFetch('/api/v1/generate-ui-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

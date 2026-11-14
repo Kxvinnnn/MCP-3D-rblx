@@ -1114,7 +1114,36 @@ export function buildStrictLuauFromEditedParts(
     const [sx = 2, sy = 2, sz = 2] = p.size || [2, 2, 2];
     const [px = 0, py = 1, pz = 0] = p.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = p.rotation || [0, 0, 0];
-    const [cr = 180, cg = 180, cb = 180] = p.color || [180, 180, 180];
+    const resolveRgb255Safe = (rawColor: any): [number, number, number] => {
+      if (typeof rawColor === 'string') {
+        const clean = rawColor.trim().replace(/^#/, '');
+        if (/^[0-9a-fA-F]{6}$/.test(clean)) {
+          return [
+            parseInt(clean.slice(0, 2), 16),
+            parseInt(clean.slice(2, 4), 16),
+            parseInt(clean.slice(4, 6), 16),
+          ];
+        }
+        return [180, 180, 180];
+      }
+      if (Array.isArray(rawColor) && rawColor.length >= 3) {
+        const r = Number(rawColor[0]);
+        const g = Number(rawColor[1]);
+        const b = Number(rawColor[2]);
+        if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
+          const isNormFloat = r <= 1 && g <= 1 && b <= 1 && (r % 1 !== 0 || g % 1 !== 0 || b % 1 !== 0);
+          return isNormFloat
+            ? [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]
+            : [
+                Math.max(0, Math.min(255, Math.round(r))),
+                Math.max(0, Math.min(255, Math.round(g))),
+                Math.max(0, Math.min(255, Math.round(b))),
+              ];
+        }
+      }
+      return [180, 180, 180];
+    };
+    const [cr, cg, cb] = resolveRgb255Safe(p.color);
     const vName = `meshPart_${idx + 1}`;
     const okFlag = `isVerified_${idx + 1}`;
     const cfMode = p.collisionFidelity || collisionFidelity || 'Hull';

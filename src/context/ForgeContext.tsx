@@ -36,6 +36,7 @@ import {
   type StudioApplicationReceipt,
   type StudioModelReconstructionComparison,
 } from '../utils/receiptVerification.ts';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 export type UIMode = 'simple' | 'advanced';
 
@@ -826,7 +827,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!isMountedRef.current) return;
     setLoadingLibrary(true);
     try {
-      const res = await fetch('/api/v1/assets');
+      const res = await forgeFetch('/api/v1/assets');
       if (!isMountedRef.current) return;
       if (res.ok) {
         const data = await res.json();
@@ -873,7 +874,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
 
         try {
-          const res = await fetch('/api/v1/assets/rebuild-luau', {
+          const res = await forgeFetch('/api/v1/assets/rebuild-luau', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -971,8 +972,8 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const startTime = performance.now();
     try {
       const [bridgeRes, healthRes] = await Promise.allSettled([
-        fetch('/api/v1/bridge/status'),
-        fetch('/api/v1/health'),
+        forgeFetch('/api/v1/bridge/status'),
+        forgeFetch('/api/v1/health'),
       ]);
 
       const latencyMs = Math.round(performance.now() - startTime);
@@ -1206,7 +1207,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       try {
-        const res = await fetch('/api/v1/assets/rebuild-luau', {
+        const res = await forgeFetch('/api/v1/assets/rebuild-luau', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1342,7 +1343,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       try {
         // Step 2: Ensure saved in Rojo disk with explicit response and content verification
-        const rebuildRes = await fetch('/api/v1/assets/rebuild-luau', {
+        const rebuildRes = await forgeFetch('/api/v1/assets/rebuild-luau', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1418,7 +1419,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ? computeIncrementalDiff(baselineForDiff, assetToPush)
           : null;
 
-        const res = await fetch('/api/v1/bridge/enqueue', {
+        const res = await forgeFetch('/api/v1/bridge/enqueue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1686,7 +1687,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         : computeAssetContentHash(targetAsset);
 
       try {
-        const res = await fetch(`/api/v1/bridge/task/${encodeURIComponent(trimmedTaskId)}`);
+        const res = await forgeFetch(`/api/v1/bridge/task/${encodeURIComponent(trimmedTaskId)}`);
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
@@ -1803,7 +1804,7 @@ export const ForgeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
 
     try {
-      const res = await fetch('/api/v1/assets/pull-from-rojo', {
+      const res = await forgeFetch('/api/v1/assets/pull-from-rojo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

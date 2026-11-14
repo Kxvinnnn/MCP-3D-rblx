@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Play, Copy, Check, Download, Sparkles, Folder, Cpu, FileCode2, Info } from 'lucide-react';
 import { FloatingTerminalLog, TerminalLogEntry } from './FloatingTerminalLog.tsx';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 interface ScriptResult {
   file_name: string;
@@ -80,7 +81,7 @@ export const ScriptGenerator: React.FC = () => {
     );
 
     try {
-      const res = await fetch('/api/v1/generate-script-stream', {
+      const res = await forgeFetch('/api/v1/generate-script-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

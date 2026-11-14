@@ -27,6 +27,7 @@ import {
 } from '../../utils/roblox3DEngine.ts';
 import { SseStreamParser, SseMessage } from '../../utils/sseParser.ts';
 import { parseNaturalLanguageToTreeParams } from '../../utils/treePromptParser.ts';
+import { forgeFetch } from '../../utils/forgeApiClient.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
 import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
 
@@ -65,6 +66,7 @@ export const CreateWizardView: React.FC = () => {
   const [trunkThickness, setTrunkThickness] = useState<number>(1.6);
   const [trunkLean, setTrunkLean] = useState<number>(0);
   const [trunkCurvature, setTrunkCurvature] = useState<number>(0.15);
+  const [rootFlareScale, setRootFlareScale] = useState<number>(1.0);
   const [branchCount, setBranchCount] = useState<number>(4);
   const [branchLength, setBranchLength] = useState<number>(4.0);
   const [branchDistribution, setBranchDistribution] = useState<'tiered' | 'whorled' | 'alternating' | 'canopy_top'>('tiered');
@@ -82,6 +84,7 @@ export const CreateWizardView: React.FC = () => {
   const [colorVariation, setColorVariation] = useState<number>(0.2);
   const [lodLevel, setLodLevel] = useState<0 | 1 | 2>(0);
   const [parsedPromptBadges, setParsedPromptBadges] = useState<string[]>([]);
+  const [treeParamsManuallyEdited, setTreeParamsManuallyEdited] = useState<boolean>(false);
 
   // Input states
   const [prompt, setPrompt] = useState<string>(
@@ -187,6 +190,35 @@ export const CreateWizardView: React.FC = () => {
     setNotification({ type: 'info', message: 'Generación 3D cancelada.' });
   };
 
+  const applyParsedTreePromptToState = (rawPrompt: string) => {
+    const parsed = parseNaturalLanguageToTreeParams(rawPrompt);
+    const p = parsed.params;
+    if (p.height !== undefined) setTreeHeight(p.height);
+    if (p.width !== undefined) setTreeWidth(p.width);
+    if (p.trunkThickness !== undefined) setTrunkThickness(p.trunkThickness);
+    if (p.trunkLean !== undefined) setTrunkLean(p.trunkLean);
+    if (p.trunkCurvature !== undefined) setTrunkCurvature(p.trunkCurvature);
+    if (p.rootFlareScale !== undefined) setRootFlareScale(p.rootFlareScale);
+    if (p.branchCount !== undefined) setBranchCount(p.branchCount);
+    if (p.branchLength !== undefined) setBranchLength(p.branchLength);
+    if (p.branchDistribution) setBranchDistribution(p.branchDistribution);
+    if (p.canopyShape) setCanopyShape(p.canopyShape);
+    if (p.canopySize !== undefined) setCanopySize(p.canopySize);
+    if (p.leafDistribution) setLeafDistribution(p.leafDistribution);
+    if (p.foliageCount !== undefined) setFoliageCount(p.foliageCount);
+    if (p.foliageDensity !== undefined) setFoliageDensity(p.foliageDensity);
+    if (p.trunkMaterial) setTrunkMaterial(p.trunkMaterial);
+    if (p.leafMaterial) setLeafMaterial(p.leafMaterial);
+    if (p.trunkColor) setTrunkColor(p.trunkColor);
+    if (p.leafColor) setLeafColor(p.leafColor);
+    if (p.variation !== undefined) setTreeVariation(p.variation);
+    if (p.leafVariation !== undefined) setLeafVariation(p.leafVariation);
+    if (p.colorVariation !== undefined) setColorVariation(p.colorVariation);
+    if (p.detailLevel) setDetailLevel(p.detailLevel);
+    setParsedPromptBadges(parsed.detectedKeywords);
+    return parsed;
+  };
+
   // Step 4: Execute Generation via robust SSE stream parser
   const handleStartGeneration = async () => {
     setCurrentStep(4);
@@ -203,16 +235,9 @@ export const CreateWizardView: React.FC = () => {
     abortControllerRef.current = controller;
 
     try {
-      const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-      const storedToken =
-        typeof window !== 'undefined' ? window.localStorage.getItem('forge_security_token') || '' : '';
-      if (storedToken) {
-        reqHeaders['X-Forge-Token'] = storedToken;
-      }
-
-      const response = await fetch('/api/v1/generate-3d-stream', {
+      const response = await forgeFetch('/api/v1/generate-3d-stream', {
         method: 'POST',
-        headers: reqHeaders,
+        headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
           prompt: inputMethod === 'text' ? prompt : `Asset de tipo ${category} generado con referencia/relieve`,
@@ -229,6 +254,7 @@ export const CreateWizardView: React.FC = () => {
                   trunkThickness,
                   trunkLean,
                   trunkCurvature,
+                  rootFlareScale,
                   branchCount,
                   branchLength,
                   branchDistribution,
@@ -551,7 +577,10 @@ export const CreateWizardView: React.FC = () => {
                   <textarea
                     rows={4}
                     value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
+                    onChange={(e) => {
+                      setPrompt(e.target.value);
+                      setTreeParamsManuallyEdited(false);
+                    }}
                     placeholder="Ejemplo: Torreta defensiva con doble cañón, base octogonal y núcleo luminoso..."
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 resize-none leading-relaxed"
                   />
@@ -565,30 +594,8 @@ export const CreateWizardView: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => {
-                          const parsed = parseNaturalLanguageToTreeParams(prompt);
-                          const p = parsed.params;
-                          if (p.height !== undefined) setTreeHeight(p.height);
-                          if (p.width !== undefined) setTreeWidth(p.width);
-                          if (p.trunkThickness !== undefined) setTrunkThickness(p.trunkThickness);
-                          if (p.trunkLean !== undefined) setTrunkLean(p.trunkLean);
-                          if (p.trunkCurvature !== undefined) setTrunkCurvature(p.trunkCurvature);
-                          if (p.branchCount !== undefined) setBranchCount(p.branchCount);
-                          if (p.branchLength !== undefined) setBranchLength(p.branchLength);
-                          if (p.branchDistribution) setBranchDistribution(p.branchDistribution);
-                          if (p.canopyShape) setCanopyShape(p.canopyShape);
-                          if (p.canopySize !== undefined) setCanopySize(p.canopySize);
-                          if (p.leafDistribution) setLeafDistribution(p.leafDistribution);
-                          if (p.foliageCount !== undefined) setFoliageCount(p.foliageCount);
-                          if (p.foliageDensity !== undefined) setFoliageDensity(p.foliageDensity);
-                          if (p.trunkMaterial) setTrunkMaterial(p.trunkMaterial);
-                          if (p.leafMaterial) setLeafMaterial(p.leafMaterial);
-                          if (p.trunkColor) setTrunkColor(p.trunkColor);
-                          if (p.leafColor) setLeafColor(p.leafColor);
-                          if (p.variation !== undefined) setTreeVariation(p.variation);
-                          if (p.leafVariation !== undefined) setLeafVariation(p.leafVariation);
-                          if (p.colorVariation !== undefined) setColorVariation(p.colorVariation);
-                          if (p.detailLevel) setDetailLevel(p.detailLevel);
-                          setParsedPromptBadges(parsed.detectedKeywords);
+                          const parsed = applyParsedTreePromptToState(prompt);
+                          setTreeParamsManuallyEdited(false);
                           setNotification({
                             type: 'success',
                             message:
@@ -608,7 +615,10 @@ export const CreateWizardView: React.FC = () => {
                       <button
                         key={idx}
                         type="button"
-                        onClick={() => setPrompt(sug)}
+                        onClick={() => {
+                          setPrompt(sug);
+                          setTreeParamsManuallyEdited(false);
+                        }}
                         className="text-[11px] text-slate-400 hover:text-cyan-300 bg-slate-950 hover:bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-lg transition text-left cursor-pointer"
                       >
                         {sug}
@@ -747,7 +757,12 @@ export const CreateWizardView: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => setCurrentStep(3)}
+                onClick={() => {
+                  if (category === 'Trees & Vegetation' && inputMethod === 'text' && !treeParamsManuallyEdited) {
+                    applyParsedTreePromptToState(prompt);
+                  }
+                  setCurrentStep(3);
+                }}
                 className="px-5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer transition shadow-lg shadow-cyan-900/30"
               >
                 <span>Continuar al Paso 3</span>
@@ -897,7 +912,10 @@ export const CreateWizardView: React.FC = () => {
                         max={36}
                         step={1}
                         value={treeHeight}
-                        onChange={(e) => setTreeHeight(parseFloat(e.target.value))}
+                        onChange={(e) => {
+                          setTreeParamsManuallyEdited(true);
+                          setTreeHeight(parseFloat(e.target.value));
+                        }}
                         className="w-full accent-emerald-500"
                       />
                     </div>
@@ -1124,11 +1142,34 @@ export const CreateWizardView: React.FC = () => {
                         max={1}
                         step={0.05}
                         value={trunkCurvature}
-                        onChange={(e) => setTrunkCurvature(parseFloat(e.target.value))}
+                        onChange={(e) => {
+                          setTreeParamsManuallyEdited(true);
+                          setTrunkCurvature(parseFloat(e.target.value));
+                        }}
                         className="w-full accent-emerald-500"
                       />
                     </div>
 
+                    <div>
+                      <label className="text-[11px] text-slate-300 block mb-1">
+                        Raíces visibles: <span className="text-white font-mono">{rootFlareScale.toFixed(2)}x</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0.7}
+                        max={2.2}
+                        step={0.1}
+                        value={rootFlareScale}
+                        onChange={(e) => {
+                          setTreeParamsManuallyEdited(true);
+                          setRootFlareScale(parseFloat(e.target.value));
+                        }}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="text-[11px] text-slate-300 block mb-1">
                         Densidad follaje: <span className="text-white font-mono">{foliageDensity.toFixed(2)}x</span>
@@ -1139,7 +1180,10 @@ export const CreateWizardView: React.FC = () => {
                         max={2.0}
                         step={0.05}
                         value={foliageDensity}
-                        onChange={(e) => setFoliageDensity(parseFloat(e.target.value))}
+                        onChange={(e) => {
+                          setTreeParamsManuallyEdited(true);
+                          setFoliageDensity(parseFloat(e.target.value));
+                        }}
                         className="w-full accent-emerald-500"
                       />
                     </div>

@@ -18,6 +18,7 @@ export interface ParsedTreeParamsResult {
     trunkThickness?: number;
     trunkLean?: number;
     trunkCurvature?: number;
+    rootFlareScale?: number;
     branchCount?: number;
     branchLength?: number;
     branchDistribution?: 'tiered' | 'whorled' | 'alternating' | 'canopy_top';
@@ -94,12 +95,49 @@ export function parseNaturalLanguageToTreeParams(prompt: string): ParsedTreePara
   }
 
   // Trunk lean / curvature / irregular form
-  if (hasTerm(text, 'inclinado|torcido|curvo|irregular|retorcido|gnarled|leaning|curved|twisted|windswept')) {
+  if (hasTerm(text, 'ligeramente\\s+curvad|poco\\s+curv|slightly\\s+curved|gently\\s+curved', true)) {
+    params.trunkLean = 7;
+    params.trunkCurvature = 0.38;
+    params.variation = Math.max(params.variation ?? 0.35, 0.38);
+    keywords.push('slightly_curved_trunk');
+  } else if (
+    hasTerm(
+      text,
+      'inclinado|torcido|curvo|curvad|irregular|retorcido|sinuos|gnarled|leaning|curved|twisted|windswept',
+      true
+    )
+  ) {
     params.trunkLean = 12;
     params.trunkCurvature = 0.55;
     params.variation = 0.58;
     params.leafVariation = 0.55;
     keywords.push('curved_irregular');
+  }
+
+  // Visible / flared roots
+  if (
+    hasTerm(
+      text,
+      'ra[ií]ces\\s+visibles|ra[ií]ces\\s+expuestas|ra[ií]ces|visible\\s+roots|exposed\\s+roots|root\\s+flare|buttress\\s+roots',
+      true
+    )
+  ) {
+    params.rootFlareScale = 1.5;
+    keywords.push('visible_roots');
+  }
+
+  // Natural branches / branch distribution
+  if (
+    hasTerm(
+      text,
+      'ramas\\s+distribuidas\\s+de\\s+manera\\s+natural|ramas\\s+naturales|ramas\\s+distribuidas|natural\\s+branches',
+      true
+    )
+  ) {
+    params.branchDistribution = params.branchDistribution ?? 'tiered';
+    params.branchCount = params.branchCount ?? 5;
+    params.variation = Math.max(params.variation ?? 0.35, 0.4);
+    keywords.push('natural_branches');
   }
 
   // Canopy shape
@@ -132,7 +170,7 @@ export function parseNaturalLanguageToTreeParams(prompt: string): ParsedTreePara
     keywords.push('narrow_canopy');
   }
 
-  // Foliage density / dry tree
+  // Foliage density / dry tree / varied leaf cluster sizes
   if (hasTerm(text, 'seco|dry|muerto|dead|sin\\s+hojas|leafless|pelado|invierno\\s+seco')) {
     params.leafDistribution = 'sparse';
     params.foliageCount = 0;
@@ -152,6 +190,18 @@ export function parseNaturalLanguageToTreeParams(prompt: string): ParsedTreePara
     params.foliageDensity = 0.65;
     params.foliageCount = 2;
     keywords.push('sparse_foliage');
+  }
+
+  if (
+    /variaci[oó]n(?:\s+de)?\s+tama[ñn]o|tama[ñn]os?\s+variados|agrupaciones?\s+de\s+hojas|leaf\s+cluster\s+variation|varied\s+cluster\s+size/i.test(
+      text
+    )
+  ) {
+    params.leafVariation = Math.max(params.leafVariation ?? 0, 0.68);
+    params.variation = Math.max(params.variation ?? 0.35, 0.42);
+    params.foliageCount = params.foliageCount ?? 6;
+    params.leafDistribution = params.leafDistribution ?? 'clustered';
+    keywords.push('varied_clusters');
   }
 
   // Detail & style (low-poly vs high detail)

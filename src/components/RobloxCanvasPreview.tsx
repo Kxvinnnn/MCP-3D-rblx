@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Eye, RotateCcw, Sparkles, X, Layers, Box, CheckCircle2 } from 'lucide-react';
 import { RobloxWorldViewport3D } from './RobloxWorldViewport3D.tsx';
 import { Forge3DAsset } from '../utils/roblox3DEngine.ts';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 export interface UINodeData {
   class_name: string;
@@ -27,7 +28,7 @@ export const RobloxCanvasPreview: React.FC<RobloxCanvasPreviewProps> = ({
   const [sample3DAsset, setSample3DAsset] = useState<Forge3DAsset | null>(null);
 
   useEffect(() => {
-    fetch('/api/v1/assets')
+    forgeFetch('/api/v1/assets')
       .then((res) => res.json())
       .then((data) => {
         if (data.assets && data.assets.length > 0) {

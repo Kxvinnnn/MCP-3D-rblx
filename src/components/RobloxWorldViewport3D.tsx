@@ -30,6 +30,7 @@ import {
   convertImageTo3DHeightmapMesh,
 } from '../utils/roblox3DEngine.ts';
 import { default3DEngineProcessor } from './engines/3dEngine.ts';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 interface RobloxWorldViewport3DProps {
   asset: Forge3DAsset | null;
@@ -484,7 +485,7 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
         const xmlText = await file.text();
         const parsedAsset = parseRBXMXToForgeAsset(xmlText, file.name);
         try {
-          const resp = await fetch('/api/v1/assets/rebuild-luau', {
+          const resp = await forgeFetch('/api/v1/assets/rebuild-luau', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

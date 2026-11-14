@@ -18,6 +18,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { LocalBridgeStatusPanel } from './LocalBridgeStatusPanel.tsx';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 interface RojoStatusData {
   project_path: string;
@@ -52,8 +53,8 @@ export const RojoWorkflowGuide: React.FC = () => {
     setLoadingStatus(true);
     try {
       const [statusRes, manifestRes] = await Promise.all([
-        fetch('/api/v1/rojo/status'),
-        fetch('/api/v1/rojo/sync-manifest'),
+        forgeFetch('/api/v1/rojo/status'),
+        forgeFetch('/api/v1/rojo/sync-manifest'),
       ]);
       const statusData = await statusRes.json();
       const manifestData = await manifestRes.json();
@@ -77,7 +78,7 @@ export const RojoWorkflowGuide: React.FC = () => {
     setConfigFeedback(null);
     setConfigError(null);
     try {
-      const res = await fetch('/api/v1/rojo/configure', {
+      const res = await forgeFetch('/api/v1/rojo/configure', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -94,7 +95,7 @@ export const RojoWorkflowGuide: React.FC = () => {
       setConfigFeedback(
         `Proyecto Rojo configurado y default.project.json verificado (${data.synced_files_count} archivos .luau sincronizados).`
       );
-      const manifestRes = await fetch('/api/v1/rojo/sync-manifest');
+      const manifestRes = await forgeFetch('/api/v1/rojo/sync-manifest');
       const manifestData = await manifestRes.json();
       setManifestFiles(manifestData.files || []);
     } catch (err: any) {

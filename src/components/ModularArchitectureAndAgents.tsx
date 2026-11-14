@@ -16,6 +16,7 @@ import {
   Wrench,
   Eye,
 } from 'lucide-react';
+import { forgeFetch } from '../utils/forgeApiClient.ts';
 
 interface EngineDescriptor {
   id: string;
@@ -90,7 +91,7 @@ export const ModularArchitectureAndAgents: React.FC = () => {
   const [buildingWorld, setBuildingWorld] = useState<boolean>(false);
 
   useEffect(() => {
-    fetch('/api/v1/architecture')
+    forgeFetch('/api/v1/architecture')
       .then((res) => res.json())
       .then((data) => {
         if (data.engines) setEngines(data.engines);
@@ -113,7 +114,7 @@ export const ModularArchitectureAndAgents: React.FC = () => {
     setAgentStates(initialStates);
 
     try {
-      const response = await fetch('/api/v1/agents/orchestrate-stream', {
+      const response = await forgeFetch('/api/v1/agents/orchestrate-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -171,7 +172,7 @@ export const ModularArchitectureAndAgents: React.FC = () => {
   const handleBuildWorldScene = async () => {
     setBuildingWorld(true);
     try {
-      const res = await fetch('/api/v1/world/build-scene', {
+      const res = await forgeFetch('/api/v1/world/build-scene', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

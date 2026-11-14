@@ -34,7 +34,7 @@ pcall(function()
         savedSecurityToken = tostring(plugin:GetSetting("ForgeSecurityToken") or "")
     end
 end)
-local BACKEND_URL = if #savedBackendUrl > 0 then savedBackendUrl else "http://127.0.0.1:8000"
+local BACKEND_URL = if #savedBackendUrl > 0 then savedBackendUrl else "http://127.0.0.1:3000"
 local LOCAL_BRIDGE_URL = if #savedBridgeUrl > 0 then savedBridgeUrl else "http://127.0.0.1:48720"
 -- Security: No hardcoded usable default token in source code. Configure via the Plugin UI widget.
 local DEFAULT_LOCAL_TOKEN = ""
@@ -164,6 +164,44 @@ local function isFiniteNumberLuau(val: any): boolean
         return false
     end
     return n == n and n ~= math.huge and n ~= -math.huge
+end
+
+local function resolveRgbTupleLuau(colorRaw: any, fallback: { number }?): { number }
+    local fb = fallback or { 160, 165, 175 }
+    if type(colorRaw) == "string" then
+        local hex = string.match(colorRaw, "^%s*#?(%x%x%x%x%x%x)%s*$")
+        if hex then
+            local r = tonumber(string.sub(hex, 1, 2), 16)
+            local g = tonumber(string.sub(hex, 3, 4), 16)
+            local b = tonumber(string.sub(hex, 5, 6), 16)
+            if r and g and b then
+                return { r, g, b }
+            end
+        end
+        return { fb[1] or 160, fb[2] or 165, fb[3] or 175 }
+    end
+    if type(colorRaw) == "table" and #colorRaw >= 3 then
+        local r = tonumber(colorRaw[1])
+        local g = tonumber(colorRaw[2])
+        local b = tonumber(colorRaw[3])
+        if r and g and b and isFiniteNumberLuau(r) and isFiniteNumberLuau(g) and isFiniteNumberLuau(b) then
+            local isNormalized = r >= 0 and g >= 0 and b >= 0 and r <= 1 and g <= 1 and b <= 1
+                and ((math.floor(r) ~= r) or (math.floor(g) ~= g) or (math.floor(b) ~= b))
+            if isNormalized then
+                return {
+                    math.clamp(math.floor(r * 255 + 0.5), 0, 255),
+                    math.clamp(math.floor(g * 255 + 0.5), 0, 255),
+                    math.clamp(math.floor(b * 255 + 0.5), 0, 255),
+                }
+            end
+            return {
+                math.clamp(math.floor(r + 0.5), 0, 255),
+                math.clamp(math.floor(g + 0.5), 0, 255),
+                math.clamp(math.floor(b + 0.5), 0, 255),
+            }
+        end
+    end
+    return { fb[1] or 160, fb[2] or 165, fb[3] or 175 }
 end
 
 -- Construct a real MeshPart from vertex, normal, UV, and triangle index buffers via EditableMesh
@@ -813,10 +851,10 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
     end
     local geometryHash = computeLuauContentHash(table.concat(geomTokens, "|"))
 
-    local col = if type(partSpec.color) == "table" and #partSpec.color >= 3 then partSpec.color else { 148, 163, 184 }
-    local cr = math.clamp(math.floor((tonumber(col[1]) or 148) + 0.5), 0, 255)
-    local cg = math.clamp(math.floor((tonumber(col[2]) or 163) + 0.5), 0, 255)
-    local cb = math.clamp(math.floor((tonumber(col[3]) or 184) + 0.5), 0, 255)
+    local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
+    local cr = col[1]
+    local cg = col[2]
+    local cb = col[3]
     local matName = string.match(tostring(partSpec.material or "Metal"), "^%s*(.-)%s*$") or "Metal"
     if matName == "" then matName = "Metal" end
     local pbr = if type(partSpec.pbrMaterial) == "table" then partSpec.pbrMaterial else {}
@@ -1052,8 +1090,8 @@ local function construct3DModelFromSpec(
         )
         part.CFrame = spawnOrigin * localCF
 
-        local col = partSpec.color or { 160, 165, 175 }
-        part.Color = Color3.fromRGB(col[1] or 160, col[2] or 165, col[3] or 175)
+        local col = resolveRgbTupleLuau(partSpec.color, { 160, 165, 175 })
+        part.Color = Color3.fromRGB(col[1], col[2], col[3])
 
         local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
         if matEnum then
@@ -1158,7 +1196,7 @@ local function construct3DModelFromSpec(
                     position = { tonumber(pos[1]) or 0, tonumber(pos[2]) or 0, tonumber(pos[3]) or 0 },
                     rotation = canonicalMatrix9ToEulerDeg(rotMat),
                     rotationMatrix = rotMat,
-                    color = { col[1] or 160, col[2] or 165, col[3] or 175 },
+                    color = { col[1], col[2], col[3] },
                     material = part.Material.Name,
                     roughness = roughnessVal,
                     metalness = metalnessVal,
@@ -2032,8 +2070,8 @@ local function applyIncrementalModelUpdateInStudio(
                 rotMat[7], rotMat[8], rotMat[9]
             )
             newPart.CFrame = originCFrame * localCF
-            local col = partSpec.color or { 148, 163, 184 }
-            newPart.Color = Color3.fromRGB(col[1] or 148, col[2] or 163, col[3] or 184)
+            local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
+            newPart.Color = Color3.fromRGB(col[1], col[2], col[3])
             local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
             if matEnum then newPart.Material = matEnum end
             newPart.Transparency = tonumber(partSpec.transparency) or 0
@@ -2115,8 +2153,8 @@ local function applyIncrementalModelUpdateInStudio(
                     activePart.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
                 end
                 if matChanged then
-                    local col = partSpec.color or { 148, 163, 184 }
-                    activePart.Color = Color3.fromRGB(col[1] or 148, col[2] or 163, col[3] or 184)
+                    local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
+                    activePart.Color = Color3.fromRGB(col[1], col[2], col[3])
                     local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
                     if matEnum then activePart.Material = matEnum end
                     activePart.Transparency = tonumber(partSpec.transparency) or 0
@@ -2142,7 +2180,7 @@ local function applyIncrementalModelUpdateInStudio(
                     end
                     local okJson, encodedGeom = pcall(function()
                         local pos = partSpec.position or { 0, 1, 0 }
-                        local col = partSpec.color or { 148, 163, 184 }
+                        local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
                         return HttpService:JSONEncode({
                             hashSchemaVersion = syncMeta.hashSchemaVersion,
                             partId = syncMeta.partId,
@@ -2163,7 +2201,7 @@ local function applyIncrementalModelUpdateInStudio(
                             position = { tonumber(pos[1]) or 0, tonumber(pos[2]) or 0, tonumber(pos[3]) or 0 },
                             rotation = canonicalMatrix9ToEulerDeg(syncMeta.rotationMatrix),
                             rotationMatrix = syncMeta.rotationMatrix,
-                            color = { col[1] or 148, col[2] or 163, col[3] or 184 },
+                            color = { col[1], col[2], col[3] },
                             material = activePart.Material.Name,
                             roughness = tonumber(partSpec.roughness) or 0.35,
                             metalness = tonumber(partSpec.metalness) or 0.6,
@@ -2638,7 +2676,7 @@ end
 -- UI Construction for Plugin Widget
 local root = Instance.new("ScrollingFrame")
 root.Size = UDim2.fromScale(1, 1)
-root.CanvasSize = UDim2.new(0, 0, 0, 820)
+root.CanvasSize = UDim2.new(0, 0, 0, 960)
 root.ScrollBarThickness = 6
 root.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
 root.BorderSizePixel = 0
@@ -2761,8 +2799,34 @@ btnPushToForge.Size = UDim2.new(1, 0, 0, 32)
 btnPushToForge.BackgroundColor3 = Color3.fromRGB(217, 119, 6)
 btnPushToForge.LayoutOrder = 9
 
+local backendUrlBox = Instance.new("TextBox")
+backendUrlBox.PlaceholderText = "URL Backend (ej. http://127.0.0.1:3000)"
+backendUrlBox.Text = BACKEND_URL
+backendUrlBox.ClearTextOnFocus = false
+backendUrlBox.Font = Enum.Font.Code
+backendUrlBox.TextSize = 11
+backendUrlBox.TextColor3 = Color3.fromRGB(226, 232, 240)
+backendUrlBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+backendUrlBox.Size = UDim2.new(1, 0, 0, 26)
+backendUrlBox.TextXAlignment = Enum.TextXAlignment.Left
+backendUrlBox.LayoutOrder = 10
+backendUrlBox.Parent = root
+
+local bridgeUrlBox = Instance.new("TextBox")
+bridgeUrlBox.PlaceholderText = "URL Forge Local Bridge (ej. http://127.0.0.1:48720)"
+bridgeUrlBox.Text = LOCAL_BRIDGE_URL
+bridgeUrlBox.ClearTextOnFocus = false
+bridgeUrlBox.Font = Enum.Font.Code
+bridgeUrlBox.TextSize = 11
+bridgeUrlBox.TextColor3 = Color3.fromRGB(226, 232, 240)
+bridgeUrlBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+bridgeUrlBox.Size = UDim2.new(1, 0, 0, 26)
+bridgeUrlBox.TextXAlignment = Enum.TextXAlignment.Left
+bridgeUrlBox.LayoutOrder = 11
+bridgeUrlBox.Parent = root
+
 local tokenBox = Instance.new("TextBox")
-tokenBox.PlaceholderText = "X-Forge-Token (opcional, guardado en plugin:SetSetting)"
+tokenBox.PlaceholderText = "X-Forge-Token (guardado en plugin:SetSetting)"
 tokenBox.Text = FORGE_SECURITY_TOKEN
 tokenBox.ClearTextOnFocus = false
 tokenBox.Font = Enum.Font.Code
@@ -2771,20 +2835,16 @@ tokenBox.TextColor3 = Color3.fromRGB(226, 232, 240)
 tokenBox.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
 tokenBox.Size = UDim2.new(1, 0, 0, 26)
 tokenBox.TextXAlignment = Enum.TextXAlignment.Left
-tokenBox.LayoutOrder = 10
+tokenBox.LayoutOrder = 12
 tokenBox.Parent = root
 
-tokenBox.FocusLost:Connect(function()
-    FORGE_SECURITY_TOKEN = string.match(tokenBox.Text or "", "^%s*(.-)%s*$") or ""
-    pcall(function()
-        if plugin and type(plugin.SetSetting) == "function" then
-            plugin:SetSetting("ForgeSecurityToken", FORGE_SECURITY_TOKEN)
-        end
-    end)
-end)
+local btnSaveConfig = createSmallButton(root, "Guardar Configuración y Probar Bridge", 1)
+btnSaveConfig.Size = UDim2.new(1, 0, 0, 28)
+btnSaveConfig.BackgroundColor3 = Color3.fromRGB(15, 118, 110)
+btnSaveConfig.LayoutOrder = 13
 
 local outputLog = Instance.new("TextLabel")
-outputLog.Text = "Listo. Conecta FastAPI/Express en " .. BACKEND_URL
+outputLog.Text = "Listo. Conecta Forge Gateway/Backend en " .. BACKEND_URL
 outputLog.Font = Enum.Font.Code
 outputLog.TextSize = 11
 outputLog.TextColor3 = Color3.fromRGB(203, 213, 225)
@@ -2793,8 +2853,51 @@ outputLog.Size = UDim2.new(1, 0, 0, 180)
 outputLog.TextWrapped = true
 outputLog.TextXAlignment = Enum.TextXAlignment.Left
 outputLog.TextYAlignment = Enum.TextYAlignment.Top
-outputLog.LayoutOrder = 11
+outputLog.LayoutOrder = 14
 outputLog.Parent = root
+
+local function persistPluginSettings()
+    local nextBackend = string.gsub(string.match(backendUrlBox.Text or "", "^%s*(.-)%s*$") or "", "/+$", "")
+    local nextBridge = string.gsub(string.match(bridgeUrlBox.Text or "", "^%s*(.-)%s*$") or "", "/+$", "")
+    local nextToken = string.match(tokenBox.Text or "", "^%s*(.-)%s*$") or ""
+    if #nextBackend > 0 then BACKEND_URL = nextBackend end
+    if #nextBridge > 0 then LOCAL_BRIDGE_URL = nextBridge end
+    FORGE_SECURITY_TOKEN = nextToken
+    pcall(function()
+        if plugin and type(plugin.SetSetting) == "function" then
+            plugin:SetSetting("ForgeBackendUrl", BACKEND_URL)
+            plugin:SetSetting("ForgeLocalBridgeUrl", LOCAL_BRIDGE_URL)
+            plugin:SetSetting("ForgeSecurityToken", FORGE_SECURITY_TOKEN)
+        end
+    end)
+end
+
+backendUrlBox.FocusLost:Connect(persistPluginSettings)
+bridgeUrlBox.FocusLost:Connect(persistPluginSettings)
+tokenBox.FocusLost:Connect(persistPluginSettings)
+
+btnSaveConfig.MouseButton1Click:Connect(function()
+    persistPluginSettings()
+    outputLog.Text = "Probando conexión con Bridge (" .. LOCAL_BRIDGE_URL .. ") y Backend (" .. BACKEND_URL .. ")..."
+    task.spawn(function()
+        local selInfo = inspectCurrentStudioSelection()
+        local okBr, brResp = requestLocalBridge("/local/plugin/heartbeat", "POST", {
+            pluginVersion = "2.3.0",
+            placeName = game.Name,
+            selectedModelName = selInfo.selectedModelName,
+            selectedPartCount = selInfo.selectedPartCount,
+            pendingDestructiveConfirmations = #pendingDestructiveOperations,
+        })
+        local okBe, beResp = requestBackend("/api/v1/health", "GET", nil)
+        outputLog.Text = string.format(
+            "Configuración guardada.\nBridge (%s): %s\nBackend (%s): %s",
+            LOCAL_BRIDGE_URL,
+            if okBr then "OK (conectado)" else ("ERROR: " .. tostring(brResp)),
+            BACKEND_URL,
+            if okBe and type(beResp) == "table" then ("OK (" .. tostring(beResp.status or "healthy") .. ")") else ("ERROR: " .. tostring(beResp))
+        )
+    end)
+end)
 
 btnGenerate3D.MouseButton1Click:Connect(function()
     if #promptBox.Text < 3 then
@@ -2887,14 +2990,14 @@ bridgeStatusBanner.TextColor3 = Color3.fromRGB(148, 163, 184)
 bridgeStatusBanner.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
 bridgeStatusBanner.Size = UDim2.new(1, 0, 0, 22)
 bridgeStatusBanner.TextXAlignment = Enum.TextXAlignment.Left
-bridgeStatusBanner.LayoutOrder = 12
+bridgeStatusBanner.LayoutOrder = 15
 bridgeStatusBanner.Parent = root
 
 local confirmFrame = Instance.new("Frame")
 confirmFrame.Size = UDim2.new(1, 0, 0, 62)
 confirmFrame.BackgroundColor3 = Color3.fromRGB(69, 10, 10)
 confirmFrame.Visible = false
-confirmFrame.LayoutOrder = 13
+confirmFrame.LayoutOrder = 16
 confirmFrame.Parent = root
 
 local confirmCorner = Instance.new("UICorner")
@@ -3287,8 +3390,14 @@ task.spawn(function()
                 end
             end
         else
-            bridgeStatusBanner.Text = "⚪ Forge Local Bridge desconectado (" .. LOCAL_BRIDGE_URL .. ")"
-            bridgeStatusBanner.TextColor3 = Color3.fromRGB(148, 163, 184)
+            local errStr = tostring(resp or "")
+            if string.find(errStr, "401", 1, true) or string.find(errStr, "403", 1, true) then
+                bridgeStatusBanner.Text = "🔴 Bridge rechazó token (" .. errStr .. ") — verifica X-Forge-Token"
+                bridgeStatusBanner.TextColor3 = Color3.fromRGB(248, 113, 113)
+            else
+                bridgeStatusBanner.Text = "⚪ Forge Local Bridge desconectado (" .. LOCAL_BRIDGE_URL .. ")"
+                bridgeStatusBanner.TextColor3 = Color3.fromRGB(148, 163, 184)
+            end
         end
         task.wait(2.5)
     end
