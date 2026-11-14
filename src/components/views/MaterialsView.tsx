@@ -3,14 +3,10 @@ import {
   Sparkles,
   Palette,
   Eye,
-  CheckCircle2,
-  ShieldAlert,
   Send,
-  Layers,
   Box,
   Image as ImageIcon,
-  Check,
-  RotateCcw,
+  Save,
 } from 'lucide-react';
 import { useForge } from '../../context/ForgeContext.tsx';
 import {
@@ -99,7 +95,10 @@ const MATERIAL_PRESETS: MaterialPreset[] = [
 export const MaterialsView: React.FC = () => {
   const {
     activeAsset,
+    setActiveAsset,
+    assetLibrary,
     selectedPart,
+    setSelectedPart,
     applyAssetChange,
     saveAssetToDisk,
     pushToStudio,
@@ -127,22 +126,57 @@ export const MaterialsView: React.FC = () => {
 
   if (!activeAsset) {
     return (
-      <div className="py-20 text-center space-y-4 max-w-md mx-auto">
-        <div className="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500 mx-auto">
-          <Palette className="w-8 h-8" />
+      <div className="py-12 px-6 text-center space-y-5 max-w-xl mx-auto bg-slate-900/60 border border-slate-800 rounded-2xl my-6">
+        <div className="w-14 h-14 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-cyan-400 mx-auto">
+          <Palette className="w-7 h-7" />
         </div>
-        <h3 className="text-lg font-bold text-white">No hay modelo cargado para aplicar materiales</h3>
-        <p className="text-slate-400 text-xs leading-relaxed">
-          Selecciona un modelo desde Inicio o crea uno nuevo para personalizar sus texturas PBR.
-        </p>
-        <button
-          type="button"
-          onClick={() => setActiveTab('create')}
-          className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition"
-        >
-          <Sparkles className="w-4 h-4" />
-          <span>Crear nuevo modelo</span>
-        </button>
+        <div className="space-y-1.5">
+          <h3 className="text-lg font-bold text-white">No hay modelo cargado para pintar materiales</h3>
+          <p className="text-slate-400 text-xs leading-relaxed max-w-md mx-auto">
+            Selecciona un modelo de tu biblioteca aquí mismo o crea uno nuevo con el asistente 3D.
+          </p>
+        </div>
+
+        {assetLibrary.length > 0 && (
+          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 text-left space-y-2 max-w-md mx-auto">
+            <span className="text-xs font-semibold text-slate-300 block">
+              Abrir rápidamente desde tu biblioteca ({assetLibrary.length}):
+            </span>
+            <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+              {assetLibrary.slice(0, 6).map((item) => (
+                <button
+                  key={item.name}
+                  type="button"
+                  onClick={() => setActiveAsset(item)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 flex items-center justify-between text-xs cursor-pointer transition"
+                >
+                  <span className="font-semibold text-white truncate">{item.name}</span>
+                  <span className="text-[11px] font-mono text-slate-400 shrink-0 ml-2">
+                    {item.parts?.length || 0} pzs
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-center gap-3 pt-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab('create')}
+            className="px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>Crear nuevo modelo</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('home')}
+            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer transition"
+          >
+            Ver toda la biblioteca
+          </button>
+        </div>
       </div>
     );
   }
@@ -248,7 +282,6 @@ export const MaterialsView: React.FC = () => {
       const preset = MATERIAL_PRESETS.find((p) => p.id === selectedPresetId);
       const pattern = preset?.pattern || 'HexPlate';
 
-      // Endpoint /api/v1/assets/publish-pbr
       const res = await forgeFetch('/api/v1/assets/publish-pbr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -286,9 +319,9 @@ export const MaterialsView: React.FC = () => {
 
   return (
     <div className="space-y-6 pb-12 animate-in fade-in duration-200">
-      {/* Header & Concept Explanation */}
+      {/* Header & Top Action Bar */}
       <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
           <div>
             <div className="inline-flex items-center gap-2 text-cyan-400 text-xs font-semibold uppercase tracking-wider">
               <Palette className="w-3.5 h-3.5" />
@@ -299,41 +332,118 @@ export const MaterialsView: React.FC = () => {
             </h2>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <HelpTooltip
               term={FORGE_GLOSSARY.surfaceAppearance.term}
               explanation={FORGE_GLOSSARY.surfaceAppearance.explanation}
               variant="badge"
             />
+            <button
+              type="button"
+              onClick={handleApplyMaterialToAsset}
+              className="px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Aplicar Material</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => saveAssetToDisk(true)}
+              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
+            >
+              <Save className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Guardar</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => pushToStudio(activeAsset)}
+              className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>Enviar a Studio</span>
+            </button>
           </div>
         </div>
 
-        {/* Status Distinction Banner: Local Saved vs Cloud Published */}
-        <div className="mt-4 p-3 rounded-xl bg-slate-950 border border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-3">
-            <span className="text-slate-400 font-medium">Estado de Texturas:</span>
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-cyan-400" />
-              <span className="text-cyan-300 font-medium">Texturas Guardadas Localmente</span>
-            </div>
-            <span className="text-slate-600">|</span>
-            <span className="text-slate-500">Listas para previsualizar en sesión y en disco Rojo</span>
-          </div>
-
-          <div className="text-[11px] text-slate-500">
-            * Se asignará un AssetId permanente al publicar el paquete en Roblox Cloud.
+        {/* Clean Unboxed Status Line */}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span>Estado de Texturas:</span>
+            <strong className="text-cyan-300 font-semibold">Texturas PBR en sesión local y carpeta Rojo</strong>
+            <span className="text-slate-700">·</span>
+            <span>Haz clic en una pieza del visor 3D o usa el selector inferior para pintar por partes.</span>
           </div>
         </div>
       </div>
 
       {/* Main Grid: Left Controls (5 cols) | Right 3D Preview & 4 Channels (7 cols) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* LEFT COLUMN: Presets & Color Selectors (5 cols) */}
+        {/* LEFT COLUMN: Scope, Presets & Sliders (5 cols) */}
         <div className="lg:col-span-5 space-y-5">
-          {/* Material Presets Carousel / Grid */}
+          {/* Application Scope + Inline Part Selector */}
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
             <span className="text-xs font-bold text-white block">
-              1. Presets de Materiales
+              1. ¿Dónde deseas aplicar el material?
+            </span>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setApplyScope('all')}
+                className={`p-2.5 rounded-xl border text-center transition cursor-pointer font-semibold ${
+                  applyScope === 'all'
+                    ? 'bg-cyan-950/60 border-cyan-500 text-white'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                Todo el modelo ({activeAsset.parts.length} pzs)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setApplyScope('selected');
+                  if (!selectedPart && activeAsset.parts.length > 0) {
+                    setSelectedPart(activeAsset.parts[0]);
+                  }
+                }}
+                className={`p-2.5 rounded-xl border text-center transition cursor-pointer font-semibold ${
+                  applyScope === 'selected'
+                    ? 'bg-cyan-950/60 border-cyan-500 text-white'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                Una pieza específica
+              </button>
+            </div>
+
+            {applyScope === 'selected' && (
+              <div className="pt-1">
+                <label className="text-[11px] text-slate-400 block mb-1">
+                  Selecciona la pieza del modelo:
+                </label>
+                <select
+                  aria-label="Seleccionar pieza para aplicar material"
+                  value={selectedPart?.name || activeAsset.parts[0]?.name || ''}
+                  onChange={(e) => {
+                    const found = activeAsset.parts.find((p) => p.name === e.target.value);
+                    if (found) setSelectedPart(found);
+                  }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 cursor-pointer"
+                >
+                  {activeAsset.parts.map((part, idx) => (
+                    <option key={part.name + idx} value={part.name}>
+                      {idx + 1}. {part.name} ({part.material || 'Metal'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* Material Presets Grid */}
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
+            <span className="text-xs font-bold text-white block">
+              2. Elige un Acabado Predefinido (Preset)
             </span>
 
             <div className="grid grid-cols-2 gap-2.5">
@@ -355,7 +465,7 @@ export const MaterialsView: React.FC = () => {
                           {preset.name}
                         </span>
                         <div
-                          className="w-3.5 h-3.5 rounded-full border border-white/20 shadow-inner"
+                          className="w-3.5 h-3.5 rounded-full border border-white/20 shadow-inner shrink-0"
                           style={{ backgroundColor: preset.defaultAlbedo }}
                         />
                       </div>
@@ -364,7 +474,7 @@ export const MaterialsView: React.FC = () => {
                       </p>
                     </div>
 
-                    <div className="mt-2 text-[10px] text-slate-500 font-mono flex items-center justify-between">
+                    <div className="mt-2 text-[10px] text-slate-500 font-mono tabular-nums flex items-center justify-between">
                       <span>R: {preset.roughness}</span>
                       <span>M: {preset.metalness}</span>
                     </div>
@@ -377,7 +487,7 @@ export const MaterialsView: React.FC = () => {
           {/* Color & Accent Palettes */}
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
             <span className="text-xs font-bold text-white block">
-              2. Color Base y Emisivo
+              3. Color Base, Rugosidad y Metalicidad
             </span>
 
             <div className="grid grid-cols-2 gap-3">
@@ -425,7 +535,7 @@ export const MaterialsView: React.FC = () => {
               <div>
                 <div className="flex justify-between text-xs text-slate-300 mb-1">
                   <span>Rugosidad (Roughness / Brillo difuso):</span>
-                  <span className="font-mono text-cyan-400">{roughness}</span>
+                  <span className="font-mono tabular-nums text-cyan-400">{roughness}</span>
                 </div>
                 <input
                   type="range"
@@ -441,7 +551,7 @@ export const MaterialsView: React.FC = () => {
               <div>
                 <div className="flex justify-between text-xs text-slate-300 mb-1">
                   <span>Metalicidad (Metalness / Conductividad):</span>
-                  <span className="font-mono text-cyan-400">{metalness}</span>
+                  <span className="font-mono tabular-nums text-cyan-400">{metalness}</span>
                 </div>
                 <input
                   type="range"
@@ -455,38 +565,6 @@ export const MaterialsView: React.FC = () => {
               </div>
             </div>
 
-            {/* Application Scope */}
-            <div className="pt-2 border-t border-slate-800 space-y-2">
-              <span className="text-xs font-semibold text-slate-300 block">
-                Alcance de Aplicación:
-              </span>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setApplyScope('all')}
-                  className={`p-2 rounded-lg border text-center transition cursor-pointer ${
-                    applyScope === 'all'
-                      ? 'bg-cyan-950/60 border-cyan-500 text-white font-medium'
-                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Todas las partes ({activeAsset.parts.length})
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setApplyScope('selected')}
-                  className={`p-2 rounded-lg border text-center transition cursor-pointer ${
-                    applyScope === 'selected'
-                      ? 'bg-cyan-950/60 border-cyan-500 text-white font-medium'
-                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {selectedPart ? selectedPart.name : 'Pieza actual'}
-                </button>
-              </div>
-            </div>
-
             {/* Primary Action Button */}
             <button
               type="button"
@@ -497,8 +575,8 @@ export const MaterialsView: React.FC = () => {
               <Sparkles className="w-4 h-4 text-cyan-200" />
               <span>
                 {isPublishing
-                  ? 'Generando SurfaceAppearance...'
-                  : 'Generar SurfaceAppearance para Roblox'}
+                  ? 'Aplicando y guardando SurfaceAppearance...'
+                  : 'Aplicar y Guardar SurfaceAppearance PBR'}
               </span>
             </button>
           </div>
@@ -511,19 +589,28 @@ export const MaterialsView: React.FC = () => {
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-white flex items-center gap-1.5">
                 <Eye className="w-4 h-4 text-cyan-400" />
-                <span>Previsualización 3D en Tiempo Real</span>
+                <span>Previsualización 3D Interactiva</span>
               </span>
               <button
                 type="button"
                 onClick={() => setActiveTab('edit')}
-                className="text-xs text-slate-400 hover:text-cyan-300 transition cursor-pointer"
+                className="text-xs text-slate-300 hover:text-cyan-300 flex items-center gap-1 transition cursor-pointer font-semibold"
               >
-                Abrir en Editor 3D ›
+                <Box className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Abrir en Editor 3D ›</span>
               </button>
             </div>
 
-            <div className="w-full h-64 rounded-xl overflow-hidden border border-slate-800 bg-black/80 relative">
-              <RobloxWorldViewport3D asset={activeAsset} />
+            <div className="w-full h-72 rounded-xl overflow-hidden border border-slate-800 bg-black/80 relative">
+              <RobloxWorldViewport3D
+                asset={activeAsset}
+                onPartSelected={(part) => {
+                  if (part) {
+                    setSelectedPart(part);
+                    setApplyScope('selected');
+                  }
+                }}
+              />
             </div>
           </div>
 
@@ -531,10 +618,10 @@ export const MaterialsView: React.FC = () => {
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-2">
               <span className="text-xs font-bold text-white">
-                Inspección de los 4 Canales PBR
+                Inspección de los 4 Canales PBR (SurfaceAppearance)
               </span>
               <span className="text-[11px] text-slate-400 font-mono">
-                {MATERIAL_PRESETS.find((p) => p.id === selectedPresetId)?.pattern || 'HexPlate'} • 512x512
+                {MATERIAL_PRESETS.find((p) => p.id === selectedPresetId)?.pattern || 'HexPlate'} · 512x512
               </span>
             </div>
 

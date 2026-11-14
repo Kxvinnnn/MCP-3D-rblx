@@ -1,16 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  FolderGit2,
-  KeyRound,
-  PlugZap,
-  RefreshCw,
-  ShieldCheck,
   Wifi,
   WifiOff,
+  Download,
+  RefreshCw,
+  FolderSync,
+  Terminal,
+  Copy,
+  Check,
+  KeyRound,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import {
   forgeFetch,
@@ -18,349 +18,334 @@ import {
   setStoredForgeToken,
 } from '../utils/forgeApiClient.ts';
 
-interface BridgeStatusResponse {
-  bridgeConnected: boolean;
-  bridgeVersion: string;
-  protocolVersion: string;
-  sessionActive: boolean;
-  lastHeartbeatAt: string | null;
-  activeProject: string | null;
-  rojo: {
-    projectName: string | null;
-    projectConnected: boolean;
-    defaultProjectJsonFound: boolean;
-    rojoCliInstalled: boolean;
-    rojoVersion: string | null;
-    rojoServePort: number;
-    rojoServerListening: boolean;
-    syncedFilesCount: number;
-  };
-  robloxStudio: {
-    connected: boolean;
-    lastSeenAt: string | null;
-    pluginVersion: string | null;
-    placeName: string | null;
-    selectedModelName: string | null;
-    selectedPartCount: number;
-    pendingDestructiveConfirmations: number;
-  };
-  pendingTasksCount: number;
-  pendingTasks: Array<{
-    taskId: string;
-    operation: string;
-    status: string;
-    correlationId: string;
-    timestamp: string;
-  }>;
-  recentErrors: Array<{
-    taskId: string;
-    operation: string;
-    error: string;
-    timestamp: string;
-  }>;
+interface BridgeStatus {
+  online: boolean;
+  service?: string;
+  version?: string;
+  bridgePort?: number;
+  projectRoot?: string;
+  rojoAssetsDir?: string;
+  rojoFilesCount?: number;
+  pendingStudioQueue?: number;
+  syncedFromStudioCount?: number;
+  pluginConnected?: boolean;
+  pluginLastSeen?: number | null;
+  error?: string;
 }
 
 export const LocalBridgeStatusPanel: React.FC = () => {
-  const [status, setStatus] = useState<BridgeStatusResponse | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [reconnecting, setReconnecting] = useState<boolean>(false);
-  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({ online: false });
+  const [mainServerPluginStatus, setMainServerPluginStatus] = useState<{
+    connected: boolean;
+    pendingQueueCount: number;
+    syncedFromStudioCount: number;
+    rojoFilesCount?: number;
+  }>({ connected: false, pendingQueueCount: 0, syncedFromStudioCount: 0 });
+  const [isChecking, setIsChecking] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
 
-  const [tokenInput, setTokenInput] = useState<string>(() => getStoredForgeToken());
-  const [authError, setAuthError] = useState<string | null>(null);
+  // API & Bridge Authentication Token (X-Forge-Token)
+  const [apiTokenInput, setApiTokenInput] = useState<string>(() => getStoredForgeToken());
+  const [tokenSavedMsg, setTokenSavedMsg] = useState(false);
+  const [authRequiredWarning, setAuthRequiredWarning] = useState<string | null>(null);
+  const [showAuthConfig, setShowAuthConfig] = useState(false);
 
-  const fetchBridgeStatus = async () => {
+  const checkBridgeAndServer = useCallback(async () => {
+    setIsChecking(true);
+    setAuthRequiredWarning(null);
+    const currentBridgeToken = getStoredForgeToken();
+    const bridgeHeaders: Record<string, string> = {};
+    if (currentBridgeToken) {
+      bridgeHeaders['X-Forge-Token'] = currentBridgeToken;
+    }
+
+    // 1. Check standalone Local Bridge on 127.0.0.1:44877
     try {
-      const res = await forgeFetch('/api/v1/bridge/status');
+      const res = await fetch('http://127.0.0.1:44877/health', {
+        signal: AbortSignal.timeout(1800),
+        headers: bridgeHeaders,
+      });
       if (res.status === 401 || res.status === 403) {
-        setAuthError(
-          'El backend requirió X-Forge-Token válido (HTTP 401). Configura el token arriba y pulsa "Guardar Token".'
-        );
+        setAuthRequiredWarning('El Local Bridge requiere un token X-Forge-Token válido.');
+        setShowAuthConfig(true);
+        setBridgeStatus({ online: false, error: 'Token requerido (401/403)' });
       } else if (res.ok) {
-        setAuthError(null);
         const data = await res.json();
-        setStatus(data);
+        setBridgeStatus({ online: true, ...data });
+      } else {
+        setBridgeStatus({ online: false });
       }
     } catch {
-      // Ignore transient network errors
-    } finally {
-      setLoading(false);
+      setBridgeStatus({ online: false });
     }
-  };
 
-  useEffect(() => {
-    fetchBridgeStatus();
-    const timer = setInterval(fetchBridgeStatus, 3000);
-    return () => clearInterval(timer);
+    // 2. Check integrated server plugin status on /api/v1/studio/plugin-status
+    try {
+      const res2 = await forgeFetch('/api/v1/studio/plugin-status');
+      if (res2.status === 401 || res2.status === 403) {
+        setAuthRequiredWarning(
+          'El servidor principal requiere un token X-Forge-Token válido. Ingrésalo abajo.'
+        );
+        setShowAuthConfig(true);
+      } else if (res2.ok) {
+        const data2 = await res2.json();
+        setMainServerPluginStatus({
+          connected: data2.connected || false,
+          pendingQueueCount: data2.pendingQueueCount || 0,
+          syncedFromStudioCount: data2.syncedFromStudioCount || 0,
+        });
+      }
+    } catch {
+      // Ignore network error
+    }
+
+    // 3. Check Rojo status on /api/v1/rojo-status
+    try {
+      const res3 = await forgeFetch('/api/v1/rojo-status');
+      if (res3.ok) {
+        const data3 = await res3.json();
+        setMainServerPluginStatus((prev) => ({
+          ...prev,
+          rojoFilesCount: data3.count || 0,
+        }));
+      }
+    } catch {
+      // Ignore
+    }
+
+    setIsChecking(false);
   }, []);
 
-  const handleSaveToken = async () => {
-    setStoredForgeToken(tokenInput);
-    setAuthError(null);
-    setActionMessage(
-      tokenInput.trim()
-        ? 'Token X-Forge-Token guardado en este navegador. Verificando conexión...'
-        : 'Token limpiado de este navegador.'
-    );
-    await fetchBridgeStatus();
-  };
+  useEffect(() => {
+    checkBridgeAndServer();
+    const interval = setInterval(checkBridgeAndServer, 8000);
+    return () => clearInterval(interval);
+  }, [checkBridgeAndServer]);
 
-  const handleRequestReconnect = async () => {
-    setReconnecting(true);
-    setActionMessage(null);
+  const handleDownloadPlugin = async () => {
     try {
-      const res = await forgeFetch('/api/v1/bridge/reconnect', { method: 'POST' });
-      if (res.status === 401 || res.status === 403) {
-        setActionMessage('HTTP 401: Verifica tu X-Forge-Token antes de reconectar.');
-      } else if (res.ok) {
-        setActionMessage('Solicitud de reconexión y renovación de sesión enviada al puente local.');
-        await fetchBridgeStatus();
+      const res = await forgeFetch('/api/v1/studio/download-plugin');
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
       }
-    } finally {
-      setReconnecting(false);
-    }
-  };
-
-  const handleCheckRojoBuild = async () => {
-    setActionMessage('Verificando compilación en el puente local...');
-    try {
-      const res = await forgeFetch('/api/v1/bridge/enqueue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          operation: 'rojo.check_build',
-          payload: {},
-          wait_for_completion: true,
-          timeout_ms: 12000,
-        }),
-      });
-      const data = await res.json();
-      if (res.status === 401 || res.status === 403) {
-        setActionMessage('HTTP 401: Configura un X-Forge-Token válido para consultar el puente.');
-      } else if (data.status === 'completed' && data.result) {
-        setActionMessage(
-          data.result.valid
-            ? `Compilación Rojo verificada (${data.result.checkedFilesCount} módulos Luau validados).`
-            : `Errores de compilación detectados: ${(data.result.errors || []).join(', ')}`
-        );
-      } else {
-        setActionMessage(data.error || 'Tarea encolada en el puente.');
-      }
-      await fetchBridgeStatus();
+      const code = await res.text();
+      const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'ForgeAIStudioPlugin.server.luau';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     } catch (err: any) {
-      setActionMessage(`Error al consultar puente: ${err.message}`);
+      setAuthRequiredWarning(
+        `No se pudo descargar el plugin (${err.message || 'Verifica X-Forge-Token'}).`
+      );
+      setShowAuthConfig(true);
     }
   };
 
-  const bridgeConnected = Boolean(status?.bridgeConnected);
-  const studioConnected = Boolean(status?.robloxStudio?.connected);
-  const rojoListening = Boolean(status?.rojo?.rojoServerListening);
+  const handleCopyCommand = () => {
+    navigator.clipboard.writeText('cd forge-bridge && npm install && npm start');
+    setCopiedCmd(true);
+    setTimeout(() => setCopiedCmd(false), 2000);
+  };
+
+  const isAnyPluginConnected = bridgeStatus.pluginConnected || mainServerPluginStatus.connected;
+
+  const handleSaveTokens = () => {
+    setStoredForgeToken(apiTokenInput);
+    setTokenSavedMsg(true);
+    setTimeout(() => setTokenSavedMsg(false), 2500);
+    checkBridgeAndServer();
+  };
 
   return (
-    <div className="p-6 rounded-2xl bg-[#0d1117] border border-cyan-500/30 shadow-xl flex flex-col gap-5">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
-        <div className="flex items-center gap-3">
-          <div
-            className={`w-10 h-10 rounded-xl flex items-center justify-center border ${
-              bridgeConnected
-                ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
-                : 'bg-slate-900 border-slate-700 text-slate-400'
+    <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <FolderSync className="w-4 h-4 text-cyan-400" />
+            <span>Estado de Puentes y Plugin de Roblox Studio</span>
+          </h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Descarga el plugin oficial para Roblox Studio o supervisa el puente local.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowAuthConfig(!showAuthConfig)}
+            className={`px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition ${
+              showAuthConfig || authRequiredWarning
+                ? 'bg-amber-950/60 border-amber-500/60 text-amber-200'
+                : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
             }`}
           >
-            {bridgeConnected ? <Wifi className="w-5 h-5" /> : <WifiOff className="w-5 h-5" />}
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="text-base font-bold text-white">
-                Conexión Local — Forge Local Bridge (Windows 127.0.0.1)
-              </h3>
-              <span
-                className={`px-2.5 py-0.5 rounded-full text-[11px] font-mono font-bold ${
-                  bridgeConnected
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                }`}
-              >
-                {bridgeConnected ? 'CONECTADO' : 'DESCONECTADO'}
-              </span>
+            <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+            <span>Tokens de Seguridad</span>
+            {showAuthConfig ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+
+          <button
+            type="button"
+            onClick={checkBridgeAndServer}
+            disabled={isChecking}
+            className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 flex items-center gap-1.5 cursor-pointer transition"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin text-cyan-400' : ''}`} />
+            <span>Refrescar</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadPlugin}
+            className="px-3.5 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Descargar Plugin (.luau)</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Collapsible Token Configuration */}
+      {showAuthConfig && (
+        <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+              <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+              <span>Autenticación X-Forge-Token (Servidor API y Local Bridge)</span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Enlace saliente Zero-Inbound entre Google AI Studio / Cloud Run, Rojo 7.x y el Plugin de Roblox Studio (sin exponer rutas locales ni secretos).
-            </p>
+            {authRequiredWarning && (
+              <span className="text-[11px] font-semibold text-amber-400">
+                {authRequiredWarning}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-2.5">
+            <input
+              type="password"
+              value={apiTokenInput}
+              onChange={(e) => setApiTokenInput(e.target.value)}
+              placeholder="FORGE_SECURITY_TOKEN (X-Forge-Token)"
+              className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+            />
+            <button
+              type="button"
+              onClick={handleSaveTokens}
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-cyan-600 text-slate-200 hover:text-white text-xs font-semibold cursor-pointer transition flex items-center justify-center gap-1.5 whitespace-nowrap"
+            >
+              {tokenSavedMsg ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <KeyRound className="w-3.5 h-3.5" />}
+              <span>{tokenSavedMsg ? 'Token guardado' : 'Guardar Token'}</span>
+            </button>
           </div>
         </div>
+      )}
 
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleCheckRojoBuild}
-            disabled={!bridgeConnected}
-            className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs text-cyan-300 font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Verificar Build Rojo</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleRequestReconnect}
-            disabled={reconnecting}
-            className="px-3.5 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-xs text-white font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${reconnecting || loading ? 'animate-spin' : ''}`} />
-            <span>Solicitar Reconexión</span>
-          </button>
-        </div>
-      </div>
-
-      <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
-        <div className="flex items-center gap-2 text-xs text-slate-300 shrink-0">
-          <KeyRound className="w-4 h-4 text-cyan-400" />
-          <span className="font-mono font-semibold">X-Forge-Token:</span>
-        </div>
-        <input
-          type="password"
-          value={tokenInput}
-          onChange={(e) => setTokenInput(e.target.value)}
-          placeholder="Ingresa el token de seguridad del Bridge / Backend (opcional en dev)"
-          className="flex-1 rounded-lg bg-slate-900 border border-slate-700 px-3 py-1.5 text-xs font-mono text-cyan-200 focus:outline-none focus:border-cyan-500"
-        />
-        <button
-          type="button"
-          onClick={handleSaveToken}
-          className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white cursor-pointer shrink-0"
+      {/* 3 Status Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {/* Card 1: Local Bridge (Port 44877) */}
+        <div
+          className={`p-3.5 rounded-xl border ${
+            bridgeStatus.online
+              ? 'bg-emerald-950/20 border-emerald-500/40'
+              : 'bg-slate-950/60 border-slate-800'
+          }`}
         >
-          Guardar Token
-        </button>
-      </div>
-
-      {authError && (
-        <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-          <span>{authError}</span>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs font-semibold text-slate-300">
+              Forge Local Bridge (:44877)
+            </span>
+            {bridgeStatus.online ? (
+              <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-400">
+                <Wifi className="w-3 h-3" /> ACTIVO
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-[11px] font-semibold text-slate-500">
+                <WifiOff className="w-3 h-3" /> OFFLINE
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            {bridgeStatus.online
+              ? `Sincronizando en disco (${bridgeStatus.rojoFilesCount || 0} archivos Rojo).`
+              : 'Opcional si usas AI Studio en la nube y quieres conectar con Roblox Studio Desktop.'}
+          </p>
         </div>
-      )}
 
-      {actionMessage && (
-        <div className="p-3 rounded-xl bg-cyan-950/50 border border-cyan-500/40 text-cyan-200 text-xs flex items-center gap-2">
-          <Activity className="w-4 h-4 text-cyan-400 shrink-0" />
-          <span>{actionMessage}</span>
+        {/* Card 2: Roblox Studio Plugin */}
+        <div
+          className={`p-3.5 rounded-xl border ${
+            isAnyPluginConnected
+              ? 'bg-cyan-950/20 border-cyan-500/40'
+              : 'bg-slate-950/60 border-slate-800'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs font-semibold text-slate-300">
+              Plugin de Roblox Studio
+            </span>
+            {isAnyPluginConnected ? (
+              <span className="flex items-center gap-1 text-[11px] font-semibold text-cyan-400">
+                <Wifi className="w-3 h-3" /> CONECTADO
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-[11px] font-semibold text-amber-400">
+                EN ESPERA
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-400 leading-relaxed tabular-nums">
+            {isAnyPluginConnected
+              ? `Plugin activo. En cola: ${
+                  bridgeStatus.pendingStudioQueue ?? mainServerPluginStatus.pendingQueueCount
+                } · Importados: ${
+                  bridgeStatus.syncedFromStudioCount ?? mainServerPluginStatus.syncedFromStudioCount
+                }`
+              : 'Instala el plugin .luau en Roblox Studio y presiona "Connect".'}
+          </p>
         </div>
-      )}
 
-      {/* Tarjetas de Estado en Vivo */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
-          <span className="text-[10px] font-mono uppercase text-slate-400">
-            Versión del Puente &amp; Protocolo
-          </span>
-          <div className="text-sm font-bold text-white mt-1 font-mono flex items-center gap-2">
-            <PlugZap className="w-4 h-4 text-cyan-400" />
-            <span>
-              v{status?.bridgeVersion || '2.3.0'} (Proto v{status?.protocolVersion || '1.0'})
+        {/* Card 3: Rojo Directory */}
+        <div className="p-3.5 rounded-xl border bg-slate-950/60 border-slate-800">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs font-semibold text-slate-300">
+              Repositorio Rojo (Assets3D)
+            </span>
+            <span className="text-[11px] font-mono tabular-nums text-indigo-400 font-semibold">
+              {bridgeStatus.rojoFilesCount ?? mainServerPluginStatus.rojoFilesCount ?? 0} modelos
             </span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-1">
-            {status?.lastHeartbeatAt
-              ? `Último heartbeat: ${new Date(status.lastHeartbeatAt).toLocaleTimeString()}`
-              : 'Esperando conexión desde tu PC Windows...'}
-          </p>
-        </div>
-
-        <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
-          <span className="text-[10px] font-mono uppercase text-slate-400">
-            Proyecto Activo (Rojo)
-          </span>
-          <div className="text-sm font-bold text-emerald-400 mt-1 font-mono flex items-center gap-1.5">
-            <FolderGit2 className="w-4 h-4" />
-            <span>{status?.activeProject || status?.rojo?.projectName || 'Sin vincular'}</span>
-          </div>
-          <p className="text-[11px] text-slate-400 mt-1">
-            {rojoListening
-              ? `Servidor Rojo activo (:${status?.rojo?.rojoServePort || 34872}) • ${status?.rojo?.syncedFilesCount || 0} módulos`
-              : `Rojo CLI: ${status?.rojo?.rojoVersion || 'En espera de rojo serve'}`}
-          </p>
-        </div>
-
-        <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
-          <span className="text-[10px] font-mono uppercase text-slate-400">
-            Estado de Roblox Studio
-          </span>
-          <div
-            className={`text-sm font-bold mt-1 font-mono flex items-center gap-1.5 ${
-              studioConnected ? 'text-emerald-400' : 'text-amber-300'
-            }`}
-          >
-            <CheckCircle2 className="w-4 h-4" />
-            <span>{studioConnected ? 'Plugin Conectado' : 'Plugin Desconectado'}</span>
-          </div>
-          <p className="text-[11px] text-slate-400 mt-1">
-            {studioConnected
-              ? `Selección: ${status?.robloxStudio?.selectedModelName || 'Ninguna'} (${status?.robloxStudio?.selectedPartCount || 0} partes)`
-              : 'Abre Roblox Studio con el Plugin Forge v2.3.0'}
-          </p>
-        </div>
-
-        <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
-          <span className="text-[10px] font-mono uppercase text-slate-400">
-            Cola de Tareas &amp; Errores
-          </span>
-          <div className="text-sm font-bold text-purple-300 mt-1 font-mono flex items-center gap-1.5">
-            <Clock className="w-4 h-4" />
-            <span>{status?.pendingTasksCount || 0} tarea(s) pendiente(s)</span>
-          </div>
-          <p className="text-[11px] text-slate-400 mt-1">
-            Errores recientes: {(status?.recentErrors || []).length}
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            Ruta: <code className="text-slate-200">src/shared/Assets3D/</code> lista para{' '}
+            <code className="text-cyan-300">rojo serve</code>.
           </p>
         </div>
       </div>
 
-      {/* Lista de Tareas Pendientes y Errores Recientes */}
-      {((status?.pendingTasks && status.pendingTasks.length > 0) ||
-        (status?.recentErrors && status.recentErrors.length > 0)) && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
-            <div className="text-xs font-mono font-bold text-cyan-400 mb-2">
-              Tareas Pendientes en Cola ({status?.pendingTasks?.length || 0})
-            </div>
-            {status?.pendingTasks && status.pendingTasks.length > 0 ? (
-              <div className="space-y-1.5 max-h-32 overflow-y-auto font-mono text-[11px]">
-                {status.pendingTasks.map((t) => (
-                  <div
-                    key={t.taskId}
-                    className="flex items-center justify-between px-2.5 py-1.5 rounded bg-slate-900 text-slate-200"
-                  >
-                    <span>{t.operation}</span>
-                    <span className="text-amber-300">{t.status}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-500">No hay tareas pendientes.</p>
-            )}
+      {/* Quick Start Command if Bridge is Offline */}
+      {!bridgeStatus.online && (
+        <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <Terminal className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span>
+              ¿Ejecutas Roblox Studio en tu PC? Inicia el puente local con:{' '}
+              <code className="text-cyan-300 font-mono bg-slate-900 px-1.5 py-0.5 rounded">
+                cd forge-bridge && npm install && npm start
+              </code>
+            </span>
           </div>
-
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
-            <div className="text-xs font-mono font-bold text-rose-400 mb-2 flex items-center gap-1.5">
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Errores Recientes ({status?.recentErrors?.length || 0})</span>
-            </div>
-            {status?.recentErrors && status.recentErrors.length > 0 ? (
-              <div className="space-y-1.5 max-h-32 overflow-y-auto font-mono text-[11px]">
-                {status.recentErrors.map((e, idx) => (
-                  <div
-                    key={`${e.taskId}-${idx}`}
-                    className="px-2.5 py-1.5 rounded bg-rose-950/40 border border-rose-500/30 text-rose-200"
-                  >
-                    <div className="font-bold">{e.operation}</div>
-                    <div className="truncate">{e.error}</div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-500">Sin errores registrados.</p>
-            )}
-          </div>
+          <button
+            type="button"
+            onClick={handleCopyCommand}
+            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 flex items-center gap-1 cursor-pointer self-start sm:self-auto shrink-0"
+          >
+            {copiedCmd ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+            <span>{copiedCmd ? 'Copiado' : 'Copiar comando'}</span>
+          </button>
         </div>
       )}
     </div>

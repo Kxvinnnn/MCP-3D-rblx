@@ -19,7 +19,6 @@ import {
   verifyTokenConstantTime,
 } from './src/server/engines/bridgeCoordinatorEngine.ts';
 import {
-  FORGE_ASSET_CATEGORIES,
   synthesizeSeededProcedural3DAsset,
 } from './src/server/engines/procedural3DGenerator.ts';
 import {
@@ -45,7 +44,6 @@ import {
   parseRbxmxFromPartsServer,
   restoreAssetVersionServer,
   splitOversizedMeshPartInput,
-  synthesizeProceduralMeshData,
   upsertAssetInLibraryServer,
   validateAndDecodePngBuffer,
   validatePublishedRobloxMeshId,

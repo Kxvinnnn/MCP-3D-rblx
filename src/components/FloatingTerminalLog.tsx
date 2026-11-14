@@ -7,7 +7,6 @@ import {
   CheckCircle2,
   FolderSync,
   Sparkles,
-  AlertTriangle,
   ChevronDown,
   ChevronUp,
   Activity,

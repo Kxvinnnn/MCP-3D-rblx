@@ -2,15 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import {
   ChevronDown,
   ChevronUp,
   Download,
   Upload,
-  Box,
   Layers,
   Shield,
   UserCheck,
@@ -28,6 +24,7 @@ import {
   exportAssetToGLTF,
   parseRBXMXToForgeAsset,
   convertImageTo3DHeightmapMesh,
+  triggerBlobDownload,
 } from '../utils/roblox3DEngine.ts';
 import { default3DEngineProcessor } from './engines/3dEngine.ts';
 import { forgeFetch } from '../utils/forgeApiClient.ts';
@@ -51,9 +48,6 @@ interface RobloxWorldViewport3DProps {
 const _targetCamPos = new THREE.Vector3(9, 6.5, 11);
 const _targetLookAt = new THREE.Vector3(0, 2.2, 0);
 const _partOffsetVec = new THREE.Vector3();
-const _box3 = new THREE.Box3();
-const _boxSize = new THREE.Vector3();
-const _boxCenter = new THREE.Vector3();
 
 export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
   asset,
@@ -568,51 +562,27 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
   // Export current 3D model to native Roblox Studio .RBXMX XML Model
   const handleDownloadRBXMX = () => {
     if (!asset) return;
-    const rbxmxXml = exportAssetToRBXMX(asset);
-    const blob = new Blob([rbxmxXml], { type: 'application/xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(asset.name || 'RobloxModel').replace(/\s+/g, '_')}.rbxmx`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const safeName = (asset.name || 'RobloxModel').replace(/\s+/g, '_');
+    triggerBlobDownload(exportAssetToRBXMX(asset), 'application/xml;charset=utf-8', `${safeName}.rbxmx`);
   };
 
   // Export current 3D model to standard glTF 2.0 (.GLTF) with embedded geometry & PBR materials
   const handleDownloadGLTF = () => {
     if (!asset) return;
-    const gltfJson = exportAssetToGLTF(asset);
-    const blob = new Blob([gltfJson], { type: 'model/gltf+json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(asset.name || 'RobloxModel').replace(/\s+/g, '_')}.gltf`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const safeName = (asset.name || 'RobloxModel').replace(/\s+/g, '_');
+    triggerBlobDownload(exportAssetToGLTF(asset), 'model/gltf+json;charset=utf-8', `${safeName}.gltf`);
   };
 
   // Export current 3D scene model to .OBJ (+ .MTL if asset has parts) for Roblox Studio 3D Importer
   const handleDownloadOBJ = () => {
     if (asset && asset.parts && asset.parts.length > 0) {
       const { obj, objFileName } = exportAssetToOBJWithMTL(asset);
-      const blob = new Blob([obj], { type: 'text/plain;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = objFileName;
-      a.click();
-      URL.revokeObjectURL(url);
+      triggerBlobDownload(obj, 'text/plain;charset=utf-8', objFileName);
       return;
     }
     if (!subjectGroupRef.current) return;
-    const objText = exportObject3DToOBJ(subjectGroupRef.current);
-    const blob = new Blob([objText], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(asset?.name || 'RobloxModel').replace(/\s+/g, '_')}.obj`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const safeName = (asset?.name || 'RobloxModel').replace(/\s+/g, '_');
+    triggerBlobDownload(exportObject3DToOBJ(subjectGroupRef.current), 'text/plain;charset=utf-8', `${safeName}.obj`);
   };
 
   return (

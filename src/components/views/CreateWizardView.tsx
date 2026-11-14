@@ -11,38 +11,29 @@ import {
   Sliders,
   Eye,
   Send,
-  Layers,
   ChevronDown,
   ChevronUp,
   RotateCcw,
-  Shield,
-  Box,
+  Palette,
 } from 'lucide-react';
 import { useForge } from '../../context/ForgeContext.tsx';
-import {
-  Forge3DAsset,
-  PBRTextureSet,
-  generateProceduralPBRTextures,
-  convertImageTo3DHeightmapMesh,
-} from '../../utils/roblox3DEngine.ts';
+import { Forge3DAsset } from '../../utils/roblox3DEngine.ts';
 import { SseStreamParser, SseMessage } from '../../utils/sseParser.ts';
 import { parseNaturalLanguageToTreeParams } from '../../utils/treePromptParser.ts';
 import { forgeFetch } from '../../utils/forgeApiClient.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
-import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
-
-type WizardStep = 1 | 2 | 3 | 4 | 5;
-type ObjectCategory =
-  | 'Props'
-  | 'Trees & Vegetation'
-  | 'Rocks & Nature'
-  | 'Buildings & Structures'
-  | 'Furniture & Interior'
-  | 'Scene Elements'
-  | 'Stylized Assets'
-  | 'Ambient & Decoration';
-type InputMethod = 'text' | 'image' | 'file3d' | 'heightmap';
-type DetailLevel = 'low' | 'medium' | 'high' | 'ultra';
+import {
+  WizardStep,
+  ObjectCategory,
+  InputMethod,
+  DetailLevel,
+  TreeArchetypePreset,
+  WIZARD_CATEGORY_CARDS,
+  TREE_ARCHETYPE_PRESETS,
+  CATEGORY_SUGGESTIONS,
+  POLY_BUDGETS,
+} from './wizard/wizardData.ts';
+import { WizardStep3Params } from './wizard/WizardStep3Params.tsx';
 
 export const CreateWizardView: React.FC = () => {
   const {
@@ -59,8 +50,10 @@ export const CreateWizardView: React.FC = () => {
   const [inputMethod, setInputMethod] = useState<InputMethod>('text');
   const [generationMode, setGenerationMode] = useState<'procedural' | 'ai'>('procedural');
   const [seed, setSeed] = useState<string>('forge-tree-2026');
+  const [selectedPresetId, setSelectedPresetId] = useState<string>('ancient-oak');
+  const [showAdvancedTreeParams, setShowAdvancedTreeParams] = useState<boolean>(false);
 
-  // Tree Procedural Parameters (Fase 7 & Etapa 6 + Fase 3 Expansion)
+  // Tree Procedural Parameters (23 configurable parameters)
   const [treeHeight, setTreeHeight] = useState<number>(14);
   const [treeWidth, setTreeWidth] = useState<number>(10);
   const [trunkThickness, setTrunkThickness] = useState<number>(1.6);
@@ -82,7 +75,7 @@ export const CreateWizardView: React.FC = () => {
   const [treeVariation, setTreeVariation] = useState<number>(0.25);
   const [leafVariation, setLeafVariation] = useState<number>(0.25);
   const [colorVariation, setColorVariation] = useState<number>(0.2);
-  const [lodLevel, setLodLevel] = useState<0 | 1 | 2>(0);
+  const [lodLevel] = useState<0 | 1 | 2>(0);
   const [parsedPromptBadges, setParsedPromptBadges] = useState<string[]>([]);
   const [treeParamsManuallyEdited, setTreeParamsManuallyEdited] = useState<boolean>(false);
 
@@ -97,8 +90,7 @@ export const CreateWizardView: React.FC = () => {
   // Settings states
   const [detailLevel, setDetailLevel] = useState<DetailLevel>('medium');
   const [collisionFidelity, setCollisionFidelity] = useState<'Hull' | 'Box' | 'PreciseConvexDecomposition'>('Hull');
-  const [materialStyle, setMaterialStyle] = useState<'BrushedTitanium' | 'HexPlate' | 'CarbonWeave' | 'StoneGrid'>('BrushedTitanium');
-  const [saveToRojo, setSaveToRojo] = useState<boolean>(true);
+  const [saveToRojo] = useState<boolean>(true);
 
   // Generation states
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
@@ -113,58 +105,33 @@ export const CreateWizardView: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Category presets suggestions across all 8 official categories
-  const categorySuggestions: Record<ObjectCategory, string[]> = {
-    Props: [
-      'Cofre del tesoro medieval con cerradura mágica brillante',
-      'Barril reforzado con aros de hierro forjado y madera envejecida',
-      'Cristal de energía en contenedor de titanio con emisores neón',
-    ],
-    'Trees & Vegetation': [
-      'Árbol roble ancestral con tronco nudoso y copa esférica frondosa',
-      'Pino alpino alto con copa cónica escalonada y corteza rugosa',
-      'Sauce llorón místico con ramas colgantes y follaje denso',
-    ],
-    'Rocks & Nature': [
-      'Formación rocosa basáltica facetada con cristales incrustados',
-      'Peñasco de granito musgoso asentado para terreno natural',
-      'Acantilado modular de piedra caliza estratificada',
-    ],
-    'Buildings & Structures': [
-      'Torre de vigilancia medieval con pilares de piedra y tejado a cuatro aguas',
-      'Pabellón modular con columnas clásicas y base de hormigón',
-      'Puerta fortificada con arco superior y contrafuertes laterales',
-    ],
-    'Furniture & Interior': [
-      'Mesa de banquete de roble macizo con soportes metálicos',
-      'Trono tallado con respaldo alto y reposabrazos ornamentados',
-      'Estantería de alquimia con compartimentos modulares',
-    ],
-    'Scene Elements': [
-      'Portal dimensional sobre plataforma octogonal de piedra rúnica',
-      'Altar ceremonial con escalinata y núcleo energético central',
-      'Plataforma de teletransporte con anillos concéntricos',
-    ],
-    'Stylized Assets': [
-      'Tótem estilizado low-poly con grabados luminosos cian',
-      'Santuario de fantasía con geometría facetada limpia',
-      'Obelisco flotante estilizado con base escalonada',
-    ],
-    'Ambient & Decoration': [
-      'Farol de hierro forjado sobre pedestal con núcleo cálido',
-      'Brasero ceremonial encendido con base de bronce',
-      'Baliza ambiental futurista con corona emisiva',
-    ],
+  const applyTreePreset = (preset: TreeArchetypePreset) => {
+    setSelectedPresetId(preset.id);
+    setPrompt(preset.prompt);
+    setSeed(preset.seed);
+    setTreeHeight(preset.height);
+    setTreeWidth(preset.width);
+    setTrunkThickness(preset.trunkThickness);
+    setTrunkLean(preset.trunkLean);
+    setTrunkCurvature(preset.trunkCurvature);
+    setRootFlareScale(preset.rootFlareScale);
+    setBranchCount(preset.branchCount);
+    setBranchLength(preset.branchLength);
+    setBranchDistribution(preset.branchDistribution);
+    setCanopyShape(preset.canopyShape);
+    setCanopySize(preset.canopySize);
+    setLeafDistribution(preset.leafDistribution);
+    setFoliageCount(preset.foliageCount);
+    setFoliageDensity(preset.foliageDensity);
+    setTrunkColor(preset.trunkColor);
+    setLeafColor(preset.leafColor);
+    setTreeParamsManuallyEdited(true);
+    setNotification({
+      type: 'info',
+      message: `Estilo '${preset.label}' listo (${preset.height} studs). ¡Haz clic en Crear Modelo 3D!`,
+    });
   };
 
-  const polyBudgets: Record<DetailLevel, { tris: number; label: string; desc: string }> = {
-    low: { tris: 1800, label: 'Bajo (~1,800 polígonos)', desc: 'Máximo rendimiento, ideal para dispositivos móviles' },
-    medium: { tris: 3800, label: 'Medio (~3,800 polígonos)', desc: 'Equilibrio perfecto recomendado para Roblox' },
-    high: { tris: 8500, label: 'Alto (~8,500 polígonos)', desc: 'Alta definición para modelos en primer plano' },
-    ultra: { tris: 14000, label: 'Ultra (~14,000 polígonos)', desc: 'Modelos héroe complejos con auto-split si supera límites' },
-  };
-
-  // Image Upload Handler
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -186,7 +153,7 @@ export const CreateWizardView: React.FC = () => {
     setIsGenerating(false);
     setProgressStatus('Generación cancelada');
     setActivityLogs((prev) => [...prev, 'Operación cancelada por el usuario.']);
-    setCurrentStep(3);
+    setCurrentStep(2);
     setNotification({ type: 'info', message: 'Generación 3D cancelada.' });
   };
 
@@ -219,15 +186,18 @@ export const CreateWizardView: React.FC = () => {
     return parsed;
   };
 
-  // Step 4: Execute Generation via robust SSE stream parser
   const handleStartGeneration = async () => {
+    if (category === 'Trees & Vegetation' && inputMethod === 'text' && !treeParamsManuallyEdited) {
+      applyParsedTreePromptToState(prompt);
+    }
+
     setCurrentStep(4);
     setIsGenerating(true);
     setProgressPercent(15);
-    setProgressStatus('Iniciando pipeline de generación 3D...');
+    setProgressStatus('Construyendo tu modelo 3D...');
     setActivityLogs([
       `Iniciando generación para '${category}'...`,
-      `Presupuesto: ${polyBudgets[detailLevel].tris} triángulos`,
+      `Presupuesto: ${POLY_BUDGETS[detailLevel].tris} triángulos`,
       `Fidelidad de colisión: ${collisionFidelity}`,
     ]);
 
@@ -276,7 +246,7 @@ export const CreateWizardView: React.FC = () => {
               : undefined,
           lodLevel,
           detailLevel,
-          target_poly_budget: polyBudgets[detailLevel].tris,
+          target_poly_budget: POLY_BUDGETS[detailLevel].tris,
           collision_fidelity: collisionFidelity,
           save_to_rojo: saveToRojo,
           save_to_library: true,
@@ -300,15 +270,9 @@ export const CreateWizardView: React.FC = () => {
         try {
           payload = JSON.parse(msg.data);
         } catch {
-          // Log unparseable non-empty payload
-          setActivityLogs((prev) => [
-            ...prev,
-            `[AVISO]: Fragmento no parseable: ${msg.data.slice(0, 80)}`,
-          ]);
           return;
         }
 
-        // Explicit treatment of SSE error events
         if (msg.event === 'error' || payload.type === 'error' || payload.error) {
           const errMsg = payload.error || payload.message || 'Error en la generación 3D';
           throw new Error(errMsg);
@@ -335,7 +299,7 @@ export const CreateWizardView: React.FC = () => {
           if (res) {
             assetCompleted = res;
             setProgressPercent(100);
-            setProgressStatus(`Modelo '${res.name}' construido con éxito.`);
+            setProgressStatus(`¡Modelo '${res.name}' construido con éxito!`);
           }
         }
       };
@@ -349,7 +313,6 @@ export const CreateWizardView: React.FC = () => {
         }
       }
 
-      // Final flush of TextDecoder without stream: true
       const finalDecoded = decoder.decode();
       if (finalDecoded) {
         for (const msg of sseParser.feed(finalDecoded)) {
@@ -357,12 +320,10 @@ export const CreateWizardView: React.FC = () => {
         }
       }
 
-      // Final flush of SseStreamParser for any remaining buffered event
       for (const msg of sseParser.flush()) {
         handleSseMessage(msg);
       }
 
-      // Structural validation of received 3D asset model using a TypeScript type guard
       const isValidForgeAsset = (obj: any): obj is Forge3DAsset => {
         return (
           obj &&
@@ -378,28 +339,26 @@ export const CreateWizardView: React.FC = () => {
       if (isValidForgeAsset(assetCompleted)) {
         const completedAsset: Forge3DAsset = assetCompleted;
         setGeneratedAsset(completedAsset);
-        applyAssetChange(completedAsset, `Generado con IA: ${completedAsset.name}`, 'add_part');
+        applyAssetChange(completedAsset, `Generado: ${completedAsset.name}`, 'add_part');
         setActiveAsset(completedAsset);
         fetchAssetLibrary();
         setIsGenerating(false);
         setCurrentStep(5);
         setNotification({
           type: 'success',
-          message: `Modelo '${completedAsset.name}' creado con ${completedAsset.parts.length} piezas.`,
+          message: `¡Modelo '${completedAsset.name}' creado con ${completedAsset.parts.length} piezas!`,
         });
       } else {
-        throw new Error('La respuesta del motor 3D no devolvió una estructura 3D válida con piezas y nombre.');
+        throw new Error('La respuesta del motor 3D no devolvió una estructura 3D válida.');
       }
     } catch (err: any) {
       if (err.name === 'AbortError' || controller.signal.aborted) {
         setIsGenerating(false);
         setProgressStatus('Generación cancelada por el usuario');
-        setActivityLogs((prev) => [...prev, '[CANCELADO]: Operación abortada por el usuario.']);
         return;
       }
       setIsGenerating(false);
       setProgressStatus(`Error: ${err.message || 'Error desconocido'}`);
-      setActivityLogs((prev) => [...prev, `[ERROR]: ${err.message}`]);
       setNotification({
         type: 'error',
         message: `Error al generar modelo: ${err.message}`,
@@ -410,83 +369,91 @@ export const CreateWizardView: React.FC = () => {
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 pb-12 animate-in fade-in duration-200">
-      {/* Wizard Header & Step Indicators */}
-      <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+    <div className="max-w-5xl mx-auto space-y-6 pb-12 animate-slide-up">
+      {/* Colorful Wizard Container */}
+      <div className="bg-slate-900/85 border border-violet-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl">
+        {/* Interactive Clickable Step Bar */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-5">
           <div>
-            <div className="inline-flex items-center gap-2 text-cyan-400 text-xs font-semibold uppercase tracking-wider">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Asistente de Creación Guiada</span>
-            </div>
-            <h2 className="text-xl font-bold text-white mt-0.5">
-              {currentStep === 1 && 'Paso 1: Selecciona el Tipo de Objeto'}
-              {currentStep === 2 && 'Paso 2: ¿Cómo deseas crear tu modelo?'}
-              {currentStep === 3 && 'Paso 3: Configuración y Optimización'}
-              {currentStep === 4 && 'Paso 4: Generando Modelo 3D...'}
-              {currentStep === 5 && 'Paso 5: ¡Modelo Creado con Éxito!'}
+            <p className="text-xs font-bold text-violet-300">
+              Creador Guiado 3D
+            </p>
+            <h2 className="text-xl sm:text-2xl font-extrabold text-white mt-1">
+              {currentStep === 1 && 'Paso 1: ¿Qué quieres construir hoy?'}
+              {currentStep === 2 && 'Paso 2: Elige un estilo o escribe tu idea'}
+              {currentStep === 3 && 'Paso 3: Cambia el tamaño y los colores'}
+              {currentStep === 4 && '¡Armando tu modelo 3D...!'}
+              {currentStep === 5 && '¡Tu modelo 3D quedó listo!'}
             </h2>
           </div>
 
-          {/* Stepper Dots / Counter */}
-          <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
-            <span>Paso {currentStep} de 5</span>
-            <div className="flex items-center gap-1.5 ml-2">
-              {[1, 2, 3, 4, 5].map((stepNum) => (
-                <div
-                  key={stepNum}
-                  className={`w-2.5 h-2.5 rounded-full transition-all ${
-                    stepNum === currentStep
-                      ? 'w-6 bg-cyan-400'
-                      : stepNum < currentStep
-                      ? 'bg-cyan-700'
-                      : 'bg-slate-800'
-                  }`}
-                />
-              ))}
-            </div>
+          {/* Clickable Step Tabs */}
+          <div className="flex items-center gap-1.5 bg-slate-950/90 p-1.5 rounded-2xl border border-slate-800 overflow-x-auto">
+            {[
+              { step: 1 as WizardStep, label: '1. ¿Qué crear?' },
+              { step: 2 as WizardStep, label: '2. Estilo' },
+              { step: 3 as WizardStep, label: '3. Tamaño y Color' },
+              ...(generatedAsset ? [{ step: 5 as WizardStep, label: '¡Listo!' }] : []),
+            ].map((item) => {
+              const isCurrent = currentStep === item.step;
+              return (
+                <button
+                  key={item.step}
+                  type="button"
+                  disabled={isGenerating}
+                  onClick={() => setCurrentStep(item.step)}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap ${
+                    isCurrent
+                      ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-md'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                  } ${isGenerating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* STEP 1: Object Category Selection (8 Official Categories) */}
+        {/* STEP 1: Colorful Object Category Selection */}
         {currentStep === 1 && (
           <div className="space-y-6 pt-6">
             <p className="text-slate-300 text-sm">
-              Elige una de las 8 categorías oficiales de assets 3D para Roblox. Cada categoría ajusta la jerarquía EditableMesh, pivote en Y=0 y materiales PBR.
+              Haz clic en una categoría para seleccionarla (o haz <strong>doble clic</strong> para avanzar directamente al siguiente paso):
             </p>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {[
-                { id: 'Trees & Vegetation', title: 'Árboles y Vegetación', desc: 'Árboles parametrizados (tronco, ramas, copa, hojas)', icon: Mountain },
-                { id: 'Props', title: 'Objetos y Props', desc: 'Cofres, barriles, herramientas, contenedores', icon: Box },
-                { id: 'Rocks & Nature', title: 'Rocas y Naturaleza', desc: 'Peñascos facetados, cristales, formaciones', icon: Mountain },
-                { id: 'Buildings & Structures', title: 'Edificios y Estructuras', desc: 'Torres, columnas, arcos, tejados modulares', icon: Layers },
-                { id: 'Furniture & Interior', title: 'Mobiliario e Interiores', desc: 'Mesas, sillas, tronos, estanterías', icon: Box },
-                { id: 'Scene Elements', title: 'Elementos de Escenario', desc: 'Portales, altares, plataformas, puentes', icon: Sliders },
-                { id: 'Stylized Assets', title: 'Modelos Estilizados', desc: 'Tótems low-poly, santuarios, obeliscos', icon: Sparkles },
-                { id: 'Ambient & Decoration', title: 'Ambiental y Decoración', desc: 'Faroles, braseros, balizas luminosas', icon: Shield },
-              ].map((item) => {
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+              {WIZARD_CATEGORY_CARDS.map((item) => {
                 const isSelected = category === item.id;
                 const IconComponent = item.icon;
                 return (
                   <div
                     key={item.id}
                     onClick={() => {
-                      setCategory(item.id as ObjectCategory);
-                      const firstSug = categorySuggestions[item.id as ObjectCategory]?.[0];
+                      setCategory(item.id);
+                      const firstSug = CATEGORY_SUGGESTIONS[item.id]?.[0];
                       if (firstSug) setPrompt(firstSug);
                     }}
-                    className={`p-4 rounded-xl border cursor-pointer transition flex flex-col justify-between ${
+                    onDoubleClick={() => {
+                      setCategory(item.id);
+                      setCurrentStep(2);
+                    }}
+                    className={`forge-card-hover p-4 rounded-2xl border cursor-pointer flex flex-col justify-between ${
                       isSelected
-                        ? 'bg-cyan-950/40 border-cyan-500 shadow-md shadow-cyan-950/50'
-                        : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-800/60'
+                        ? `${item.activeBorder} shadow-lg`
+                        : 'bg-slate-950/70 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
                     }`}
                   >
-                    <div className="space-y-2">
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isSelected ? 'bg-cyan-500 text-white' : 'bg-slate-800 text-slate-400'}`}>
-                        <IconComponent className="w-4 h-4" />
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div
+                          className={`w-10 h-10 rounded-xl bg-gradient-to-br ${item.gradient} flex items-center justify-center text-white shadow-md`}
+                        >
+                          <IconComponent className="w-5 h-5" />
+                        </div>
+                        {isSelected && <CheckCircle2 className="w-5 h-5 text-white" />}
                       </div>
-                      <h3 className={`font-semibold text-sm ${isSelected ? 'text-white' : 'text-slate-200'}`}>
+                      <h3 className="font-extrabold text-sm text-white">
                         {item.title}
                       </h3>
                       <p className="text-slate-400 text-xs leading-relaxed">
@@ -494,9 +461,9 @@ export const CreateWizardView: React.FC = () => {
                       </p>
                     </div>
 
-                    <div className="mt-3 pt-2 border-t border-slate-800/60 flex items-center justify-end">
-                      <span className={`text-[11px] font-medium ${isSelected ? 'text-cyan-400' : 'text-slate-500'}`}>
-                        {isSelected ? 'Seleccionado' : 'Elegir'}
+                    <div className="mt-4 pt-2 border-t border-white/10 flex items-center justify-between">
+                      <span className={`text-[11px] font-bold ${isSelected ? 'text-white' : 'text-slate-500'}`}>
+                        {isSelected ? '✓ Seleccionado' : 'Clic para elegir'}
                       </span>
                     </div>
                   </div>
@@ -504,114 +471,134 @@ export const CreateWizardView: React.FC = () => {
               })}
             </div>
 
-            <div className="flex justify-end pt-4">
+            <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
               <button
                 type="button"
                 onClick={() => setCurrentStep(2)}
-                className="px-5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer transition shadow-lg shadow-cyan-900/30"
+                className="px-6 py-3 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-xs sm:text-sm font-extrabold flex items-center gap-2 cursor-pointer transition shadow-xl shadow-violet-600/30 whitespace-nowrap forge-btn-press"
               >
-                <span>Continuar al Paso 2</span>
+                <span>Siguiente: Elegir Estilo</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </div>
           </div>
         )}
 
-        {/* STEP 2: Input Method */}
+        {/* STEP 2: 1-Click Presets & Simple Description */}
         {currentStep === 2 && (
           <div className="space-y-6 pt-6">
-            {/* Input Method Selector Tabs */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-950/60 p-1.5 rounded-xl border border-slate-800">
-              <button
-                type="button"
-                onClick={() => setInputMethod('text')}
-                className={`py-2 px-3 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                  inputMethod === 'text' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>Texto Descriptivo</span>
-              </button>
+            {/* 1-Click Tree Archetype Presets when Trees & Vegetation is active */}
+            {category === 'Trees & Vegetation' && (
+              <div className="bg-gradient-to-br from-emerald-950/60 via-slate-950/90 to-slate-950 border border-emerald-500/40 rounded-2xl p-5 space-y-3.5">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <span className="text-sm font-extrabold text-emerald-300 block">
+                      Estilos de Árboles Listos en 1 Clic
+                    </span>
+                    <span className="text-xs text-slate-300">
+                      Elige cualquiera de estos 5 árboles preconfigurados y pulsa el botón morado de abajo para crearlo al instante:
+                    </span>
+                  </div>
+                </div>
 
-              <button
-                type="button"
-                onClick={() => setInputMethod('image')}
-                className={`py-2 px-3 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                  inputMethod === 'image' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <ImageIcon className="w-3.5 h-3.5" />
-                <span>Imagen 2D</span>
-              </button>
+                <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {TREE_ARCHETYPE_PRESETS.map((preset) => {
+                    const isSelected = selectedPresetId === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => applyTreePreset(preset)}
+                        className={`forge-card-hover p-3.5 rounded-2xl border text-left cursor-pointer flex flex-col justify-between ${
+                          isSelected
+                            ? 'bg-emerald-900/40 border-emerald-400 shadow-lg shadow-emerald-950/50'
+                            : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-1">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className="w-4 h-4 rounded-full border border-white/30 shadow-sm shrink-0"
+                                style={{ backgroundColor: preset.leafColor }}
+                              />
+                              <span
+                                className="w-3 h-3 rounded-full border border-white/30 shrink-0"
+                                style={{ backgroundColor: preset.trunkColor }}
+                              />
+                            </div>
+                            <span className="text-[10px] font-mono text-emerald-300 font-bold tabular-nums">
+                              {preset.height} studs
+                            </span>
+                          </div>
+                          <div className="text-xs font-extrabold text-white leading-tight">
+                            {preset.label}
+                          </div>
+                          <div className="text-[11px] text-slate-300 leading-snug">
+                            {preset.subtitle}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
-              <button
-                type="button"
-                onClick={() => setInputMethod('heightmap')}
-                className={`py-2 px-3 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                  inputMethod === 'heightmap' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Mountain className="w-3.5 h-3.5" />
-                <span>Relieve Procedural</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setInputMethod('file3d')}
-                className={`py-2 px-3 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                  inputMethod === 'file3d' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Upload className="w-3.5 h-3.5" />
-                <span>Archivo 3D</span>
-              </button>
+            {/* Simple Input Method Selector Tabs */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-950/80 p-1.5 rounded-2xl border border-slate-800">
+              {[
+                { id: 'text', label: 'Escribir Idea', icon: FileText },
+                { id: 'image', label: 'Subir Imagen 2D', icon: ImageIcon },
+                { id: 'heightmap', label: 'Relieve 3D', icon: Mountain },
+                { id: 'file3d', label: 'Archivo 3D', icon: Upload },
+              ].map((m) => {
+                const Icon = m.icon;
+                const active = inputMethod === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setInputMethod(m.id as InputMethod)}
+                    className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
+                      active
+                        ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    <span>{m.label}</span>
+                  </button>
+                );
+              })}
             </div>
 
             {/* Sub-view: Text Prompt */}
             {inputMethod === 'text' && (
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                    Describe el objeto con tus propias palabras:
+                  <label className="block text-xs font-bold text-slate-200 mb-1.5">
+                    Describe cómo quieres tu modelo 3D:
                   </label>
                   <textarea
-                    rows={4}
+                    rows={3}
                     value={prompt}
                     onChange={(e) => {
                       setPrompt(e.target.value);
                       setTreeParamsManuallyEdited(false);
                     }}
-                    placeholder="Ejemplo: Torreta defensiva con doble cañón, base octogonal y núcleo luminoso..."
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 resize-none leading-relaxed"
+                    placeholder="Ejemplo: Árbol de fantasía con copa rojiza frondosa, tronco curvado y raíces expuestas..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-2xl p-4 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:border-fuchsia-500 resize-none leading-relaxed"
                   />
                 </div>
 
-                {/* Inspiration Tags for Category */}
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <span className="text-[11px] text-slate-500 font-medium">Sugerencias para {category}:</span>
-                    {category === 'Trees & Vegetation' && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const parsed = applyParsedTreePromptToState(prompt);
-                          setTreeParamsManuallyEdited(false);
-                          setNotification({
-                            type: 'success',
-                            message:
-                              parsed.detectedKeywords.length > 0
-                                ? `Parámetros extraídos del texto (${parsed.detectedKeywords.join(', ')}).`
-                                : 'No se detectaron modificadores específicos; ajusta los deslizadores en el Paso 3.',
-                          });
-                        }}
-                        className="px-2.5 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/70 border border-emerald-700/60 text-[11px] font-semibold text-emerald-300 cursor-pointer transition"
-                      >
-                        Aplicar texto a parámetros del árbol
-                      </button>
-                    )}
-                  </div>
+                {/* Inspiration Tags */}
+                <div className="space-y-2">
+                  <span className="text-[11px] text-slate-400 font-semibold block">
+                    O toca una de estas ideas rápidas para rellenar el texto:
+                  </span>
                   <div className="flex flex-wrap gap-2">
-                    {categorySuggestions[category]?.map((sug, idx) => (
+                    {CATEGORY_SUGGESTIONS[category]?.map((sug, idx) => (
                       <button
                         key={idx}
                         type="button"
@@ -619,7 +606,7 @@ export const CreateWizardView: React.FC = () => {
                           setPrompt(sug);
                           setTreeParamsManuallyEdited(false);
                         }}
-                        className="text-[11px] text-slate-400 hover:text-cyan-300 bg-slate-950 hover:bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-lg transition text-left cursor-pointer"
+                        className="text-xs text-slate-200 hover:text-white bg-slate-950 hover:bg-violet-950/60 border border-slate-800 hover:border-violet-500/50 px-3.5 py-2 rounded-xl transition text-left cursor-pointer"
                       >
                         {sug}
                       </button>
@@ -646,7 +633,7 @@ export const CreateWizardView: React.FC = () => {
                 />
                 <div
                   onClick={() => imageInputRef.current?.click()}
-                  className="border-2 border-dashed border-slate-800 hover:border-cyan-500 rounded-xl p-8 text-center cursor-pointer transition bg-slate-950/40"
+                  className="border-2 border-dashed border-slate-800 hover:border-fuchsia-500 rounded-2xl p-8 text-center cursor-pointer transition bg-slate-950/40"
                 >
                   {referenceImage ? (
                     <div className="space-y-3">
@@ -655,18 +642,18 @@ export const CreateWizardView: React.FC = () => {
                         alt="Referencia"
                         className="max-h-48 mx-auto rounded-lg border border-slate-700 object-contain"
                       />
-                      <p className="text-xs text-cyan-400 font-medium">
+                      <p className="text-xs text-fuchsia-400 font-bold">
                         Imagen cargada. Haz clic para cambiarla.
                       </p>
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      <ImageIcon className="w-8 h-8 text-slate-500 mx-auto" />
-                      <p className="text-xs font-semibold text-slate-300">
-                        Arrastra una imagen o haz clic para seleccionarla
+                      <ImageIcon className="w-8 h-8 text-fuchsia-400 mx-auto" />
+                      <p className="text-xs font-bold text-slate-200">
+                        Haz clic para subir una imagen PNG, JPG o WebP
                       </p>
-                      <p className="text-[11px] text-slate-500">
-                        PNG, JPG o WebP. Se generará un modelo tridimensional basado en sus formas y colores.
+                      <p className="text-[11px] text-slate-400">
+                        Se construirá un modelo 3D inspirado en los colores y silueta de tu imagen.
                       </p>
                     </div>
                   )}
@@ -676,14 +663,15 @@ export const CreateWizardView: React.FC = () => {
 
             {/* Sub-view: Procedural Heightmap */}
             {inputMethod === 'heightmap' && (
-              <div className="space-y-4 bg-slate-950/40 p-4 rounded-xl border border-slate-800">
+              <div className="space-y-4 bg-slate-950/60 p-5 rounded-2xl border border-slate-800">
                 <p className="text-xs text-slate-300">
-                  Genera una malla volumétrica extruyendo un mapa de alturas en 3D para relieves y superficies.
+                  Genera un terreno o relieve 3D extruyendo alturas automáticamente:
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="text-xs text-slate-400 block mb-1">
-                      Profundidad de Extrusión: <span className="text-white font-mono">{heightmapDepth} studs</span>
+                      Altura del Relieve:{' '}
+                      <span className="text-white font-mono tabular-nums">{heightmapDepth} studs</span>
                     </label>
                     <input
                       type="range"
@@ -692,12 +680,13 @@ export const CreateWizardView: React.FC = () => {
                       step={0.5}
                       value={heightmapDepth}
                       onChange={(e) => setHeightmapDepth(parseFloat(e.target.value))}
-                      className="w-full accent-cyan-500"
+                      className="w-full accent-fuchsia-500"
                     />
                   </div>
                   <div>
                     <label className="text-xs text-slate-400 block mb-1">
-                      Resolución de Malla: <span className="text-white font-mono">{heightmapRes}x{heightmapRes}</span>
+                      Detalle de Malla:{' '}
+                      <span className="text-white font-mono tabular-nums">{heightmapRes}x{heightmapRes}</span>
                     </label>
                     <input
                       type="range"
@@ -706,7 +695,7 @@ export const CreateWizardView: React.FC = () => {
                       step={8}
                       value={heightmapRes}
                       onChange={(e) => setHeightmapRes(parseInt(e.target.value, 10))}
-                      className="w-full accent-cyan-500"
+                      className="w-full accent-fuchsia-500"
                     />
                   </div>
                 </div>
@@ -731,605 +720,141 @@ export const CreateWizardView: React.FC = () => {
                 />
                 <div
                   onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed border-slate-800 hover:border-cyan-500 rounded-xl p-8 text-center cursor-pointer transition bg-slate-950/40"
+                  className="border-2 border-dashed border-slate-800 hover:border-fuchsia-500 rounded-2xl p-8 text-center cursor-pointer transition bg-slate-950/40"
                 >
-                  <Upload className="w-8 h-8 text-slate-500 mx-auto mb-2" />
-                  <p className="text-xs font-semibold text-slate-300">
-                    Cargar archivo .rbxmx, .glb o .obj existente
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    Ideal para diezmar polígonos, reparar normales y añadir materiales PBR a modelos antiguos.
+                  <Upload className="w-8 h-8 text-cyan-400 mx-auto mb-2" />
+                  <p className="text-xs font-bold text-slate-200">
+                    Subir archivo .rbxmx, .glb o .obj existente
                   </p>
                 </div>
               </div>
             )}
 
-            {/* Back / Next Buttons */}
-            <div className="flex items-center justify-between pt-4 border-t border-slate-800">
+            {/* Clear Action Bar: Primary = Create Now! Secondary = Customize Details */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-slate-800">
               <button
                 type="button"
                 onClick={() => setCurrentStep(1)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
               >
                 <ArrowLeft className="w-4 h-4" />
-                <span>Anterior</span>
+                <span>Cambiar Tipo</span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  if (category === 'Trees & Vegetation' && inputMethod === 'text' && !treeParamsManuallyEdited) {
-                    applyParsedTreePromptToState(prompt);
-                  }
-                  setCurrentStep(3);
-                }}
-                className="px-5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer transition shadow-lg shadow-cyan-900/30"
-              >
-                <span>Continuar al Paso 3</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (category === 'Trees & Vegetation' && inputMethod === 'text' && !treeParamsManuallyEdited) {
+                      applyParsedTreePromptToState(prompt);
+                    }
+                    setCurrentStep(3);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
+                >
+                  <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Personalizar Tamaño y Colores (Opcional)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleStartGeneration}
+                  className="px-6 py-3 rounded-2xl bg-gradient-to-r from-violet-600 via-fuchsia-600 to-pink-600 hover:from-violet-500 hover:to-pink-500 text-white text-xs sm:text-sm font-extrabold flex items-center gap-2 cursor-pointer transition hover:scale-[1.02] shadow-xl shadow-fuchsia-600/30 whitespace-nowrap forge-btn-press"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>¡Crear Modelo 3D Ahora!</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
         )}
 
-        {/* STEP 3: Simplified Settings & Optimization */}
+        {/* STEP 3: Simplified Essential Controls + Optional Collapsible Advanced Section */}
         {currentStep === 3 && (
-          <div className="space-y-6 pt-6">
-            <p className="text-slate-300 text-sm">
-              Ajusta únicamente los parámetros necesarios. El motor optimizará automáticamente los vértices para evitar lag en Roblox.
-            </p>
-
-            {/* Detail Level Selection */}
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-slate-200">
-                Nivel de Detalle Poligonal:
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {(['low', 'medium', 'high', 'ultra'] as DetailLevel[]).map((lvl) => {
-                  const info = polyBudgets[lvl];
-                  const isSelected = detailLevel === lvl;
-                  return (
-                    <div
-                      key={lvl}
-                      onClick={() => setDetailLevel(lvl)}
-                      className={`p-3.5 rounded-xl border cursor-pointer transition ${
-                        isSelected
-                          ? 'bg-cyan-950/40 border-cyan-500'
-                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className={`text-xs font-semibold ${isSelected ? 'text-white' : 'text-slate-300'}`}>
-                          {info.label}
-                        </span>
-                        {isSelected && <CheckCircle2 className="w-4 h-4 text-cyan-400" />}
-                      </div>
-                      <p className="text-[11px] text-slate-400 leading-relaxed">
-                        {info.desc}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Collision Fidelity & Material Style */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-slate-200">
-                    Fidelidad de Colisión:
-                  </label>
-                  <HelpTooltip
-                    term={FORGE_GLOSSARY.collisionFidelity.term}
-                    explanation={FORGE_GLOSSARY.collisionFidelity.explanation}
-                    variant="badge"
-                  />
-                </div>
-                <select
-                  value={collisionFidelity}
-                  onChange={(e) => setCollisionFidelity(e.target.value as any)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="Hull">Hull — Caja envolvente rápida (Recomendado)</option>
-                  <option value="Box">Box — Cubo simple mínimo</option>
-                  <option value="PreciseConvexDecomposition">Precise — Colisión exacta con cada curva</option>
-                </select>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-200 block">
-                  Estilo de Material Inicial:
-                </label>
-                <select
-                  value={materialStyle}
-                  onChange={(e) => setMaterialStyle(e.target.value as any)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="BrushedTitanium">Titanio Cepillado (Metálico moderno)</option>
-                  <option value="HexPlate">Blindaje Hexagonal Sci-Fi</option>
-                  <option value="CarbonWeave">Fibra de Carbono Mate</option>
-                  <option value="StoneGrid">Piedra / Mampostería Granito</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Engine Mode & Seed Reproducibility (Fase 6 y Fase 7) */}
-            <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="text-xs font-semibold text-slate-200 block mb-1.5">
-                    Motor de Síntesis 3D:
-                  </label>
-                  <select
-                    value={generationMode}
-                    onChange={(e) => setGenerationMode(e.target.value as 'procedural' | 'ai')}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-cyan-500"
-                  >
-                    <option value="procedural">
-                      Motor 1: Procedural Parametrizado (100% Local / Sin API de pago)
-                    </option>
-                    <option value="ai">
-                      Motor 2: Asistido por IA + Procedural (Usa API si está configurada)
-                    </option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-slate-200 block mb-1.5">
-                    Semilla Reproducible (Seed — misma semilla = mismo modelo):
-                  </label>
-                  <input
-                    type="text"
-                    value={seed}
-                    onChange={(e) => setSeed(e.target.value)}
-                    placeholder="ej. oak-tree-2026"
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
-              </div>
-
-              {/* Parámetros específicos de Árboles 3D (Fase 7) */}
-              {category === 'Trees & Vegetation' && (
-                <div className="pt-3 border-t border-slate-800/80 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-emerald-400">
-                      Parámetros del Generador de Árboles 3D (Fase 7)
-                    </span>
-                    <span className="text-[11px] text-slate-400 font-mono">
-                      Pivote Y=0 • EditableMesh
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Altura total: <span className="text-white font-mono">{treeHeight} studs</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={5}
-                        max={36}
-                        step={1}
-                        value={treeHeight}
-                        onChange={(e) => {
-                          setTreeParamsManuallyEdited(true);
-                          setTreeHeight(parseFloat(e.target.value));
-                        }}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Grosor de tronco: <span className="text-white font-mono">{trunkThickness} studs</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0.6}
-                        max={4.5}
-                        step={0.2}
-                        value={trunkThickness}
-                        onChange={(e) => setTrunkThickness(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Número de ramas: <span className="text-white font-mono">{branchCount}</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={1}
-                        max={10}
-                        step={1}
-                        value={branchCount}
-                        onChange={(e) => setBranchCount(parseInt(e.target.value, 10))}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Longitud de ramas: <span className="text-white font-mono">{branchLength} studs</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={1.5}
-                        max={12}
-                        step={0.5}
-                        value={branchLength}
-                        onChange={(e) => setBranchLength(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500 mt-1.5"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">Distribución de ramas:</label>
-                      <select
-                        value={branchDistribution}
-                        onChange={(e) => setBranchDistribution(e.target.value as any)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                      >
-                        <option value="tiered">Escalonada (Natural)</option>
-                        <option value="whorled">Verticilada (Simétrica)</option>
-                        <option value="alternating">Alternada</option>
-                        <option value="canopy_top">Alta / Copa superior</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">Forma de copa:</label>
-                      <select
-                        value={canopyShape}
-                        onChange={(e) => setCanopyShape(e.target.value as any)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                      >
-                        <option value="spherical">Esférica (Roble / Clásico)</option>
-                        <option value="conical">Cónica (Pino / Abeto)</option>
-                        <option value="layered">Escalonada (Bonsái / Estilizado)</option>
-                        <option value="weeping">Colgante (Sauce llorón)</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Tamaño de copa: <span className="text-white font-mono">{canopySize.toFixed(1)}x</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0.5}
-                        max={2.0}
-                        step={0.1}
-                        value={canopySize}
-                        onChange={(e) => setCanopySize(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500 mt-1.5"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">Distribución de hojas:</label>
-                      <select
-                        value={leafDistribution}
-                        onChange={(e) => setLeafDistribution(e.target.value as any)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                      >
-                        <option value="balanced">Equilibrada</option>
-                        <option value="dense">Densa / Frondosa</option>
-                        <option value="clustered">En racimos</option>
-                        <option value="sparse">Ligera / Dispersa</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Cantidad de follaje: <span className="text-white font-mono">{foliageCount}</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={1}
-                        max={12}
-                        step={1}
-                        value={foliageCount}
-                        onChange={(e) => setFoliageCount(parseInt(e.target.value, 10))}
-                        className="w-full accent-emerald-500 mt-1.5"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">Material tronco:</label>
-                      <select
-                        value={trunkMaterial}
-                        onChange={(e) => setTrunkMaterial(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                      >
-                        <option value="Wood">Wood</option>
-                        <option value="WoodPlanks">WoodPlanks</option>
-                        <option value="Slate">Slate</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">Material hojas:</label>
-                      <select
-                        value={leafMaterial}
-                        onChange={(e) => setLeafMaterial(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                      >
-                        <option value="Grass">Grass</option>
-                        <option value="Fabric">Fabric</option>
-                        <option value="SmoothPlastic">SmoothPlastic</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Variación árbol: <span className="text-white font-mono">{Math.round(treeVariation * 100)}%</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0}
-                        max={0.8}
-                        step={0.05}
-                        value={treeVariation}
-                        onChange={(e) => setTreeVariation(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500 mt-1.5"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Variación hojas: <span className="text-white font-mono">{Math.round(leafVariation * 100)}%</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0}
-                        max={0.8}
-                        step={0.05}
-                        value={leafVariation}
-                        onChange={(e) => setLeafVariation(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500 mt-1.5"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Controles avanzados de curvatura, anchura, colores, densidad y LOD */}
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800/60">
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Ancho copa: <span className="text-white font-mono">{treeWidth} studs</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={4}
-                        max={26}
-                        step={1}
-                        value={treeWidth}
-                        onChange={(e) => setTreeWidth(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Inclinación tronco: <span className="text-white font-mono">{trunkLean}°</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={-25}
-                        max={25}
-                        step={1}
-                        value={trunkLean}
-                        onChange={(e) => setTrunkLean(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Curvatura tronco: <span className="text-white font-mono">{Math.round(trunkCurvature * 100)}%</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={trunkCurvature}
-                        onChange={(e) => {
-                          setTreeParamsManuallyEdited(true);
-                          setTrunkCurvature(parseFloat(e.target.value));
-                        }}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Raíces visibles: <span className="text-white font-mono">{rootFlareScale.toFixed(2)}x</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0.7}
-                        max={2.2}
-                        step={0.1}
-                        value={rootFlareScale}
-                        onChange={(e) => {
-                          setTreeParamsManuallyEdited(true);
-                          setRootFlareScale(parseFloat(e.target.value));
-                        }}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Densidad follaje: <span className="text-white font-mono">{foliageDensity.toFixed(2)}x</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0.3}
-                        max={2.0}
-                        step={0.05}
-                        value={foliageDensity}
-                        onChange={(e) => {
-                          setTreeParamsManuallyEdited(true);
-                          setFoliageDensity(parseFloat(e.target.value));
-                        }}
-                        className="w-full accent-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">Color tronco:</label>
-                      <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg px-2 py-1">
-                        <input
-                          type="color"
-                          value={trunkColor}
-                          onChange={(e) => setTrunkColor(e.target.value)}
-                          className="w-6 h-5 bg-transparent cursor-pointer"
-                        />
-                        <span className="text-[11px] font-mono text-slate-300">{trunkColor}</span>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">Color hojas:</label>
-                      <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg px-2 py-1">
-                        <input
-                          type="color"
-                          value={leafColor}
-                          onChange={(e) => setLeafColor(e.target.value)}
-                          className="w-6 h-5 bg-transparent cursor-pointer"
-                        />
-                        <span className="text-[11px] font-mono text-slate-300">{leafColor}</span>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">
-                        Variación color: <span className="text-white font-mono">{Math.round(colorVariation * 100)}%</span>
-                      </label>
-                      <input
-                        type="range"
-                        min={0}
-                        max={0.6}
-                        step={0.05}
-                        value={colorVariation}
-                        onChange={(e) => setColorVariation(parseFloat(e.target.value))}
-                        className="w-full accent-emerald-500 mt-1.5"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] text-slate-300 block mb-1">LOD Exportación:</label>
-                      <select
-                        value={lodLevel}
-                        onChange={(e) => setLodLevel(Number(e.target.value) as 0 | 1 | 2)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                      >
-                        <option value={0}>LOD 0 (Máxima calidad)</option>
-                        <option value={1}>LOD 1 (Medio optimizado)</option>
-                        <option value={2}>LOD 2 (Ligero / Mobile)</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Save to Rojo Checkbox */}
-            <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800 flex items-center justify-between">
-              <div className="space-y-0.5">
-                <span className="text-xs font-medium text-white block">
-                  Guardar en disco de Rojo (src/shared/Assets3D)
-                </span>
-                <span className="text-[11px] text-slate-400 block">
-                  Permite que Roblox Studio cargue el modelo de inmediato mediante Rojo o el Local Bridge.
-                </span>
-              </div>
-              <input
-                type="checkbox"
-                checked={saveToRojo}
-                onChange={(e) => setSaveToRojo(e.target.checked)}
-                className="w-4 h-4 accent-cyan-500 rounded cursor-pointer"
-              />
-            </div>
-
-            {/* Back / Generate Buttons */}
-            <div className="flex items-center justify-between pt-4 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => setCurrentStep(2)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
-              >
-                <ArrowLeft className="w-4 h-4" />
-                <span>Anterior</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleStartGeneration}
-                className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-bold flex items-center gap-2 cursor-pointer transition shadow-lg shadow-cyan-900/40"
-              >
-                <Sparkles className="w-4 h-4 text-cyan-200" />
-                <span>
-                  {generationMode === 'procedural'
-                    ? 'Generar Modelo 3D Procedural'
-                    : 'Generar Modelo 3D con IA'}
-                </span>
-              </button>
-            </div>
-          </div>
+          <WizardStep3Params
+            category={category}
+            treeHeight={treeHeight}
+            onChangeTreeHeight={(val) => {
+              setTreeParamsManuallyEdited(true);
+              setTreeHeight(val);
+            }}
+            treeWidth={treeWidth}
+            onChangeTreeWidth={(val) => {
+              setTreeParamsManuallyEdited(true);
+              setTreeWidth(val);
+            }}
+            leafColor={leafColor}
+            onChangeLeafColor={(val) => {
+              setTreeParamsManuallyEdited(true);
+              setLeafColor(val);
+            }}
+            trunkColor={trunkColor}
+            onChangeTrunkColor={(val) => {
+              setTreeParamsManuallyEdited(true);
+              setTrunkColor(val);
+            }}
+            showAdvancedTreeParams={showAdvancedTreeParams}
+            onToggleAdvancedTreeParams={() => setShowAdvancedTreeParams(!showAdvancedTreeParams)}
+            trunkThickness={trunkThickness}
+            onChangeTrunkThickness={setTrunkThickness}
+            trunkCurvature={trunkCurvature}
+            onChangeTrunkCurvature={setTrunkCurvature}
+            rootFlareScale={rootFlareScale}
+            onChangeRootFlareScale={setRootFlareScale}
+            branchCount={branchCount}
+            onChangeBranchCount={setBranchCount}
+            canopyShape={canopyShape}
+            onChangeCanopyShape={setCanopyShape}
+            foliageDensity={foliageDensity}
+            onChangeFoliageDensity={setFoliageDensity}
+            detailLevel={detailLevel}
+            onChangeDetailLevel={setDetailLevel}
+            generationMode={generationMode}
+            onChangeGenerationMode={setGenerationMode}
+            collisionFidelity={collisionFidelity}
+            onChangeCollisionFidelity={setCollisionFidelity}
+            seed={seed}
+            onChangeSeed={setSeed}
+            onBack={() => setCurrentStep(2)}
+            onGenerate={handleStartGeneration}
+          />
         )}
 
         {/* STEP 4: Live Generation & Progress */}
         {currentStep === 4 && (
           <div className="space-y-6 pt-6">
-            <div className="text-center space-y-3 py-6">
-              <div className="w-16 h-16 rounded-2xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400 mx-auto animate-pulse">
+            <div className="text-center space-y-3 py-8">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-600 to-fuchsia-600 flex items-center justify-center text-white mx-auto animate-pulse shadow-xl shadow-fuchsia-600/30">
                 <Sparkles className="w-8 h-8" />
               </div>
-              <h3 className="text-lg font-bold text-white">
-                {progressStatus}
-              </h3>
-              <p className="text-slate-400 text-xs max-w-md mx-auto">
-                El motor está calculando la geometría, subdivisiones y materiales. Esto toma solo unos segundos.
+              <h3 className="text-lg font-extrabold text-white">{progressStatus}</h3>
+              <p className="text-slate-300 text-xs sm:text-sm max-w-md mx-auto">
+                Uniendo todas las partes 3D y preparando los colores para que funcionen perfecto en Roblox Studio.
               </p>
 
               {/* Progress Bar */}
               <div className="max-w-md mx-auto mt-4 space-y-1.5">
-                <div className="w-full bg-slate-950 rounded-full h-2.5 border border-slate-800 overflow-hidden">
+                <div className="w-full bg-slate-950 rounded-full h-3 border border-slate-800 overflow-hidden">
                   <div
-                    className="bg-gradient-to-r from-cyan-500 to-blue-500 h-full transition-all duration-300 rounded-full"
+                    className="bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-400 h-full transition-all duration-300 rounded-full"
                     style={{ width: `${progressPercent}%` }}
                   />
                 </div>
-                <div className="flex justify-between text-[11px] text-slate-500 font-mono">
-                  <span>Procesando</span>
+                <div className="flex justify-between text-[11px] text-slate-400 font-mono tabular-nums">
+                  <span>Construyendo geometría 3D</span>
                   <span>{progressPercent}%</span>
                 </div>
               </div>
 
-              {/* Cancel Button */}
               {isGenerating && (
                 <div className="pt-2">
                   <button
                     type="button"
                     onClick={handleCancelGeneration}
-                    className="py-1.5 px-4 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white text-xs font-medium cursor-pointer transition border border-slate-700/60"
+                    className="py-1.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition"
                   >
-                    Cancelar generación
+                    Cancelar
                   </button>
                 </div>
               )}
@@ -1342,7 +867,7 @@ export const CreateWizardView: React.FC = () => {
                 onClick={() => setShowTechnicalLogs(!showTechnicalLogs)}
                 className="w-full px-4 py-2.5 text-xs text-slate-400 hover:text-slate-200 flex items-center justify-between cursor-pointer"
               >
-                <span>Registro de actividad ({activityLogs.length} eventos)</span>
+                <span>Detalles técnicos ({activityLogs.length} pasos)</span>
                 {showTechnicalLogs ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
               </button>
 
@@ -1350,7 +875,7 @@ export const CreateWizardView: React.FC = () => {
                 <div className="p-3 border-t border-slate-800 font-mono text-[11px] text-slate-400 space-y-1 max-h-40 overflow-y-auto bg-black/40">
                   {activityLogs.map((log, i) => (
                     <div key={i} className="flex items-center gap-2">
-                      <span className="text-cyan-500">›</span>
+                      <span className="text-fuchsia-400">›</span>
                       <span>{log}</span>
                     </div>
                   ))}
@@ -1360,39 +885,39 @@ export const CreateWizardView: React.FC = () => {
           </div>
         )}
 
-        {/* STEP 5: Interactive 3D Preview & Direct Actions */}
+        {/* STEP 5: Interactive 3D Preview & Clear Next Actions */}
         {currentStep === 5 && generatedAsset && (
           <div className="space-y-6 pt-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <h3 className="text-lg font-extrabold text-white flex items-center gap-2">
                   <CheckCircle2 className="w-5 h-5 text-emerald-400" />
                   <span>{generatedAsset.name}</span>
                 </h3>
-                <p className="text-slate-400 text-xs">
-                  {generatedAsset.parts.length} piezas • {generatedAsset.poly_count.toLocaleString()} triángulos
+                <p className="text-slate-300 text-xs tabular-nums mt-0.5">
+                  {generatedAsset.parts.length} partes listas · Apoyado en el suelo para Roblox
                 </p>
               </div>
 
               <button
                 type="button"
                 onClick={() => {
-                  setCurrentStep(1);
+                  setCurrentStep(2);
                   setGeneratedAsset(null);
                 }}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition"
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Crear Otro</span>
+                <RotateCcw className="w-3.5 h-3.5 text-violet-400" />
+                <span>Crear Otro Modelo</span>
               </button>
             </div>
 
             {/* Interactive 3D Canvas Preview */}
-            <div className="w-full h-80 rounded-xl overflow-hidden border border-slate-800 bg-black/60 relative">
+            <div className="w-full h-96 rounded-2xl overflow-hidden border border-slate-800 bg-black/60 relative">
               <RobloxWorldViewport3D asset={generatedAsset} />
             </div>
 
-            {/* Direct Action Buttons */}
+            {/* 3 Colorful Next-Step Buttons */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
               <button
                 type="button"
@@ -1400,10 +925,10 @@ export const CreateWizardView: React.FC = () => {
                   setActiveAsset(generatedAsset);
                   setActiveTab('edit');
                 }}
-                className="p-3.5 rounded-xl bg-slate-800 hover:bg-cyan-600 text-slate-200 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition"
+                className="min-h-[48px] p-4 rounded-2xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer transition shadow-lg whitespace-nowrap forge-btn-press"
               >
                 <Eye className="w-4 h-4" />
-                <span>Abrir en Editor 3D</span>
+                <span>Ver y Editar en 3D</span>
               </button>
 
               <button
@@ -1412,10 +937,10 @@ export const CreateWizardView: React.FC = () => {
                   setActiveAsset(generatedAsset);
                   setActiveTab('materials');
                 }}
-                className="p-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition"
+                className="min-h-[48px] p-4 rounded-2xl bg-gradient-to-r from-fuchsia-500 to-amber-500 hover:from-fuchsia-400 hover:to-amber-400 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer transition shadow-lg whitespace-nowrap forge-btn-press"
               >
-                <Sparkles className="w-4 h-4 text-cyan-400" />
-                <span>Aplicar Materiales PBR</span>
+                <Palette className="w-4 h-4" />
+                <span>Pintar Colores</span>
               </button>
 
               <button
@@ -1424,10 +949,10 @@ export const CreateWizardView: React.FC = () => {
                   setActiveAsset(generatedAsset);
                   await pushToStudio(generatedAsset);
                 }}
-                className="p-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition shadow-lg shadow-emerald-950/40"
+                className="min-h-[48px] p-4 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 cursor-pointer transition shadow-lg whitespace-nowrap forge-btn-press"
               >
                 <Send className="w-4 h-4" />
-                <span>Enviar a Roblox Studio</span>
+                <span>Mandar a Roblox</span>
               </button>
             </div>
           </div>

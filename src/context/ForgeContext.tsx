@@ -13,10 +13,7 @@ import {
 } from '../utils/roblox3DEngine.ts';
 import {
   computeCanonicalAssetHash,
-  computeAppearanceHash,
-  computePropertiesHash,
   getAssetIdentityKey,
-  toCanonicalJsonValue,
 } from '../utils/canonicalHash.ts';
 import {
   validateRobloxGeometry,
@@ -26,8 +23,6 @@ import {
 import {
   computeIncrementalDiff,
   ensurePersistentPartIdsForParts,
-  partAppearanceHash,
-  partPropertiesHash,
 } from '../utils/incrementalSync.ts';
 import {
   verifyPersistedAssetContent,

@@ -190,7 +190,7 @@ export const RobloxCanvasPreview: React.FC<RobloxCanvasPreviewProps> = ({
             </span>
           )}
         </div>
-        {node.children && node.children.map((child, idx) => renderTreeJSON(child, depth + 1))}
+        {node.children && node.children.map((child, _idx) => renderTreeJSON(child, depth + 1))}
       </div>
     );
   };

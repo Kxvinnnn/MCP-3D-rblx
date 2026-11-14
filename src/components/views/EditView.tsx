@@ -8,17 +8,11 @@ import {
   Download,
   Send,
   Sparkles,
-  Scissors,
-  Wand2,
-  Minimize2,
-  CheckCircle2,
   AlertTriangle,
   Move,
   Check,
-  GitCompare,
   Ruler,
   ShieldCheck,
-  X,
 } from 'lucide-react';
 import { useForge } from '../../context/ForgeContext.tsx';
 import {
@@ -35,76 +29,17 @@ import {
   exportAssetToOBJWithMTL,
   generateEditableMeshLuauCode,
   resolveRgbTuple,
+  computeAssetStudDimensions,
+  triggerBlobDownload,
 } from '../../utils/roblox3DEngine.ts';
 import { validateRobloxGeometry } from '../../utils/robloxGeometryValidator.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
-import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
-
-function computeAssetStudDimensions(asset: Forge3DAsset): {
-  width: number;
-  height: number;
-  depth: number;
-  minY: number;
-  maxY: number;
-} {
-  if (!asset.parts || asset.parts.length === 0) {
-    return { width: 0, height: 0, depth: 0, minY: 0, maxY: 0 };
-  }
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minY = Infinity;
-  let maxY = -Infinity;
-  let minZ = Infinity;
-  let maxZ = -Infinity;
-
-  for (const part of asset.parts) {
-    const [px = 0, py = 0, pz = 0] = part.position || [0, 0, 0];
-    const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
-    const verts = part.meshData?.vertices || [];
-    if (verts.length > 0) {
-      for (const v of verts) {
-        const vx = px + Number(v[0] ?? 0);
-        const vy = py + Number(v[1] ?? 0);
-        const vz = pz + Number(v[2] ?? 0);
-        if (vx < minX) minX = vx;
-        if (vx > maxX) maxX = vx;
-        if (vy < minY) minY = vy;
-        if (vy > maxY) maxY = vy;
-        if (vz < minZ) minZ = vz;
-        if (vz > maxZ) maxZ = vz;
-      }
-    } else {
-      minX = Math.min(minX, px - sx / 2);
-      maxX = Math.max(maxX, px + sx / 2);
-      minY = Math.min(minY, py - sy / 2);
-      maxY = Math.max(maxY, py + sy / 2);
-      minZ = Math.min(minZ, pz - sz / 2);
-      maxZ = Math.max(maxZ, pz + sz / 2);
-    }
-  }
-
-  return {
-    width: Number(Math.max(0, maxX - minX).toFixed(2)),
-    height: Number(Math.max(0, maxY - minY).toFixed(2)),
-    depth: Number(Math.max(0, maxZ - minZ).toFixed(2)),
-    minY: Number((Number.isFinite(minY) ? minY : 0).toFixed(2)),
-    maxY: Number((Number.isFinite(maxY) ? maxY : 0).toFixed(2)),
-  };
-}
-
-function triggerBlobDownload(content: string, mime: string, filename: string) {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+import { EditInspectorPanel } from './edit/EditInspectorPanel.tsx';
 
 export const EditView: React.FC = () => {
   const {
     activeAsset,
+    setActiveAsset,
     assetLibrary,
     selectedPart,
     setSelectedPart,
@@ -124,9 +59,8 @@ export const EditView: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [downloadDropdown, setDownloadDropdown] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
-  const [showCompareModal, setShowCompareModal] = useState(false);
-  const [compareTargetId, setCompareTargetId] = useState<string>('');
-  const [compareLodLevel, setCompareLodLevel] = useState<0 | 1 | 2>(1);
+  const [showMeshTools, setShowMeshTools] = useState(false);
+  const [mobilePanel, setMobilePanel] = useState<'viewport' | 'hierarchy' | 'inspector'>('viewport');
 
   const validationReport = useMemo(
     () => (activeAsset ? validateRobloxGeometry(activeAsset) : null),
@@ -138,50 +72,59 @@ export const EditView: React.FC = () => {
     [activeAsset]
   );
 
-  const comparisonTarget = useMemo(() => {
-    if (!activeAsset) return null;
-    if (compareTargetId && compareTargetId !== 'lod_preview') {
-      return assetLibrary.find((a) => (a.id || a.name) === compareTargetId) || null;
-    }
-    return null;
-  }, [activeAsset, assetLibrary, compareTargetId]);
-
-  const lodVariantStats = useMemo(() => {
-    if (!activeAsset) return null;
-    let totalVerts = 0;
-    let totalTris = 0;
-    for (const p of activeAsset.parts || []) {
-      const lods = p.meshData?.lodLevels || [];
-      const found = lods.find((l) => l.level === compareLodLevel);
-      if (found) {
-        totalVerts += found.vertexCount;
-        totalTris += found.triangleCount;
-      } else {
-        totalVerts += p.meshData?.vertices?.length || 0;
-        totalTris += p.meshData?.faces?.length || 12;
-      }
-    }
-    return { totalVerts, totalTris };
-  }, [activeAsset, compareLodLevel]);
-
   if (!activeAsset) {
     return (
-      <div className="py-20 text-center space-y-4 max-w-md mx-auto">
-        <div className="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500 mx-auto">
+      <div className="py-12 px-6 text-center space-y-5 max-w-xl mx-auto bg-slate-900/75 border border-cyan-500/30 rounded-3xl my-6 shadow-2xl">
+        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-500 to-indigo-600 flex items-center justify-center text-white mx-auto shadow-lg shadow-cyan-500/30 animate-float">
           <Box className="w-8 h-8" />
         </div>
-        <h3 className="text-lg font-bold text-white">No hay modelo cargado para editar</h3>
-        <p className="text-slate-400 text-xs leading-relaxed">
-          Selecciona un modelo desde la pantalla de Inicio o crea uno nuevo con el asistente de IA.
-        </p>
-        <button
-          type="button"
-          onClick={() => setActiveTab('create')}
-          className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition"
-        >
-          <Sparkles className="w-4 h-4" />
-          <span>Crear un nuevo modelo</span>
-        </button>
+        <div className="space-y-1.5">
+          <h3 className="text-xl font-extrabold text-white">Elige un modelo 3D para editar</h3>
+          <p className="text-slate-300 text-xs leading-relaxed max-w-md mx-auto">
+            Selecciona uno de tus modelos guardados aquí abajo o crea uno nuevo con el asistente.
+          </p>
+        </div>
+
+        {assetLibrary.length > 0 && (
+          <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-4 text-left space-y-2 max-w-md mx-auto">
+            <span className="text-xs font-bold text-cyan-300 block">
+              Tus modelos disponibles ({assetLibrary.length}):
+            </span>
+            <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+              {assetLibrary.slice(0, 6).map((item) => (
+                <button
+                  key={item.name}
+                  type="button"
+                  onClick={() => setActiveAsset(item)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-cyan-950/50 border border-slate-800 hover:border-cyan-500/50 flex items-center justify-between text-xs cursor-pointer transition"
+                >
+                  <span className="font-bold text-white truncate">{item.name}</span>
+                  <span className="text-[11px] font-mono text-cyan-300 shrink-0 ml-2">
+                    {item.parts?.length || 0} pzs · {(item.poly_count || 0).toLocaleString()} tris
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-center gap-3 pt-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab('create')}
+            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white text-xs font-bold inline-flex items-center gap-2 cursor-pointer transition shadow-lg"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>Crear Nuevo Modelo</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('home')}
+            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold cursor-pointer transition"
+          >
+            Ir a la Biblioteca
+          </button>
+        </div>
       </div>
     );
   }
@@ -202,7 +145,7 @@ export const EditView: React.FC = () => {
       applyAssetChange(updatedAsset, `Subdividir ${selectedPart.name}`, 'subdivide');
       setNotification({
         type: 'success',
-        message: 'Malla subdividida: resolución aumentada para mayor suavidad.',
+        message: 'Malla subdividida: mayor suavidad aplicada.',
       });
     } catch (err: any) {
       setNotification({ type: 'error', message: err.message || 'Error al subdividir' });
@@ -223,7 +166,7 @@ export const EditView: React.FC = () => {
       applyAssetChange(updatedAsset, `Diezmar ${selectedPart.name}`, 'decimate');
       setNotification({
         type: 'success',
-        message: 'Malla optimizada: polígonos reducidos para mejor rendimiento.',
+        message: 'Malla optimizada: menos polígonos para mayor velocidad.',
       });
     } catch (err: any) {
       setNotification({ type: 'error', message: err.message || 'Error al diezmar' });
@@ -241,7 +184,7 @@ export const EditView: React.FC = () => {
       applyAssetChange(updatedAsset, `Suavizar normales en ${selectedPart.name}`, 'smooth');
       setNotification({
         type: 'success',
-        message: 'Normales y curvatura suavizadas para iluminación continua.',
+        message: 'Superficie suavizada.',
       });
     } catch (err: any) {
       setNotification({ type: 'error', message: err.message || 'Error al suavizar' });
@@ -254,7 +197,7 @@ export const EditView: React.FC = () => {
       applyAssetChange(snapped, 'Alinear base al suelo Y = 0', 'ground_y0');
       setNotification({
         type: 'success',
-        message: 'Base del modelo colocada exactamente en el plano del suelo (Y = 0 studs).',
+        message: 'Modelo apoyado exactamente sobre el suelo (Y = 0).',
       });
     } catch (err: any) {
       setNotification({ type: 'error', message: err.message || 'Error al alinear' });
@@ -268,7 +211,7 @@ export const EditView: React.FC = () => {
       if (splitParts.length <= 1) {
         setNotification({
           type: 'info',
-          message: 'La pieza ya es monolítica y no contiene componentes geométricos desconectados.',
+          message: 'La pieza ya es una sola unidad continua.',
         });
         return;
       }
@@ -284,7 +227,7 @@ export const EditView: React.FC = () => {
       );
       setNotification({
         type: 'success',
-        message: `Pieza dividida en ${splitParts.length} partes lógicas separadas.`,
+        message: `Pieza dividida en ${splitParts.length} partes.`,
       });
     } catch (err: any) {
       setNotification({ type: 'error', message: err.message || 'Error al separar' });
@@ -295,7 +238,7 @@ export const EditView: React.FC = () => {
     if (!selectedPart) {
       setNotification({
         type: 'info',
-        message: 'Selecciona una pieza para validar y reparar su geometría.',
+        message: 'Selecciona una pieza primero.',
       });
       return;
     }
@@ -307,14 +250,14 @@ export const EditView: React.FC = () => {
       };
       applyAssetChange(
         updatedAsset,
-        `Validar y auto-reparar geometría en ${selectedPart.name}`,
+        `Auto-reparar geometría en ${selectedPart.name}`,
         'repair_degenerate'
       );
       setNotification({
         type: 'success',
         message: report.isClean
-          ? 'Geometría limpia: sin caras degeneradas.'
-          : `Reparación completa: ${report.zeroAreaTriangles} caras degeneradas reparadas.`,
+          ? 'Geometría perfecta: sin errores.'
+          : `Se repararon ${report.zeroAreaTriangles} caras degeneradas.`,
       });
     } catch (err: any) {
       setNotification({ type: 'error', message: err.message || 'Error en validación' });
@@ -349,6 +292,27 @@ export const EditView: React.FC = () => {
     );
   };
 
+  const handleResetTransform = (field: 'position_xz' | 'rotation') => {
+    if (!selectedPart) return;
+    const updatedPart: MeshPart3DSpec =
+      field === 'position_xz'
+        ? { ...selectedPart, position: [0, selectedPart.position?.[1] ?? 1, 0] }
+        : { ...selectedPart, rotation: [0, 0, 0] };
+
+    const updatedAsset: Forge3DAsset = {
+      ...activeAsset,
+      parts: activeAsset.parts.map((p) => (p.name === selectedPart.name ? updatedPart : p)),
+    };
+
+    applyAssetChange(
+      updatedAsset,
+      field === 'position_xz'
+        ? `Centrar ${selectedPart.name} en X=0, Z=0`
+        : `Restablecer rotación de ${selectedPart.name}`,
+      'transform_pos_rot'
+    );
+  };
+
   // --- Export Actions ---
 
   const handleExport = (format: 'rbxmx' | 'gltf' | 'obj' | 'luau') => {
@@ -367,11 +331,14 @@ export const EditView: React.FC = () => {
         const xml = exportAssetToRBXMX(activeAsset);
         if (!xml.includes('<roblox')) throw new Error('Salida .rbxmx inválida');
         triggerBlobDownload(xml, 'application/xml', `${safeBase}.rbxmx`);
-        setNotification({ type: 'success', message: `Archivo .rbxmx descargado correctamente.` });
+        setNotification({
+          type: 'success',
+          message: `Archivo ${safeBase}.rbxmx descargado. ¡Arrástralo dentro de Roblox Studio!`,
+        });
       } else if (format === 'gltf') {
         const gltf = exportAssetToGLTF(activeAsset);
         triggerBlobDownload(gltf, 'model/gltf+json', `${safeBase}.gltf`);
-        setNotification({ type: 'success', message: `Archivo .gltf descargado correctamente.` });
+        setNotification({ type: 'success', message: `Archivo .gltf descargado.` });
       } else if (format === 'obj') {
         const { obj, mtl, objFileName, mtlFileName } = exportAssetToOBJWithMTL(activeAsset);
         triggerBlobDownload(obj, 'text/plain', objFileName);
@@ -380,7 +347,7 @@ export const EditView: React.FC = () => {
         }, 180);
         setNotification({
           type: 'success',
-          message: `Paquete Wavefront ${objFileName} + ${mtlFileName} descargado.`,
+          message: `Archivos ${objFileName} + ${mtlFileName} descargados.`,
         });
       } else if (format === 'luau') {
         const luau = generateEditableMeshLuauCode(
@@ -405,7 +372,7 @@ export const EditView: React.FC = () => {
         triggerBlobDownload(luau, 'text/plain', `${safeBase}.luau`);
         setNotification({
           type: 'success',
-          message: `Script EditableMesh ${safeBase}.luau descargado correctamente.`,
+          message: `Script ${safeBase}.luau descargado.`,
         });
       }
     } catch (err: any) {
@@ -423,55 +390,36 @@ export const EditView: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-140px)] min-h-[640px] space-y-3 animate-in fade-in duration-200">
-      {/* Top Workspace Bar */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
-        {/* Model Title, Dimensions & Validation Status */}
+    <div className="flex flex-col h-[calc(100vh-140px)] min-h-[640px] space-y-3 animate-slide-up">
+      {/* Clean & Colorful Top Workspace Bar */}
+      <div className="bg-slate-900/90 border border-cyan-500/30 rounded-2xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0 shadow-lg">
+        {/* Left: Model Title & Dimensions */}
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500 to-indigo-600 flex items-center justify-center text-white shadow-md">
             <Box className="w-4 h-4" />
           </div>
           <div>
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-bold text-white text-sm">{activeAsset.name}</span>
+              <span className="font-extrabold text-white text-sm">{activeAsset.name}</span>
+              <span className="text-slate-600">·</span>
               {pendingChanges ? (
-                <span className="text-[10px] text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2 py-0.5 rounded-full">
-                  Cambios sin guardar
+                <span className="text-[11px] text-amber-400 font-bold">
+                  Sin guardar
                 </span>
               ) : (
-                <span className="text-[10px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <span className="text-[11px] text-emerald-400 font-bold flex items-center gap-1">
                   <Check className="w-3 h-3" />
                   Guardado
                 </span>
               )}
-              {validationReport && (
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1 ${
-                    validationReport.isValid
-                      ? 'text-emerald-300 bg-emerald-950/50 border-emerald-700/50'
-                      : 'text-red-300 bg-red-950/50 border-red-700/50'
-                  }`}
-                >
-                  {validationReport.isValid ? (
-                    <ShieldCheck className="w-3 h-3" />
-                  ) : (
-                    <AlertTriangle className="w-3 h-3" />
-                  )}
-                  {validationReport.isValid
-                    ? 'Geometría Válida'
-                    : `${validationReport.errors.length} Errores`}
-                </span>
-              )}
             </div>
-            <div className="text-slate-400 text-[11px] font-mono flex flex-wrap items-center gap-2 mt-0.5">
+            <div className="text-slate-400 text-[11px] font-mono tabular-nums flex flex-wrap items-center gap-2 mt-0.5">
               <span>{activeAsset.parts.length} piezas</span>
-              <span>•</span>
-              <span>{(validationReport?.totalVertices ?? 0).toLocaleString()} vértices</span>
-              <span>•</span>
-              <span>{activeAsset.poly_count.toLocaleString()} triángulos</span>
+              <span>·</span>
+              <span>{activeAsset.poly_count.toLocaleString()} tris</span>
               {dimensions && (
                 <>
-                  <span>•</span>
+                  <span>·</span>
                   <span className="text-cyan-300 flex items-center gap-1">
                     <Ruler className="w-3 h-3" />
                     {dimensions.width} × {dimensions.height} × {dimensions.depth} studs
@@ -482,14 +430,14 @@ export const EditView: React.FC = () => {
           </div>
         </div>
 
-        {/* Center: Undo / Redo & Ground Snap & Variant Compare */}
-        <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+        {/* Center: Simple Undo / Redo & Align to Floor */}
+        <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
           <button
             type="button"
             onClick={undo}
             disabled={!canUndo}
-            title={`Deshacer (${undoStack.length} disponibles)`}
-            className={`p-1.5 rounded-md transition flex items-center gap-1 text-xs cursor-pointer ${
+            title={`Deshacer (${undoStack.length})`}
+            className={`px-2.5 py-1.5 rounded-lg transition flex items-center gap-1 text-xs font-semibold cursor-pointer ${
               canUndo
                 ? 'text-slate-200 hover:bg-slate-800 hover:text-white'
                 : 'text-slate-600 cursor-not-allowed'
@@ -504,7 +452,7 @@ export const EditView: React.FC = () => {
             onClick={redo}
             disabled={!canRedo}
             title="Rehacer"
-            className={`p-1.5 rounded-md transition flex items-center gap-1 text-xs cursor-pointer ${
+            className={`px-2.5 py-1.5 rounded-lg transition flex items-center gap-1 text-xs font-semibold cursor-pointer ${
               canRedo
                 ? 'text-slate-200 hover:bg-slate-800 hover:text-white'
                 : 'text-slate-600 cursor-not-allowed'
@@ -519,174 +467,194 @@ export const EditView: React.FC = () => {
           <button
             type="button"
             onClick={handleSnapGround}
-            title="Colocar la base del modelo exactamente en el suelo (Y = 0)"
-            className="p-1.5 rounded-md text-slate-300 hover:text-cyan-300 hover:bg-slate-800 transition flex items-center gap-1 text-xs cursor-pointer"
+            title="Apoyar la base del modelo exactamente sobre el suelo (Y = 0)"
+            className="px-2.5 py-1.5 rounded-lg text-cyan-300 hover:bg-cyan-950/60 transition flex items-center gap-1 text-xs font-bold cursor-pointer"
           >
             <Move className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Alinear al suelo</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowCompareModal(true)}
-            title="Comparar métricas entre variantes / LODs / modelos guardados"
-            className="p-1.5 rounded-md text-slate-300 hover:text-purple-300 hover:bg-slate-800 transition flex items-center gap-1 text-xs cursor-pointer"
-          >
-            <GitCompare className="w-3.5 h-3.5 text-purple-400" />
-            <span className="hidden lg:inline">Comparar Variantes</span>
+            <span>Poner en Suelo (Y=0)</span>
           </button>
         </div>
 
-        {/* Right: Save, Export & Push */}
+        {/* Right: Download, Save & Send to Roblox */}
         <div className="flex items-center gap-2">
           <div className="relative">
             <button
               type="button"
               disabled={Boolean(exportingFormat)}
               onClick={() => setDownloadDropdown(!downloadDropdown)}
-              className="py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition border border-slate-700"
+              className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition border border-slate-700"
             >
-              <Download className="w-3.5 h-3.5" />
-              <span>Exportar</span>
+              <Download className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Descargar</span>
             </button>
 
             {downloadDropdown && (
-              <div className="absolute right-0 mt-1 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl py-1 z-50 text-xs text-slate-200">
+              <div className="absolute right-0 mt-1 w-52 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl py-1.5 z-50 text-xs text-slate-200">
                 <button
                   type="button"
                   onClick={() => handleExport('rbxmx')}
-                  className="w-full px-3 py-2 text-left hover:bg-slate-800 flex items-center justify-between cursor-pointer"
+                  className="w-full px-3.5 py-2 text-left hover:bg-slate-800 flex items-center justify-between cursor-pointer font-semibold"
                 >
                   <span>Roblox (.rbxmx)</span>
-                  <span className="text-[10px] text-cyan-400 font-mono">Recomendado</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleExport('luau')}
-                  className="w-full px-3 py-2 text-left hover:bg-slate-800 cursor-pointer"
-                >
-                  <span>EditableMesh (.luau)</span>
+                  <span className="text-[10px] text-emerald-400 font-bold">Recomendado</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExport('gltf')}
-                  className="w-full px-3 py-2 text-left hover:bg-slate-800 cursor-pointer"
+                  className="w-full px-3.5 py-2 text-left hover:bg-slate-800 cursor-pointer"
                 >
-                  <span>glTF 2.0 (.gltf)</span>
+                  <span>Blender / 3D (.gltf)</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExport('obj')}
-                  className="w-full px-3 py-2 text-left hover:bg-slate-800 cursor-pointer"
+                  className="w-full px-3.5 py-2 text-left hover:bg-slate-800 cursor-pointer"
                 >
                   <span>Wavefront (.obj + .mtl)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExport('luau')}
+                  className="w-full px-3.5 py-2 text-left hover:bg-slate-800 cursor-pointer"
+                >
+                  <span>Script Luau (.luau)</span>
                 </button>
               </div>
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving}
-            className="py-1.5 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
-          >
-            <Save className="w-3.5 h-3.5" />
-            <span>{saving ? 'Guardando...' : 'Guardar'}</span>
-          </button>
+          {pendingChanges && (
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="py-2 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>{saving ? '...' : 'Guardar'}</span>
+            </button>
+          )}
 
           <button
             type="button"
             onClick={() => pushToStudio(activeAsset)}
-            className="py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+            className="py-2 px-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition shadow-md shadow-emerald-600/20"
           >
             <Send className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Enviar a Studio</span>
+            <span className="hidden sm:inline">Enviar a Roblox</span>
           </button>
         </div>
       </div>
 
-      {/* Main Split Layout: Left Hierarchy | Center 3D Viewport | Right Inspector */}
+      {/* Responsive Mobile/Tablet Panel Switcher */}
+      <div className="flex md:hidden items-center gap-1.5 bg-slate-900/90 p-1.5 rounded-xl border border-slate-800 shrink-0">
+        <button
+          type="button"
+          onClick={() => setMobilePanel('viewport')}
+          className={`flex-1 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition ${
+            mobilePanel === 'viewport' ? 'bg-cyan-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Visor 3D
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobilePanel('hierarchy')}
+          className={`flex-1 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition ${
+            mobilePanel === 'hierarchy' ? 'bg-cyan-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Piezas ({activeAsset.parts.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobilePanel('inspector')}
+          className={`flex-1 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition ${
+            mobilePanel === 'inspector' ? 'bg-cyan-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Ajustes
+        </button>
+      </div>
+
+      {/* Main Split Layout: Left Parts List | Center 3D Viewport | Right Simple Inspector */}
       <div className="flex-1 grid grid-cols-1 md:grid-cols-12 gap-3 min-h-0">
-        {/* LEFT COLUMN */}
-        <div className="hidden md:flex md:col-span-3 lg:col-span-3 flex-col bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 overflow-hidden">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-2">
-            <span className="font-semibold text-xs text-white flex items-center gap-1.5">
+        {/* LEFT COLUMN: Clean Parts List */}
+        <div
+          className={`md:col-span-3 lg:col-span-3 flex-col bg-slate-900/85 border border-slate-800 rounded-2xl p-3.5 overflow-hidden ${
+            mobilePanel === 'hierarchy' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2">
+            <span className="font-bold text-xs text-white flex items-center gap-1.5">
               <Layers className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Jerarquía de Partes</span>
+              <span>Piezas del Modelo</span>
             </span>
-            <span className="text-[11px] font-mono text-slate-500">
-              {activeAsset.parts.length} piezas
+            <span className="text-[11px] font-mono tabular-nums text-cyan-300 font-bold">
+              {activeAsset.parts.length}
             </span>
           </div>
 
-          <div className="flex-1 overflow-y-auto space-y-1 pr-1 text-xs">
+          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 text-xs">
             {activeAsset.parts.map((part, index) => {
               const isSelected = selectedPart?.name === part.name;
+              const rgb = resolveRgbTuple(part.color);
               return (
                 <div
                   key={part.name + index}
-                  onClick={() => setSelectedPart(part)}
-                  className={`p-2 rounded-lg cursor-pointer transition flex items-center justify-between ${
+                  onClick={() => {
+                    setSelectedPart(part);
+                    if (mobilePanel === 'hierarchy') setMobilePanel('inspector');
+                  }}
+                  className={`p-2.5 rounded-xl cursor-pointer transition flex items-center justify-between ${
                     isSelected
-                      ? 'bg-cyan-950/60 text-cyan-300 border border-cyan-800/80 font-medium'
-                      : 'hover:bg-slate-800/70 text-slate-300'
+                      ? 'bg-gradient-to-r from-cyan-950/90 to-indigo-950/80 text-white border border-cyan-400/70 font-bold shadow-sm'
+                      : 'hover:bg-slate-800/70 text-slate-300 border border-transparent'
                   }`}
                 >
                   <div className="flex items-center gap-2 truncate">
-                    <Box
-                      className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-cyan-400' : 'text-slate-500'}`}
+                    <span
+                      className="w-3 h-3 rounded-full border border-white/30 shrink-0"
+                      style={{ backgroundColor: `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})` }}
                     />
                     <span className="truncate">{part.name}</span>
                   </div>
-                  <span className="text-[10px] font-mono text-slate-500 shrink-0 ml-1">
-                    {part.meshData?.faces?.length ? `${part.meshData.faces.length}t` : part.shape}
+                  <span className="text-[10px] font-mono tabular-nums text-slate-400 shrink-0 ml-1">
+                    {part.material}
                   </span>
                 </div>
               );
             })}
           </div>
 
-          {/* Geometry Validation Status Card */}
+          {/* Simple Validation Badge */}
           {validationReport && (
-            <div className="mt-2 p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] space-y-1">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-300">Validación Roblox Studio</span>
+            <div className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-between text-[11px]">
+              <span className="text-slate-400 flex items-center gap-1.5">
                 {validationReport.isValid ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                 ) : (
-                  <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
                 )}
-              </div>
-              <div className="text-slate-400 font-mono">
-                {validationReport.isValid
-                  ? `EditableMesh OK (${validationReport.totalVertices}v / ${validationReport.totalTriangles}t)`
-                  : validationReport.errors[0]}
-              </div>
-              {validationReport.warnings.length > 0 && (
-                <div className="text-amber-300 font-mono truncate" title={validationReport.warnings[0]}>
-                  Aviso: {validationReport.warnings[0]}
-                </div>
-              )}
+                <span>{validationReport.isValid ? 'Listo para Roblox' : 'Revisar malla'}</span>
+              </span>
+              <button
+                type="button"
+                onClick={handleRepairGeometry}
+                className="text-cyan-400 hover:text-cyan-300 font-bold cursor-pointer"
+              >
+                Reparar
+              </button>
             </div>
           )}
-
-          {/* Quick Repair */}
-          <div className="pt-2 border-t border-slate-800 flex gap-2 mt-2">
-            <button
-              type="button"
-              onClick={handleRepairGeometry}
-              className="flex-1 py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] flex items-center justify-center gap-1 cursor-pointer transition"
-              title="Detectar y corregir caras degeneradas"
-            >
-              <Wand2 className="w-3 h-3 text-cyan-400" />
-              <span>Auto-Reparar</span>
-            </button>
-          </div>
         </div>
 
-        {/* CENTER COLUMN */}
-        <div className="col-span-1 md:col-span-6 lg:col-span-6 rounded-xl overflow-hidden border border-slate-800 bg-black/80 relative flex flex-col">
+        {/* CENTER COLUMN: Interactive 3D Viewport */}
+        <div
+          className={`col-span-1 md:col-span-6 lg:col-span-6 rounded-2xl overflow-hidden border border-slate-800 bg-black/80 relative flex-col ${
+            mobilePanel === 'viewport' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
           <RobloxWorldViewport3D
             asset={activeAsset}
             onPartSelected={(part) => {
@@ -695,339 +663,21 @@ export const EditView: React.FC = () => {
           />
         </div>
 
-        {/* RIGHT COLUMN */}
-        <div className="hidden md:flex md:col-span-3 lg:col-span-3 flex-col bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 overflow-y-auto space-y-4">
-          {selectedPart ? (
-            <>
-              <div className="border-b border-slate-800 pb-2">
-                <span className="text-[10px] uppercase tracking-wider text-cyan-400 font-bold block">
-                  Pieza Seleccionada
-                </span>
-                <h4 className="font-bold text-white text-sm truncate mt-0.5">
-                  {selectedPart.name}
-                </h4>
-                <div className="text-[11px] text-slate-400 font-mono flex items-center gap-2 mt-0.5">
-                  <span>Forma: {selectedPart.shape}</span>
-                  <span>•</span>
-                  <span>{selectedPart.material}</span>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <span className="text-xs font-semibold text-slate-200 block">
-                  Transformación
-                </span>
-
-                <div className="space-y-1">
-                  <span className="text-[11px] text-slate-400 block">Posición (X, Y, Z studs):</span>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {['X', 'Y', 'Z'].map((axis, i) => (
-                      <div
-                        key={axis}
-                        className="flex items-center bg-slate-950 border border-slate-800 rounded px-1.5 py-1"
-                      >
-                        <span className="text-[10px] font-mono text-slate-500 mr-1">{axis}</span>
-                        <input
-                          type="number"
-                          step="0.5"
-                          value={selectedPart.position?.[i] ?? 0}
-                          onChange={(e) =>
-                            handleTransformChange('position', i, parseFloat(e.target.value) || 0)
-                          }
-                          className="w-full bg-transparent text-xs text-white focus:outline-none text-right font-mono"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <span className="text-[11px] text-slate-400 block">Rotación (grados):</span>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {['X', 'Y', 'Z'].map((axis, i) => (
-                      <div
-                        key={axis}
-                        className="flex items-center bg-slate-950 border border-slate-800 rounded px-1.5 py-1"
-                      >
-                        <span className="text-[10px] font-mono text-slate-500 mr-1">{axis}</span>
-                        <input
-                          type="number"
-                          step="15"
-                          value={selectedPart.rotation?.[i] ?? 0}
-                          onChange={(e) =>
-                            handleTransformChange('rotation', i, parseFloat(e.target.value) || 0)
-                          }
-                          className="w-full bg-transparent text-xs text-white focus:outline-none text-right font-mono"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <span className="text-[11px] text-slate-400 block">Tamaño (studs):</span>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {['X', 'Y', 'Z'].map((axis, i) => (
-                      <div
-                        key={axis}
-                        className="flex items-center bg-slate-950 border border-slate-800 rounded px-1.5 py-1"
-                      >
-                        <span className="text-[10px] font-mono text-slate-500 mr-1">{axis}</span>
-                        <input
-                          type="number"
-                          step="0.5"
-                          min="0.1"
-                          value={selectedPart.size?.[i] ?? 1}
-                          onChange={(e) =>
-                            handleTransformChange(
-                              'size',
-                              i,
-                              Math.max(0.1, parseFloat(e.target.value) || 0.1)
-                            )
-                          }
-                          className="w-full bg-transparent text-xs text-white focus:outline-none text-right font-mono"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-2 pt-2 border-t border-slate-800">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-200">
-                    Herramientas de Geometría
-                  </span>
-                  <HelpTooltip
-                    term={FORGE_GLOSSARY.editableMesh.term}
-                    explanation={FORGE_GLOSSARY.editableMesh.explanation}
-                    variant="badge"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <button
-                    type="button"
-                    onClick={handleSubdivide}
-                    className="w-full p-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-left transition flex items-center justify-between cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                      <div>
-                        <span className="text-xs font-medium text-slate-200 block">
-                          Subdividir superficie
-                        </span>
-                        <span className="text-[10px] text-slate-500 block">
-                          Aumenta suavidad (más polígonos)
-                        </span>
-                      </div>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleDecimate}
-                    className="w-full p-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-left transition flex items-center justify-between cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Minimize2 className="w-3.5 h-3.5 text-blue-400" />
-                      <div>
-                        <span className="text-xs font-medium text-slate-200 block">
-                          Diezmar / Optimizar
-                        </span>
-                        <span className="text-[10px] text-slate-500 block">
-                          Reduce polígonos para evitar lag
-                        </span>
-                      </div>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleSmooth}
-                    className="w-full p-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-left transition flex items-center justify-between cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Wand2 className="w-3.5 h-3.5 text-emerald-400" />
-                      <div>
-                        <span className="text-xs font-medium text-slate-200 block">
-                          Suavizar normales
-                        </span>
-                        <span className="text-[10px] text-slate-500 block">
-                          Aspecto continuo sin facetas duras
-                        </span>
-                      </div>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleSmartSplit}
-                    className="w-full p-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-left transition flex items-center justify-between cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Scissors className="w-3.5 h-3.5 text-amber-400" />
-                      <div>
-                        <span className="text-xs font-medium text-slate-200 block">
-                          Separar partes lógicas
-                        </span>
-                        <span className="text-[10px] text-slate-500 block">
-                          Descompone mallas desconectadas
-                        </span>
-                      </div>
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="py-12 text-center text-slate-500 text-xs">
-              Haz clic en cualquier pieza en el visor 3D o en la jerarquía para ver y modificar sus propiedades.
-            </div>
-          )}
-        </div>
+        {/* RIGHT COLUMN: Clean Inspector + Collapsible Advanced Mesh Tools */}
+        <EditInspectorPanel
+          selectedPart={selectedPart}
+          showMeshTools={showMeshTools}
+          onToggleMeshTools={() => setShowMeshTools(!showMeshTools)}
+          onTransformChange={handleTransformChange}
+          onResetTransform={handleResetTransform}
+          onOpenMaterials={() => setActiveTab('materials')}
+          onSubdivide={handleSubdivide}
+          onDecimate={handleDecimate}
+          onSmooth={handleSmooth}
+          onSmartSplit={handleSmartSplit}
+          isVisibleMobile={mobilePanel === 'inspector'}
+        />
       </div>
-
-      {/* Variant & LOD Comparison Modal */}
-      {showCompareModal && (
-        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-700 p-5 space-y-4 text-xs shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <GitCompare className="w-4 h-4 text-purple-400" />
-                <h3 className="text-sm font-bold text-white">
-                  Comparador de Variantes y Presupuesto LOD
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowCompareModal(false)}
-                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="text-[11px] text-slate-400 block mb-1">
-                  Comparar contra variante guardada o LOD:
-                </label>
-                <select
-                  value={compareTargetId || 'lod_preview'}
-                  onChange={(e) => setCompareTargetId(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                >
-                  <option value="lod_preview">Variante LOD del modelo actual</option>
-                  {assetLibrary
-                    .filter((a) => (a.id || a.name) !== (activeAsset.id || activeAsset.name))
-                    .map((a) => (
-                      <option key={a.id || a.name} value={a.id || a.name}>
-                        {a.name} ({a.poly_count} tris)
-                      </option>
-                    ))}
-                </select>
-              </div>
-
-              {(!compareTargetId || compareTargetId === 'lod_preview') && (
-                <div>
-                  <label className="text-[11px] text-slate-400 block mb-1">
-                    Nivel LOD a comparar:
-                  </label>
-                  <select
-                    value={compareLodLevel}
-                    onChange={(e) => setCompareLodLevel(Number(e.target.value) as 0 | 1 | 2)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-white"
-                  >
-                    <option value={0}>LOD 0 (Máximo detalle)</option>
-                    <option value={1}>LOD 1 (Medio / Equilibrado)</option>
-                    <option value={2}>LOD 2 (Bajo / Rendimiento)</option>
-                  </select>
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="p-3 rounded-xl bg-slate-950 border border-cyan-800/50 space-y-1.5">
-                <div className="text-[11px] font-bold text-cyan-400">
-                  Activo: {activeAsset.name}
-                </div>
-                <div className="font-mono text-slate-300">
-                  Piezas: {activeAsset.parts.length}
-                </div>
-                <div className="font-mono text-slate-300">
-                  Vértices: {(validationReport?.totalVertices ?? 0).toLocaleString()}
-                </div>
-                <div className="font-mono text-slate-300">
-                  Triángulos: {(validationReport?.totalTriangles ?? activeAsset.poly_count).toLocaleString()}
-                </div>
-                <div className="font-mono text-slate-400">
-                  Dimensiones: {dimensions?.width} × {dimensions?.height} × {dimensions?.depth} studs
-                </div>
-              </div>
-
-              <div className="p-3 rounded-xl bg-slate-950 border border-purple-800/50 space-y-1.5">
-                {comparisonTarget ? (
-                  <>
-                    <div className="text-[11px] font-bold text-purple-400">
-                      Biblioteca: {comparisonTarget.name}
-                    </div>
-                    <div className="font-mono text-slate-300">
-                      Piezas: {comparisonTarget.parts?.length || 0}
-                    </div>
-                    <div className="font-mono text-slate-300">
-                      Vértices:{' '}
-                      {(
-                        comparisonTarget.parts?.reduce(
-                          (acc: number, p: MeshPart3DSpec) => acc + (p.meshData?.vertices?.length || 0),
-                          0
-                        ) || 0
-                      ).toLocaleString()}
-                    </div>
-                    <div className="font-mono text-slate-300">
-                      Triángulos: {(comparisonTarget.poly_count || 0).toLocaleString()}
-                    </div>
-                    <div className="font-mono text-slate-400">
-                      Delta tris:{' '}
-                      {(comparisonTarget.poly_count || 0) -
-                        (validationReport?.totalTriangles ?? activeAsset.poly_count)}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-[11px] font-bold text-purple-400">
-                      LOD {compareLodLevel} ({activeAsset.name})
-                    </div>
-                    <div className="font-mono text-slate-300">
-                      Piezas: {activeAsset.parts.length}
-                    </div>
-                    <div className="font-mono text-slate-300">
-                      Vértices: {(lodVariantStats?.totalVerts ?? 0).toLocaleString()}
-                    </div>
-                    <div className="font-mono text-slate-300">
-                      Triángulos: {(lodVariantStats?.totalTris ?? 0).toLocaleString()}
-                    </div>
-                    <div className="font-mono text-emerald-400">
-                      Reducción:{' '}
-                      {validationReport && validationReport.totalTriangles > 0
-                        ? `${Math.max(
-                            0,
-                            Math.round(
-                              (1 -
-                                (lodVariantStats?.totalTris ?? 0) /
-                                  validationReport.totalTriangles) *
-                                100
-                            )
-                          )}% menos polígonos`
-                        : '0%'}
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

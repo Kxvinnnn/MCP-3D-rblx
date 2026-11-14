@@ -1,4 +1,4 @@
-import { Forge3DAsset, MeshPart3DSpec } from './roblox3DEngine.ts';
+import { Forge3DAsset } from './roblox3DEngine.ts';
 
 /**
  * Pure TypeScript SHA-256 implementation (NIST FIPS 180-4).

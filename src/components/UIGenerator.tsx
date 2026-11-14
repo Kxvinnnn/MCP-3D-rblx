@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles, Image as ImageIcon, Upload, Play, Download, Copy, Check, Info, Palette, Folder } from 'lucide-react';
+import { Image as ImageIcon, Upload, Play, Copy, Check, Info, Palette, Folder } from 'lucide-react';
 import { RobloxCanvasPreview, UINodeData } from './RobloxCanvasPreview.tsx';
 import { FloatingTerminalLog, TerminalLogEntry } from './FloatingTerminalLog.tsx';
 import { forgeFetch } from '../utils/forgeApiClient.ts';
@@ -19,7 +19,7 @@ export const UIGenerator: React.FC = () => {
     'Crea un menú de Tienda de Armas Cyberpunk modal. Contenedor centrado con UDim2.fromScale(0.55, 0.65). Debe incluir una barra superior con título en degradado y botón de cerrar "X", una lista o grid con 3 tarjetas de armas (con precio, botón de comprar "PURCHASE" con efecto hover e icono cuadrado con UIAspectRatioConstraint).'
   );
   const [styleTheme, setStyleTheme] = useState<string>('Dark Cyberpunk');
-  const [modelTier, setModelTier] = useState<'fast' | 'pro'>('fast');
+  const [modelTier] = useState<'fast' | 'pro'>('fast');
   const [saveToRojo, setSaveToRojo] = useState<boolean>(true);
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
