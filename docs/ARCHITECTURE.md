@@ -1,119 +1,141 @@
-# Arquitectura de Software Modular — NIGHTMARE FORGE / Forge AI Studio v2.3.0
+# Arquitectura del Sistema — NIGHTMARE FORGE / Forge AI Studio
 
-Este documento describe la arquitectura desacoplada de **Forge AI Studio v2.3.0**, diseñada con **paridad modular entre Python (`backend/engines/`) y TypeScript (`src/server/engines/`)**, generación 3D procedural local (Motor 1), puente local autenticado (`forge-bridge/`) y un **Núcleo Unificado de Integridad de Datos, Hashing Canónico SHA-256 y Persistencia Atómica**.
-
-> **Índice Rápido para IA**: Consulta `AI_ARCHITECTURE_MAP.md` en la raíz del proyecto o invoca `GET /api/v1/ai-manifest` para obtener los contratos e invariantes de cada módulo en formato compacto.
+Este documento describe la arquitectura integral de **NIGHTMARE FORGE / Forge AI Studio v2.3.0**: frontend interactivo, gateway Express + Vite, motores de generación 3D híbrida en TypeScript, paridad Python FastAPI, adaptador opcional de modelos 3D externos, evaluación visual multi-vista, hashing canónico e integración con Roblox Studio y Rojo 7.x.
 
 ---
 
-## 1. Mapa de los 8 Motores Modulares (`backend/engines/` ↔ `src/server/engines/`)
+## 1. Diagrama de Flujo General del Sistema
 
-### 1.0 `Context Pruner Engine` (`backend/engines/context_pruner.py` | `src/server/engines/contextPrunerEngine.ts`)
-- **Problema que resuelve**: Enviar todo el archivo `project_context.md` en cada llamada al modelo desperdicia tokens y añade ruido de dominios no relacionados.
-- **Solución**: Divide `project_context.md` en bloques semánticos (`ROJO_MAPPING`, `LUAU_STANDARDS`, `MAID_PATTERN`, `UI_FORGEGUI`, `EXISTING_MODULES`) e inyecta únicamente los bloques requeridos por el dominio activo (`3d`, `pbr`, `luau`, `ui`, `world`, `agents`), manteniendo siempre la lista verificada de módulos Rojo en disco.
+```mermaid
+flowchart TB
+    subgraph UI["Frontend React 19 + Three.js (src/components/)"]
+        CW["CreateWizardView.tsx\nAsistente + Telemetria + 5 Vistas"]
+        EV["EditView.tsx / EditInspectorPanel.tsx\nEditor de Partes 3D"]
+        MV["MaterialsView.tsx / InteractiveColorWheel.tsx\nPBR & Color"]
+        SS["StudioSyncView.tsx\nEstado Bridge + Recibos"]
+    end
 
-### 1.1 `3D Generation Engine` (`backend/engines/generation_3d_engine.py` | `src/server/engines/generation3DEngine.ts` & `procedural3DGenerator.ts`)
-- **Responsabilidades**:
-  - **Motor 1 Procedural Parametrizado** (sin claves de API): soporta 8 categorías y el generador de árboles 3D configurable (23 parámetros: dimensiones, curvatura/inclinación de tronco, densidad de follaje, colores hex + variación, nivel de detalle y LOD 0/1/2 cerrados), integrado con `parseNaturalLanguageToTreeParams` (`src/utils/treePromptParser.ts`).
-  - Extracción de buffers geométricos reales (`vertices`, `normals`, `uvs`, `faces` 0-based) desde `.OBJ` o sub-mallas procesadas, exponiendo `forgeAssetId` y manteniendo `robloxAssetId: null` hasta publicación cloud.
-  - División inteligente de mallas densas (`>9,000` vértices o `>9,500` caras) y protección estricta contra el límite Roblox `EditableMesh` (`<= 20,000` vértices y caras por sub-malla).
-  - Generación de módulos Luau `--!strict` que reconstruyen `MeshPart` reales mediante `AssetService:CreateEditableMesh()`, propagan errores de `SetFaceNormals`/`SetFaceUVs`, verifican `#editableMesh:GetVertices()` y `#editableMesh:GetTriangles()`, destruyen huérfanos en caso de fallo y nunca asignan la propiedad de solo lectura `MeshPart.MeshId`.
+    subgraph GW["Gateway Unificado (server.ts :3000)"]
+        API["API REST / SSE\nX-Forge-Token (timingSafeEqual)"]
+        DIR["aiGenerationDirector.ts\nGemini Director / Fallback Local"]
+        EXT["external3DModelAdapter.ts\nAdapter HTTP GPU Opcional"]
+        P3D["procedural3DGenerator.ts\nOrquestador 3D + Provenance"]
+        AE["assetEngine.ts & worldAndModelEditorEngine.ts\nExportadores + Biblioteca Atomica"]
+        BC["bridgeCoordinatorEngine.ts\nHMAC-SHA256 + Anti-Replay"]
+    end
 
-### 1.2 `Asset Engine` (`backend/engines/asset_engine.py` | `src/server/engines/assetEngine.ts`)
-- **Responsabilidades**:
-  - Serializador y parser bidireccional `.RBXMX` (`buildRbxmxFromPartsServer`, `parseRbxmxFromPartsServer`) que preserva matrices de rotación `CFrame` 3×3, colores, materiales, los 4 canales de `SurfaceAppearance` y los buffers `ForgeMeshGeometryJSON`.
-  - Exportador `.glTF 2.0` con buffers binarios embebidos y exportador Wavefront `.OBJ` + `.MTL`.
-  - Publicación de los 4 canales PBR (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`) hacia Roblox Open Cloud con **polling asíncrono de `Operation`** (`/assets/v1/operations/{id}`), diferenciando estado `local_saved` vs `cloud_published`.
-  - Biblioteca persistente (`assets_library.json`) con **escritura atómica (`fsync` + `rename`)** y **snapshots completos de hasta 25 versiones**.
+    subgraph ENGINES["Sub-Motores Geometricos y Analiticos"]
+        NLP["treePromptParser.ts\nParser ES/EN"]
+        IMG["imageReferenceProcessor.ts\nPNG/JPEG -> 16 Cortes + depthProfile16"]
+        SPEC["specializedGeometryGenerators.ts\nEdificios / Rocas / Props / Lathe"]
+        UNIV["universalFreeform3DEngine.ts\nSemantica -> Grafo -> Mallas -> Eval -> 5 SVGs"]
+        VAL["canonicalHash.ts + robloxGeometryValidator.ts"]
+    end
 
-### 1.3 `Luau Engine` (`backend/engines/luau_engine.py` | `src/server/engines/luauEngine.ts`)
-- **Responsabilidades**:
-  - Enrutamiento determinista de scripts `Server` (`src/server/*.server.luau`), `Client` (`src/client/*.client.luau`) y `Module` (`src/shared/*.luau`).
-  - Cumplimiento estricto de `--!strict`, servicios al inicio con `game:GetService(...)`, librería `task.*` y limpieza de eventos con `Maid`.
+    subgraph LOCAL["Entorno Local Windows / Roblox"]
+        PY["backend/main.py (:8000)\nParidad Python FastAPI"]
+        BR["forge-bridge (127.0.0.1:48720)\nZero-Inbound + TaskStateStore"]
+        ROJO["Rojo 7.x (:34872)\nrojo_workspace/default.project.json"]
+        STUDIO["Roblox Studio Plugin\nForgeAIStudioPlugin.server.luau"]
+    end
 
-### 1.4 `UI Engine` (`backend/engines/ui_engine.py` | `src/server/engines/uiEngine.ts`)
-- **Responsabilidades**:
-  - Generación de módulos `ScreenGui` en `src/client/UI` con posicionamiento exclusivamente en escala (`UDim2.fromScale`) y `AnchorPoint = Vector2.new(0.5, 0.5)`.
-  - Generación simultánea del árbol jerárquico `ui_tree` para previsualización en vivo y soporte nativo de `ViewportFrame` con `WorldModel` 3D.
-
-### 1.5 `World Engine` (`backend/engines/world_engine.py` | `src/server/engines/worldEngine.ts`)
-- **Responsabilidades**:
-  - Configuración programática del servicio `Lighting` y la instancia `Atmosphere` según biomas predefinidos (`CyberpunkOrbital`, `MedievalForge`, `ArcticResearchBase`).
-  - Ensamblaje espacial de múltiples assets de la biblioteca dentro de una carpeta de zona en `Workspace`.
-
-### 1.6 `Rojo Bridge` (`backend/engines/rojo_bridge.py` | `src/server/engines/rojoBridge.ts`)
-- **Responsabilidades**:
-  - Validación de seguridad de rutas (`resolveSafeRojoPath`) garantizando que ningún archivo pueda escribirse fuera de `ROJO_PROJECT_PATH`.
-  - Sanitización de código Luau (`sanitizeStrictLuauCode`) y generación del **Manifiesto de Sincronización SHA-256** (`/api/v1/rojo/sync-manifest`).
-
-### 1.7 `Specialized Agents Engine — P3` (`backend/engines/agents_engine.py` | `src/server/engines/agentsEngine.ts`)
-- **Flujo Secuencial de 7 Agentes**:
-  1. `ArchitectAgent` → 2. `3DGenerationAgent` → 3. `AssetEngineAgent` → 4. `WorldBuilderAgent` → 5. `LuauScripterAgent` → 6. `UIEngineAgent` → 7. `RojoBridgeAgent`.
-
----
-
-## 2. Sub-Sistema de Integridad de Datos, Hashing y Sincronización (`src/utils/`)
-
-### 2.1 `Canonical Hash Engine` (`src/utils/canonicalHash.ts`)
-- **Hashing SHA-256 (NIST FIPS 180-4)**:
-  - Codifica cadenas utilizando `TextEncoder` antes de procesar bloques de 512 bits, calculando la longitud exacta en bits a partir del arreglo de bytes UTF-8 (`bytes.length * 8`). Esto elimina errores en pares sustitutos UTF-16, caracteres acentuados en español y emojis.
-- **Normalización JSON Canónica (`toCanonicalJsonValue`)**:
-  - Ordena las claves de los objetos lexicográficamente de forma independiente a la localización (`strictOrdinalCompare`).
-  - En la raíz del recurso excluye claves volátiles de servidor (`created_at`, `updated_at`, `version`, `saved_path`), pero las preserva dentro de objetos anidados (`customMeta`, etc.).
-  - Reordena los elementos de un `Set` tras serializarlos canónicamente, garantizando que el orden de inserción no afecte el digest.
-  - Para `Map` con claves mixtas, serializa pares `[canonicalKey, canonicalValue]` de forma que la clave numérica `1` y la cadena `"1"` no colisionen.
-  - Representa `ArrayBuffer` mediante arreglos de bytes enteros (`Uint8Array`).
-- **Sub-Hashes Granulares**:
-  - `computeGeometryHash()`: Cubre únicamente formas, tamaños y mallas de vértices/caras (`meshData`, `baseMeshData`).
-  - `computeAppearanceHash()`: Cubre únicamente colores, materiales, transparencias y perfiles PBR.
-  - `computePropertiesHash()`: Cubre únicamente posiciones, rotaciones, matrices `CFrame` y banderas físicas (`anchored`, `canCollide`, etc.).
-
-### 2.2 `Roblox Geometry Validator` (`src/utils/robloxGeometryValidator.ts`)
-- **Triangulación 3D Real Ear Clipping (`triangulatePolygonFace3D`)**:
-  - Calcula la normal del polígono 3D mediante la fórmula de Newell.
-  - Proyecta los vértices sobre el plano dominante 2D (XY, XZ o YZ).
-  - Recorta "orejas" (ears) convexas verificando que ningún otro vértice se encuentre dentro del triángulo.
-  - Utiliza tolerancias adaptativas relativas al tamaño del bounding-box del polígono para soportar modelos miniatura y estructuras de gran escala sin falsos degenerados.
-- **Validación de Límites y Restricciones de Roblox Studio**:
-  - Valida tanto `meshData` como `baseMeshData` (rechazando modelos vacíos de 0 piezas como no válidos).
-  - Limites de escala por pieza (`0.001` a `2048` studs).
-  - Verificación de coordenadas finitas (rechazo de `NaN` o `Infinity` en posición, rotación o `rotationMatrix`).
-  - Detección de caras malformadas (`< 3` vértices), índices fuera de límites de vértices y caras degeneradas/colineales.
-
-### 2.3 `Incremental Sync Engine` (`src/utils/incrementalSync.ts`)
-- **Prevenición de Colisiones de Identidad (`buildCollisionSafePartMap`)**:
-  - Exige unicidad en `partId` explícitos; si se detectan duplicados, interrumpe la sincronización con un error claro.
-  - Para piezas sin `partId`, genera una clave jerárquica unívoca (`fallback::parentId::hierarchyPath::name#occurrence`) y registra advertencias sin sobrescribir elementos.
-- **Clasificación Quirúrgica de Cambios (`computeIncrementalDiff`)**:
-  - Clasifica las piezas en `added`, `removed`, `modified` y `unchanged`.
-  - Las piezas eliminadas (`removed`) o añadidas (`added`) activan automáticamente los flags globales de cambio de geometría, apariencia, propiedades y jerarquía.
+    CW & EV & MV & SS -->|HTTP JSON / SSE| API
+    API --> DIR & EXT & P3D & AE & BC
+    P3D --> NLP & IMG & SPEC & UNIV
+    P3D & AE --> VAL
+    BC <-->|Polling HMAC-SHA256 saliente| BR
+    BR -->|Whitelist archivos| ROJO
+    BR <-->|X-Plugin-Token| STUDIO
+    ROJO <--> STUDIO
+    API -.->|Proxy opcional| PY
+```
 
 ---
 
-## 3. Máquina de Estados del Contexto React (`src/context/ForgeContext.tsx`)
+## 2. Diagrama Text-to-3D Híbrido (Con Provenance y Sin Plantillas Rígidas)
 
-### 3.1 Transiciones Protegidas de `setActiveAsset()`
-- **Cierre o Cambio de Recurso con Cambios Pendientes**:
-  - Invocaciones a `setActiveAsset(null)` o a otro recurso cuando `pendingChanges = true` no destruyen el estado activo.
-  - Se activa `showUnsavedModal = true` y se registra la intención en `pendingSwitchToNullRef` o `pendingSwitchTarget`.
-  - `confirmSwitchDiscard()` restaura el recurso activo exactamente al snapshot persistido original (`savedAssetSnapshotRef`).
-
-### 3.2 Detección de Conflictos al Recuperar Borradores (`recoverDraft`)
-- Compara `baseHash` del borrador contra el hash de la versión guardada actual.
-- Si el modelo guardado cambió en la sesión o biblioteca desde que se guardó el borrador, se activa `activeConflict` (`localAsset` vs `remoteAsset`) solicitando resolución al usuario.
-
-### 3.3 Verificación de Persistencia y Sincronización en `pushToStudio()`
-- `saveAssetToDisk()` valida el modelo devuelto por el servidor mediante `verifyPersistedAssetContent()` antes de borrar `pendingChanges`.
-- `pushToStudio()` realiza una validación geométrica previa (`validateRobloxGeometry`); si la tarea queda en cola (`queued`) en el puente local, no limpia `pendingChanges`. Únicamente actualiza la línea base cuando Roblox Studio confirma la ejecución completa (`completed`).
+```mermaid
+flowchart LR
+    Prompt["Prompt Textual ES/EN + seed + preset + tree_params"] --> Parser["parseNaturalLanguageToTreeParams()"]
+    Prompt --> Semantics["interpretPromptSemantics()\nTaxonomia + Arquetipo + Modificadores ES/EN"]
+    Prompt --> AI["AI Director\nGemini 2.5 o Heuristic Baseline"]
+    Parser & Semantics & AI --> Prov["Resolucion de Precedencia\nmanual_ui > preset > prompt_nlp > ai_director > default"]
+    Prov -->|Trees| Tree["Generador de Arboles\n7 Especies + Asimetria + Estilos"]
+    Prov -->|Buildings / Rocks / Chairs / Lamps / Mechanical / Scenes| Spec["Motores Especializados\nCastillo / Futurista / Torre / Icosferas / Engranajes"]
+    Prov -->|Animales / Aves / Vehiculos / Naves / Espadas / Freeform| Univ["Motor Libre Universal\nSpline Lofting + Toros + Wings + Limbs"]
+    Tree & Spec & Univ --> Norm["Grounding Y=0 + LOD0/1/2 + Particion <= 9,000 verts"]
+    Norm --> Hash["computeCanonicalAssetHash()\n(excluye latency_ms y metadata volatil raiz)"]
+```
 
 ---
 
-## 4. Plugin de Roblox Studio v2.3.0 & Persistencia del Puente (`backend/roblox_plugin/` + `forge-bridge/`)
+## 3. Diagrama Image-to-3D
 
-- **Reconstrucción `EditableMesh` en Modo Edición (`RunService:IsEdit()`)**:
-  - Listener automático `Workspace.ChildAdded` y ejecución vía puente (`studio.reconstruct_model`, `studio.apply_modifications`) con validación de recibo y hash calculado directamente sobre las piezas reconstruidas (`collectSerializedReconstructedState`).
-  - Confirmación obligatoria en el DockWidget antes de ejecutar eliminaciones destructivas de piezas.
-- **Persistencia Atómica de Tareas (`forge-bridge/src/taskStateStore.ts`)**:
-  - Escritura segura mediante `.tmp` + `rename` + detección de corrupción (`.corrupt.<ts>.bak`), preservando confirmaciones pendientes (`awaiting_studio_confirmation`) a través de reinicios completos del proceso Node.js.
-- **Push Incremental Studio → Forge (`/api/v1/assets/studio-push`)**:
-  - Sincroniza la selección actual de Roblox Studio de vuelta hacia Forge AI Studio conservando buffers geométricos y mapas PBR.
+```mermaid
+flowchart LR
+    Ref["Base64 PNG / JPEG"] --> Dec["Decodificacion Binaria Real RGBA"]
+    Dec --> Seg["Segmentacion Primer Plano\nAlpha < 45 o Distancia Fondo"]
+    Seg --> Scan["16 Cortes Verticales\nwidthProfile16 + depthProfile16 + sliceHex"]
+    Scan --> Sym["estimatedSymmetryScore + volumetricConfidence"]
+    Scan & Sym --> Fam["inferredObjectFamily\ntree | tower | animal | vehicle | lamp | rock | wide | composite"]
+    Fam --> Lathe["generateReferenceImage3DAssetParts()\nbuildLatheSilhouetteMesh(..., depthProfile)"]
+    Lathe --> IoU["evaluateReferenceVsModelMetrics()\nsilhouetteMatchIoU + volumetricMatchScore"]
+```
+
+---
+
+## 4. Diagrama Motor Híbrido con Proveedor GPU Externo y Fallback Honesto
+
+```mermaid
+sequenceDiagram
+    participant Client as Frontend / API Caller
+    participant Server as Gateway (server.ts)
+    participant Ext as FORGE_EXTERNAL_3D_ENDPOINT
+    participant Gem as Gemini API (aiGenerationDirector)
+    participant Local as procedural3DGenerator (CPU)
+
+    Client->>Server: POST /api/v1/generate-3d (generation_mode='hybrid')
+    alt Endpoint externo configurado y accesible
+        Server->>Ext: POST /generate (model=trellis|hunyuan3d_2|...)
+        Ext-->>Server: OBJ/GLTF mesh
+        Server-->>Client: executed_mode='external_3d_model', engine_used='external_3d_model:...'
+    else Sin endpoint externo o falla HTTP
+        opt GEMINI_API_KEY disponible
+            Server->>Gem: Solicita blueprint JSON + arbitrary_components
+            Gem-->>Server: Blueprint o fallback si cuota/error
+        end
+        Server->>Local: synthesizeSeededProcedural3DAsset()
+        Local-->>Server: Asset 3D + execution_report (fallback_triggered=true si fallo proveedor)
+        Server-->>Client: Asset completo + provenance + warnings + latency_ms
+    end
+```
+
+---
+
+## 5. Diagrama Exportación y Sincronización con Roblox Studio
+
+```mermaid
+flowchart LR
+    Parts["Partes Normalizadas\n(EditableMeshBuffers, <= 9,000 verts/MeshPart)"] --> ExpLuau["buildStrictLuauFromEditedParts()\n--!strict + CreateEditableMesh"]
+    Parts --> ExpRbxmx["buildRbxmxFromPartsServer()\nXML .rbxmx + ForgeMeshGeometryJSON"]
+    Parts --> ExpGltf["buildGltfFromPartsServer()\n.glTF 2.0"]
+    Parts --> ExpObj["buildObjAndMtlFromPartsServer()\nWavefront .obj + .mtl"]
+    ExpLuau --> Coord["CloudBridgeCoordinator\nEnqueue HMAC-SHA256"]
+    Coord -->|Zero-Inbound Poll| Bridge["Forge Local Bridge (127.0.0.1:48720)\nTaskStateStore Atomico"]
+    Bridge --> RojoFS["ROJO_PROJECT_PATH/src/shared/Assets3D/\n+ rojo serve :34872"]
+    Bridge --> Plugin["ForgeAIStudioPlugin.server.luau\nApply Incremental + Cola Destructiva"]
+    Plugin -->|StudioApplicationReceipt + FNV32| Bridge --> Coord
+```
+
+---
+
+## 6. Diagrama de Evaluación Visual y Calidad Multi-Ángulo
+
+```mermaid
+flowchart TB
+    Asset["Asset 3D Generado"] --> Multi["renderMultiAngleSvgSnapshots()\n5 Vistas: Front (+Z), Side (+X), Back (-Z), Top (+Y), Isometric"]
+    Asset --> Sem["evaluateSemanticVisualIdentity()\nY=0, 4 Cuadrantes, Simetria, Complejidad, Rasgos"]
+    Asset --> Qual["evaluateAssetQualityMetrics()\n11 Dimensiones (0..100) -> overallScore"]
+    Asset & Other["Segundo Asset / Prompt B"] --> Pair["compareModelVariationPair()\nDelta BBox, Delta Partes, Overlap Paleta, Distinctness"]
+    Multi & Sem & Qual & Pair --> Disk["persistVisualBenchmarkArtifacts('docs/benchmarks')\nbenchmark_report.json + benchmark_summary.md + views/*.svg"]
+```

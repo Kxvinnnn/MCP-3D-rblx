@@ -1,0 +1,37 @@
+# Estado Real de Subsistemas — NIGHTMARE FORGE / Forge AI Studio
+
+Este documento audita el estado técnico verificable de cada subsistema del proyecto utilizando **únicamente** las siete clasificaciones oficiales permitidas:
+
+- `IMPLEMENTADO Y PROBADO.`
+- `IMPLEMENTADO SIN VALIDACIÓN COMPLETA.`
+- `PARCIAL.`
+- `EXPERIMENTAL.`
+- `INVESTIGADO, NO IMPLEMENTADO.`
+- `NO IMPLEMENTADO.`
+- `BLOQUEADO.`
+
+---
+
+## Matriz General de Estado por Subsistema
+
+| Subsistema | Archivo(s) Clave | Estado | Evidencia / Alcance Verificado |
+| :--- | :--- | :--- | :--- |
+| Precedencia estricta y `parameter_provenance` (`manual_ui > preset > prompt_nlp > ai_director > image_reference > default`) | `src/server/engines/procedural3DGenerator.ts`, `src/utils/treePromptParser.ts` | `IMPLEMENTADO Y PROBADO.` | Resuelve colisión de defaults UI sobre prompts NLP, emite `warnings` y conserva determinismo en hash canónico. Validado en `SECCIÓN 9A`, `SECCIÓN 9B` y `SECCIÓN 10`. |
+| Generación procedural multi-especie de árboles (7 especies: `oak`, `pine`, `willow`, `bonsai`, `dead`, `fantasy`, `crystalline`) | `src/utils/treePromptParser.ts`, `src/server/engines/specializedGeometryGenerators.ts` | `IMPLEMENTADO Y PROBADO.` | Prompt A vs Prompt B distintos (100/100 visual distinctness, delta altura 29.29 studs) y todas las 7 especies validadas con `validateProcedural3DGeometry`. |
+| Motor Universal Freeform 3D (5 etapas, sin fallback ciego a `chest_or_prop`) | `src/server/engines/universalFreeform3DEngine.ts`, `src/server/engines/aiGenerationDirector.ts` | `IMPLEMENTADO Y PROBADO.` | Validado sobre los 23 objetos obligatorios (vegetación, animales, vehículos, arquitectura, props/armas), vaca adulta ES/EN y 8 casos de generalización sin editar código entre pruebas. |
+| Diferenciación arquitectónica avanzada (`medieval_house`, `medieval_castle`, `futuristic_building`, `fantasy_tower`) | `src/server/engines/specializedGeometryGenerators.ts`, `src/server/engines/universalFreeform3DEngine.ts` | `IMPLEMENTADO Y PROBADO.` | Genera geometría específica por subtipo (torreón central y almenas, costillas neón y antena orbital, aguja y cristales flotantes). Verificado en `SECCIÓN 10`. |
+| Estabilidad determinista y semillas automáticas | `src/utils/canonicalHash.ts`, `src/server/engines/procedural3DGenerator.ts`, `server.ts` | `IMPLEMENTADO Y PROBADO.` | Semilla explícita produce idéntico `contentHash` y `geometryHash`; sin semilla genera semillas frescas no repetitivas; `latency_ms` excluido de raíz en `ROOT_EXCLUDED_CANONICAL_KEYS`. |
+| Compatibilidad `EditableMesh` (<= 9,000 tris/parte, 0 triángulos degenerados) | `src/utils/robloxGeometryValidator.ts`, `src/server/engines/specializedGeometryGenerators.ts` | `IMPLEMENTADO Y PROBADO.` | Verificado en todas las piezas de los 23 objetos obligatorios y suites de validación geométrica. |
+| Paridad RGB canónica TypeScript ↔ Luau (`0..1` vs `0..255`) | `src/utils/colorUtils.ts`, `backend/roblox_plugin/ForgeAIStudioPlugin.server.luau` | `IMPLEMENTADO Y PROBADO.` | Validado por suite dedicada `tests/rgbColorParity.test.ts` en entorno CI/local. |
+| Suite de Benchmark Visual (11 dimensiones + 5 vistas SVG + persistencia `docs/benchmarks/`) | `src/server/engines/visualBenchmarkSuite.ts` | `IMPLEMENTADO Y PROBADO.` | Genera `benchmark_report.json`, `benchmark_summary.md` y 100 SVGs (`front`, `side`, `back`, `top`, `isometric`). |
+| Pipeline Image-to-3D con `depthProfile16`, simetría y puntuación volumétrica | `src/server/engines/imageReferenceProcessor.ts`, `src/server/engines/specializedGeometryGenerators.ts` | `IMPLEMENTADO Y PROBADO.` | Decodificación real PNG, cálculo de relieve/simetría (`depthProfile16`), torno con profundidad 3D y métrica `volumetricMatchScore` verificados con imagen sintética en `SECCIÓN 10`. |
+| Exportación multiformato local (`.obj`, `.gltf`/`.glb`, `.rbxmx`, Luau `--!strict`) | `src/utils/3d/formatExporters.ts`, `src/utils/3d/luauExporter.ts` | `IMPLEMENTADO SIN VALIDACIÓN COMPLETA.` | Exportación generada y compilada en TypeScript; falta validación automatizada de importación binaria dentro de Roblox Studio Desktop vivo. |
+| Telemetría y visualización 5 vistas + `parameter_provenance` en UI (`CreateWizardView.tsx`) | `src/components/views/CreateWizardView.tsx`, `src/components/common/InteractiveColorWheel.tsx` | `IMPLEMENTADO SIN VALIDACIÓN COMPLETA.` | Código TSX tipado con `tsc --noEmit` y empaquetado en Vite; requiere verificación interactiva con navegador/Playwright contra servidor vivo para interacción UI completa. |
+| Director IA Gemini (`gemini-2.5-pro` / `gemini-2.5-flash`) con esquema estructurado y fallback honesto | `src/server/engines/aiGenerationDirector.ts`, `server.ts` | `PARCIAL.` | Ruta de fallback determinista probada end-to-end; invocación en vivo a `generativelanguage.googleapis.com` depende de cuota y conectividad de API key y se aísla por defecto en modo test. |
+| Adaptador externo de modelos GPU open-source (TRELLIS, Hunyuan3D-2, TripoSR, InstantMesh, Wonder3D) | `src/server/engines/external3DModelAdapter.ts` | `PARCIAL.` | Integración HTTP `.obj` + grounding `Y=0` y fallback honesto verificados con servidor HTTP mock en `SECCIÓN 9D`; requiere un worker GPU remoto externo real configurado en `FORGE_EXTERNAL_3D_ENDPOINT`. |
+| Puente local (`forge-bridge`) Zero-Inbound y sincronización con Rojo 7.x | `forge-bridge/src/*.ts`, `backend/roblox_plugin/ForgeAIStudioPlugin.server.luau` | `IMPLEMENTADO SIN VALIDACIÓN COMPLETA.` | Protocolo HTTP/loopback, colas y validación de rutas probados en `forge-bridge/tests/bridge.test.ts`; la ejecución dentro de Roblox Studio Desktop real requiere Studio instalado y plugin activo con HTTP habilitado. |
+| Backend Python FastAPI paralelo (`backend/main.py` y `backend/engines/*.py`) | `backend/main.py`, `backend/engines/*.py` | `PARCIAL.` | Mantiene paridad estructural de endpoints/motores y pruebas `tests/test_e2e_bidirectional_sync.py`; la evolución más reciente del motor universal freeform 3D reside principalmente en TypeScript. |
+| Decimación QEM preservando costuras UV en tiempo real | `src/utils/3d/meshGeometry.ts` | `EXPERIMENTAL.` | Operaciones básicas de subdivisión y reparación geométrica implementadas; decimación QEM avanzada con preservación estricta de UV se mantiene experimental/en plan. |
+| Inferencia directa local en GPU de modelos neurales 3D (TRELLIS / Hunyuan3D-2 sin servidor externo) | — | `INVESTIGADO, NO IMPLEMENTADO.` | Documentado como arquitectura evaluada en `AI_MODELS.md` y adaptador externo; no hay runtime PyTorch/CUDA embebido en este repositorio Node/FastAPI. |
+| Animaciones esqueléticas `glTF` con bones y skinning automático para animales/humanoides | — | `NO IMPLEMENTADO.` | Las criaturas se generan con jerarquía de `MeshPart` y coordenadas globales articuladas estáticamente, sin rigging `Motor6D`/`Bone` ni pistas de animación keyframes. |
+| Pruebas E2E automatizadas dentro de una instancia viva de Roblox Studio Desktop | — | `BLOQUEADO.` | Bloqueado en entorno headless/CI sin licencia/GUI interactiva de Roblox Studio Desktop ejecutando el plugin `ForgeAIStudioPlugin.server.luau`. |
