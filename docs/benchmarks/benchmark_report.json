@@ -1,0 +1,2907 @@
+{
+  "suiteVersion": "forge-visual-benchmark-v3",
+  "generatedAt": "2026-11-15T03:52:11.127Z",
+  "canonical": {
+    "totalCases": 8,
+    "passedCases": 8,
+    "allCasesPassed": true,
+    "cases": [
+      {
+        "id": "stylized_tree",
+        "title": "1. Árbol Realista Estilizado (Roble con Raíces y Sub-Ramas)",
+        "category": "Trees & Foliage",
+        "subCategory": "oak",
+        "objectFamily": "tree",
+        "partCount": 26,
+        "vertexCount": 1167,
+        "triangleCount": 2230,
+        "lodMetrics": {
+          "lod0Triangles": 2230,
+          "lod1Triangles": 1036,
+          "lod2Triangles": 476,
+          "lod1ReductionRatio": 0.465,
+          "lod2ReductionRatio": 0.213,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 16.3,
+          "heightY": 18.14,
+          "depthZ": 17.54,
+          "minY": 0,
+          "maxY": 18.14
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Root"
+        ],
+        "materialsUsed": [
+          "SmoothPlastic"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 73,
+          "componentCompletenessScore": 82,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 80,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 91.2
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "procedural",
+          "executed_mode": "procedural",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "10101",
+          "seed": 10101,
+          "seed_preserved": true,
+          "poly_budget_requested": 2400,
+          "poly_budget_achieved": 2230,
+          "detail_level": "high",
+          "parameter_provenance": {
+            "seed": {
+              "value": "10101",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1.5,
+              "source": "prompt_nlp"
+            },
+            "branchCount": {
+              "value": 6,
+              "source": "manual_ui"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "prompt_nlp"
+            },
+            "canopySize": {
+              "value": 1.25,
+              "source": "prompt_nlp"
+            },
+            "leafDistribution": {
+              "value": "dense",
+              "source": "prompt_nlp"
+            },
+            "foliageCount": {
+              "value": 8,
+              "source": "prompt_nlp"
+            },
+            "foliageDensity": {
+              "value": 8,
+              "source": "manual_ui"
+            },
+            "trunkMaterial": {
+              "value": "SmoothPlastic",
+              "source": "prompt_nlp"
+            },
+            "leafMaterial": {
+              "value": "SmoothPlastic",
+              "source": "prompt_nlp"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#2d7a3e",
+              "source": "manual_ui"
+            },
+            "variation": {
+              "value": 0.38,
+              "source": "prompt_nlp"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.35,
+              "source": "prompt_nlp"
+            },
+            "detailLevel": {
+              "value": "high",
+              "source": "manual_ui"
+            },
+            "style": {
+              "value": "stylized",
+              "source": "prompt_nlp"
+            }
+          },
+          "warnings": [
+            "Explicit request value preserved for 'foliageDensity' (8) over prompt value (1.45).",
+            "Explicit request value preserved for 'detailLevel' (high) over prompt value (low)."
+          ],
+          "latency_ms": 16
+        }
+      },
+      {
+        "id": "fantasy_tree",
+        "title": "2. Árbol Fantástico Bioluminiscente (Cristal y Raíces Místicas)",
+        "category": "Trees & Foliage",
+        "subCategory": "fantasy_crystal",
+        "objectFamily": "tree",
+        "partCount": 27,
+        "vertexCount": 618,
+        "triangleCount": 1128,
+        "lodMetrics": {
+          "lod0Triangles": 1128,
+          "lod1Triangles": 674,
+          "lod2Triangles": 400,
+          "lod1ReductionRatio": 0.598,
+          "lod2ReductionRatio": 0.355,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 8.21,
+          "heightY": 13.8,
+          "depthZ": 8.7,
+          "minY": 0,
+          "maxY": 13.8
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Root"
+        ],
+        "materialsUsed": [
+          "Wood",
+          "Ice",
+          "Neon"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 73,
+          "componentCompletenessScore": 82,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 92.6
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "20202",
+          "seed": 20202,
+          "seed_preserved": true,
+          "poly_budget_requested": 2600,
+          "poly_budget_achieved": 1128,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "20202",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 14,
+              "source": "prompt_nlp"
+            },
+            "trunkCurvature": {
+              "value": 0.65,
+              "source": "prompt_nlp"
+            },
+            "rootFlareScale": {
+              "value": 1.5,
+              "source": "prompt_nlp"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Ice",
+              "source": "prompt_nlp"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.62,
+              "source": "prompt_nlp"
+            },
+            "leafVariation": {
+              "value": 0.55,
+              "source": "prompt_nlp"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            },
+            "species": {
+              "value": "crystalline",
+              "source": "prompt_nlp"
+            },
+            "crystallineCanopy": {
+              "value": true,
+              "source": "prompt_nlp"
+            },
+            "emissiveLeaves": {
+              "value": true,
+              "source": "prompt_nlp"
+            },
+            "style": {
+              "value": "crystalline",
+              "source": "prompt_nlp"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 13
+        }
+      },
+      {
+        "id": "detailed_rock",
+        "title": "3. Roca Detallada (Icosfera Deformada con Fracturas y Estratos)",
+        "category": "Rocks & Nature",
+        "subCategory": "cliff_boulder",
+        "objectFamily": "rock",
+        "partCount": 9,
+        "vertexCount": 498,
+        "triangleCount": 960,
+        "lodMetrics": {
+          "lod0Triangles": 960,
+          "lod1Triangles": 720,
+          "lod2Triangles": 720,
+          "lod1ReductionRatio": 0.75,
+          "lod2ReductionRatio": 0.75,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 9.94,
+          "heightY": 7.01,
+          "depthZ": 9.71,
+          "minY": 0,
+          "maxY": 7.01
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "PrimaryMass",
+          "StratifiedSlabs",
+          "FractureClusters"
+        ],
+        "materialsUsed": [
+          "Slate",
+          "Basalt",
+          "Rock"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 83,
+          "componentCompletenessScore": 88,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 94.1
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "30303",
+          "seed": 30303,
+          "seed_preserved": true,
+          "poly_budget_requested": 2200,
+          "poly_budget_achieved": 960,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "30303",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 11
+        }
+      },
+      {
+        "id": "modular_building",
+        "title": "4. Edificio Modular (Fachada, Arco, Ventanas, Columnas y Tejado)",
+        "category": "Buildings & Structures",
+        "subCategory": "medieval_tower",
+        "objectFamily": "building",
+        "partCount": 14,
+        "vertexCount": 677,
+        "triangleCount": 1298,
+        "lodMetrics": {
+          "lod0Triangles": 1298,
+          "lod1Triangles": 574,
+          "lod2Triangles": 390,
+          "lod1ReductionRatio": 0.442,
+          "lod2ReductionRatio": 0.3,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 11.44,
+          "heightY": 16.24,
+          "depthZ": 12.41,
+          "minY": 0,
+          "maxY": 16.24
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Foundation",
+          "Facades",
+          "Columns",
+          "Openings",
+          "RoofAssembly"
+        ],
+        "materialsUsed": [
+          "Cobblestone",
+          "Brick",
+          "Wood",
+          "Glass",
+          "Slate"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 96.3
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "40404",
+          "seed": 40404,
+          "seed_preserved": true,
+          "poly_budget_requested": 2400,
+          "poly_budget_achieved": 1298,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "40404",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 15
+        }
+      },
+      {
+        "id": "ergonomic_chair",
+        "title": "5. Silla / Trono Ergonómico (Patas Torneadas, Cojín, Respaldo y Brazos)",
+        "category": "Furniture & Interior",
+        "subCategory": "chair",
+        "objectFamily": "chair",
+        "partCount": 12,
+        "vertexCount": 474,
+        "triangleCount": 900,
+        "lodMetrics": {
+          "lod0Triangles": 900,
+          "lod1Triangles": 476,
+          "lod2Triangles": 368,
+          "lod1ReductionRatio": 0.529,
+          "lod2ReductionRatio": 0.409,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 3.2,
+          "heightY": 5.26,
+          "depthZ": 3.26,
+          "minY": 0,
+          "maxY": 5.26
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "LegsAndStretchers",
+          "SeatAssembly",
+          "Backrest",
+          "Armrests"
+        ],
+        "materialsUsed": [
+          "Wood",
+          "Fabric"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 93,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 94,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 95.9
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "50505",
+          "seed": 50505,
+          "seed_preserved": true,
+          "poly_budget_requested": 1800,
+          "poly_budget_achieved": 900,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "50505",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 10
+        }
+      },
+      {
+        "id": "street_lamp",
+        "title": "6. Lámpara / Farol Forjado (Pedestal, Poste, Pantalla y Núcleo Emisivo)",
+        "category": "Ambient & Decoration",
+        "subCategory": "street_lamp",
+        "objectFamily": "lamp",
+        "partCount": 6,
+        "vertexCount": 320,
+        "triangleCount": 616,
+        "lodMetrics": {
+          "lod0Triangles": 616,
+          "lod1Triangles": 372,
+          "lod2Triangles": 344,
+          "lod1ReductionRatio": 0.604,
+          "lod2ReductionRatio": 0.558,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 2.94,
+          "heightY": 8.65,
+          "depthZ": 2.94,
+          "minY": 0,
+          "maxY": 8.65
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "PedestalBase",
+          "FlutedPost",
+          "LanternCage",
+          "LuminaireCore"
+        ],
+        "materialsUsed": [
+          "Metal",
+          "Glass",
+          "Neon"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 85,
+          "promptFidelityScore": 78,
+          "proportionScore": 94,
+          "silhouetteScore": 84,
+          "componentCompletenessScore": 83,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 90.4
+        },
+        "semanticPassed": false,
+        "semanticScore": 85,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "60606",
+          "seed": 60606,
+          "seed_preserved": true,
+          "poly_budget_requested": 1600,
+          "poly_budget_achieved": 616,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "60606",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 8
+        }
+      },
+      {
+        "id": "mechanical_gearbox",
+        "title": "7. Objeto Mecánico (Chasis, Engranajes Dentados Reales y Pistones)",
+        "category": "Props",
+        "subCategory": "mechanical_engine",
+        "objectFamily": "mechanical",
+        "partCount": 7,
+        "vertexCount": 653,
+        "triangleCount": 1278,
+        "lodMetrics": {
+          "lod0Triangles": 1278,
+          "lod1Triangles": 736,
+          "lod2Triangles": 596,
+          "lod1ReductionRatio": 0.576,
+          "lod2ReductionRatio": 0.466,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 7.4,
+          "heightY": 6.39,
+          "depthZ": 6.64,
+          "minY": 0,
+          "maxY": 6.39
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Chassis",
+          "GearTrain",
+          "Hydraulics",
+          "EnergyCore"
+        ],
+        "materialsUsed": [
+          "DiamondPlate",
+          "Metal",
+          "Neon"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 85,
+          "promptFidelityScore": 78,
+          "proportionScore": 94,
+          "silhouetteScore": 86,
+          "componentCompletenessScore": 87,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 90.9
+        },
+        "semanticPassed": false,
+        "semanticScore": 85,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "70707",
+          "seed": 70707,
+          "seed_preserved": true,
+          "poly_budget_requested": 2500,
+          "poly_budget_achieved": 1278,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "70707",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 11
+        }
+      },
+      {
+        "id": "coherent_scene",
+        "title": "8. Pequeño Escenario Coherente (Scene3D Multi-Asset con Zonas)",
+        "category": "Scene3D",
+        "subCategory": "sanctuary_diorama",
+        "objectFamily": "scene",
+        "partCount": 10,
+        "vertexCount": 844,
+        "triangleCount": 1648,
+        "lodMetrics": {
+          "lod0Triangles": 1648,
+          "lod1Triangles": 660,
+          "lod2Triangles": 536,
+          "lod1ReductionRatio": 0.4,
+          "lod2ReductionRatio": 0.325,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 24,
+          "heightY": 14.4,
+          "depthZ": 24,
+          "minY": 0,
+          "maxY": 14.4
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Zone_Terrain",
+          "Zone_FocalStructure",
+          "Zone_Vegetation",
+          "Zone_Rocks",
+          "Zone_Lighting"
+        ],
+        "materialsUsed": [
+          "Slate",
+          "Cobblestone",
+          "Wood",
+          "Grass",
+          "Basalt",
+          "Metal",
+          "Neon"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 90,
+          "componentCompletenessScore": 98,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 95.6
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "80808",
+          "seed": 80808,
+          "seed_preserved": true,
+          "poly_budget_requested": 3800,
+          "poly_budget_achieved": 1648,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "80808",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1.5,
+              "source": "prompt_nlp"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 19
+        }
+      }
+    ]
+  },
+  "freeformGeneralization": {
+    "totalCases": 8,
+    "passedCases": 8,
+    "semanticPassCount": 8,
+    "allCasesPassed": true,
+    "cases": [
+      {
+        "id": "bovine_cow_acceptance",
+        "title": "Caso Obligatorio — Vaca Adulta Completa (Anatomía Bovina, 4 Patas, Manchas Negras y Blancas)",
+        "category": "Props",
+        "subCategory": "bovine_cow",
+        "objectFamily": "quadruped_animal",
+        "partCount": 35,
+        "vertexCount": 2793,
+        "triangleCount": 4990,
+        "lodMetrics": {
+          "lod0Triangles": 4990,
+          "lod1Triangles": 2220,
+          "lod2Triangles": 1980,
+          "lod1ReductionRatio": 0.445,
+          "lod2ReductionRatio": 0.397,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 3.99,
+          "heightY": 6.56,
+          "depthZ": 9.92,
+          "minY": 0,
+          "maxY": 6.56
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Spine_Torso",
+          "CoatSpots",
+          "Ventral",
+          "Neck_Head",
+          "Cranium",
+          "Limb_FrontLeft",
+          "Limb_FrontRight",
+          "Limb_RearLeft",
+          "Limb_RearRight",
+          "Tail"
+        ],
+        "materialsUsed": [
+          "SmoothPlastic",
+          "Marble",
+          "Slate",
+          "Fabric"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 96.3
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90101",
+          "seed": 90101,
+          "seed_preserved": true,
+          "poly_budget_requested": 3400,
+          "poly_budget_achieved": 4990,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90101",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 40
+        }
+      },
+      {
+        "id": "generalization_horse",
+        "title": "Generalización 1 — Caballo Adulto (Cuello Arqueado, Crin, 4 Patas con Cascos y Cola)",
+        "category": "Props",
+        "subCategory": "equine_horse",
+        "objectFamily": "quadruped_animal",
+        "partCount": 26,
+        "vertexCount": 2112,
+        "triangleCount": 3904,
+        "lodMetrics": {
+          "lod0Triangles": 3904,
+          "lod1Triangles": 1614,
+          "lod2Triangles": 1416,
+          "lod1ReductionRatio": 0.413,
+          "lod2ReductionRatio": 0.363,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 2.92,
+          "heightY": 7.81,
+          "depthZ": 10.14,
+          "minY": 0,
+          "maxY": 7.81
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Spine_Torso",
+          "Neck_Head",
+          "Cranium",
+          "Limb_FrontLeft",
+          "Limb_FrontRight",
+          "Limb_RearLeft",
+          "Limb_RearRight",
+          "Tail"
+        ],
+        "materialsUsed": [
+          "SmoothPlastic",
+          "Fabric",
+          "Slate"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 96.3
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90202",
+          "seed": 90202,
+          "seed_preserved": true,
+          "poly_budget_requested": 3200,
+          "poly_budget_achieved": 3904,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90202",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 39
+        }
+      },
+      {
+        "id": "generalization_dog",
+        "title": "Generalización 2 — Perro / Cánido Anatómico (Tórax Profundo, Hocico con Trufa, 4 Patas y Cola)",
+        "category": "Props",
+        "subCategory": "canine_dog",
+        "objectFamily": "quadruped_animal",
+        "partCount": 25,
+        "vertexCount": 1844,
+        "triangleCount": 3396,
+        "lodMetrics": {
+          "lod0Triangles": 3396,
+          "lod1Triangles": 1554,
+          "lod2Triangles": 1356,
+          "lod1ReductionRatio": 0.458,
+          "lod2ReductionRatio": 0.399,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 2.31,
+          "heightY": 5.21,
+          "depthZ": 7.97,
+          "minY": 0,
+          "maxY": 5.21
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Spine_Torso",
+          "Neck_Head",
+          "Cranium",
+          "Limb_FrontLeft",
+          "Limb_FrontRight",
+          "Limb_RearLeft",
+          "Limb_RearRight",
+          "Tail"
+        ],
+        "materialsUsed": [
+          "SmoothPlastic",
+          "Slate"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 94,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 96.1
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90303",
+          "seed": 90303,
+          "seed_preserved": true,
+          "poly_budget_requested": 2800,
+          "poly_budget_achieved": 3396,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90303",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 31
+        }
+      },
+      {
+        "id": "generalization_dragon",
+        "title": "Generalización 3 — Dragón Mítico Alado (2 Alas Membranosas, Cuernos, Crestas, 4 Patas y Cola)",
+        "category": "Props",
+        "subCategory": "winged_dragon",
+        "objectFamily": "winged_creature",
+        "partCount": 27,
+        "vertexCount": 2942,
+        "triangleCount": 5552,
+        "lodMetrics": {
+          "lod0Triangles": 5552,
+          "lod1Triangles": 2188,
+          "lod2Triangles": 1684,
+          "lod1ReductionRatio": 0.394,
+          "lod2ReductionRatio": 0.303,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 18.08,
+          "heightY": 10.09,
+          "depthZ": 16.2,
+          "minY": 0,
+          "maxY": 10.09
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Spine_Torso",
+          "Neck_Head",
+          "Wings",
+          "Limb_FrontLeft",
+          "Limb_FrontRight",
+          "Limb_RearLeft",
+          "Limb_RearRight",
+          "Tail"
+        ],
+        "materialsUsed": [
+          "Slate",
+          "Neon",
+          "Marble",
+          "Fabric"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 96.3
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90404",
+          "seed": 90404,
+          "seed_preserved": true,
+          "poly_budget_requested": 3800,
+          "poly_budget_achieved": 5552,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90404",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 77
+        }
+      },
+      {
+        "id": "generalization_motorcycle",
+        "title": "Generalización 4 — Motocicleta Deportiva (2 Ruedas Toroidales, Horquilla, Motor V-Twin y Escapes)",
+        "category": "Props",
+        "subCategory": "motorcycle",
+        "objectFamily": "wheeled_vehicle",
+        "partCount": 14,
+        "vertexCount": 1360,
+        "triangleCount": 2608,
+        "lodMetrics": {
+          "lod0Triangles": 2608,
+          "lod1Triangles": 1050,
+          "lod2Triangles": 936,
+          "lod1ReductionRatio": 0.403,
+          "lod2ReductionRatio": 0.359,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 2.68,
+          "heightY": 4.14,
+          "depthZ": 9.5,
+          "minY": 0,
+          "maxY": 4.14
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Wheels_Front",
+          "Wheels_Rear",
+          "Chassis_Engine",
+          "Bodywork_Tank_Seat",
+          "Steering_Fork",
+          "Lighting_Exhaust"
+        ],
+        "materialsUsed": [
+          "Slate",
+          "Metal",
+          "SmoothPlastic",
+          "Fabric",
+          "Neon"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 96.3
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90505",
+          "seed": 90505,
+          "seed_preserved": true,
+          "poly_budget_requested": 3200,
+          "poly_budget_achieved": 2608,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90505",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 21
+        }
+      },
+      {
+        "id": "generalization_human_statue",
+        "title": "Generalización 5 — Estatua Humana Esculpida (Pedestal, Torso, Cabeza, 2 Brazos y 2 Piernas)",
+        "category": "Ambient & Decoration",
+        "subCategory": "human_statue",
+        "objectFamily": "biped_humanoid_or_statue",
+        "partCount": 17,
+        "vertexCount": 1468,
+        "triangleCount": 2724,
+        "lodMetrics": {
+          "lod0Triangles": 2724,
+          "lod1Triangles": 1122,
+          "lod2Triangles": 924,
+          "lod1ReductionRatio": 0.412,
+          "lod2ReductionRatio": 0.339,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 3.8,
+          "heightY": 10.24,
+          "depthZ": 3.72,
+          "minY": 0,
+          "maxY": 10.24
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Pedestal",
+          "Leg_Left",
+          "Leg_Right",
+          "Pelvis_Torso",
+          "Head_Neck",
+          "Arm_Left",
+          "Arm_Right"
+        ],
+        "materialsUsed": [
+          "Cobblestone",
+          "Marble"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 94,
+          "colorHarmonyScore": 78,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 94.8
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90606",
+          "seed": 90606,
+          "seed_preserved": true,
+          "poly_budget_requested": 3200,
+          "poly_budget_achieved": 2724,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90606",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 17
+        }
+      },
+      {
+        "id": "generalization_fantasy_tree",
+        "title": "Generalización 6 — Árbol Fantástico Bioluminiscente (Raíces, Tronco Orgánico y Ramificación)",
+        "category": "Trees & Vegetation",
+        "subCategory": "fantasy",
+        "objectFamily": "tree",
+        "partCount": 27,
+        "vertexCount": 642,
+        "triangleCount": 1176,
+        "lodMetrics": {
+          "lod0Triangles": 1176,
+          "lod1Triangles": 674,
+          "lod2Triangles": 400,
+          "lod1ReductionRatio": 0.573,
+          "lod2ReductionRatio": 0.34,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 8.7,
+          "heightY": 13.8,
+          "depthZ": 8.34,
+          "minY": 0,
+          "maxY": 13.8
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Root"
+        ],
+        "materialsUsed": [
+          "Wood",
+          "Ice",
+          "Neon"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 87,
+          "promptFidelityScore": 87,
+          "proportionScore": 94,
+          "silhouetteScore": 73,
+          "componentCompletenessScore": 82,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 90.3
+        },
+        "semanticPassed": true,
+        "semanticScore": 87,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90707",
+          "seed": 90707,
+          "seed_preserved": true,
+          "poly_budget_requested": 2800,
+          "poly_budget_achieved": 1176,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90707",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 14,
+              "source": "prompt_nlp"
+            },
+            "trunkCurvature": {
+              "value": 0.65,
+              "source": "prompt_nlp"
+            },
+            "rootFlareScale": {
+              "value": 1.5,
+              "source": "prompt_nlp"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Ice",
+              "source": "prompt_nlp"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.62,
+              "source": "prompt_nlp"
+            },
+            "leafVariation": {
+              "value": 0.55,
+              "source": "prompt_nlp"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            },
+            "species": {
+              "value": "crystalline",
+              "source": "prompt_nlp"
+            },
+            "crystallineCanopy": {
+              "value": true,
+              "source": "prompt_nlp"
+            },
+            "emissiveLeaves": {
+              "value": true,
+              "source": "prompt_nlp"
+            },
+            "style": {
+              "value": "crystalline",
+              "source": "prompt_nlp"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 9
+        }
+      },
+      {
+        "id": "generalization_medieval_house",
+        "title": "Generalización 7 — Casa Medieval Modular (Cimiento de Piedra, Fachada, Puerta, Ventanas y Tejado)",
+        "category": "Buildings & Structures",
+        "subCategory": "medieval_house",
+        "objectFamily": "building",
+        "partCount": 18,
+        "vertexCount": 998,
+        "triangleCount": 1924,
+        "lodMetrics": {
+          "lod0Triangles": 1924,
+          "lod1Triangles": 1030,
+          "lod2Triangles": 660,
+          "lod1ReductionRatio": 0.535,
+          "lod2ReductionRatio": 0.343,
+          "monotonicReduction": true
+        },
+        "boundingBoxStuds": {
+          "widthX": 11.61,
+          "heightY": 21.46,
+          "depthZ": 12.41,
+          "minY": 0,
+          "maxY": 21.46
+        },
+        "groundedAtZero": true,
+        "editableMeshCompliant": true,
+        "degenerateTriangles": 0,
+        "hierarchyZones": [
+          "Foundation",
+          "Facades",
+          "Columns",
+          "Openings",
+          "RoofAssembly",
+          "ArcaneTowerSpire"
+        ],
+        "materialsUsed": [
+          "Cobblestone",
+          "Brick",
+          "Wood",
+          "Glass",
+          "Slate",
+          "Neon"
+        ],
+        "qualityMetrics": {
+          "visualIdentityScore": 100,
+          "promptFidelityScore": 100,
+          "proportionScore": 94,
+          "silhouetteScore": 95,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 95,
+          "materialPbrScore": 96,
+          "colorHarmonyScore": 92,
+          "textureUvScore": 95,
+          "meshManifoldScore": 96,
+          "robloxCompatibilityScore": 96,
+          "overallScore": 96.3
+        },
+        "semanticPassed": true,
+        "semanticScore": 100,
+        "executionReport": {
+          "requested_mode": "hybrid",
+          "executed_mode": "hybrid",
+          "ai_provider_available": false,
+          "ai_provider_used": false,
+          "provider": "forge-local-parametric",
+          "model_used": "procedural-hybrid-v3",
+          "provider_status": "mock_or_local",
+          "generation_stage": "completed",
+          "image_reference_processed": false,
+          "reference_image_analyzed": false,
+          "fallback_triggered": false,
+          "fallback_reason": null,
+          "seed_used": "90808",
+          "seed": 90808,
+          "seed_preserved": true,
+          "poly_budget_requested": 2800,
+          "poly_budget_achieved": 1924,
+          "detail_level": "medium",
+          "parameter_provenance": {
+            "seed": {
+              "value": "90808",
+              "source": "prompt_nlp"
+            },
+            "height": {
+              "value": 14,
+              "source": "default"
+            },
+            "width": {
+              "value": 10,
+              "source": "default"
+            },
+            "trunkThickness": {
+              "value": 1.6,
+              "source": "default"
+            },
+            "trunkLean": {
+              "value": 0,
+              "source": "default"
+            },
+            "trunkCurvature": {
+              "value": 0.15,
+              "source": "default"
+            },
+            "rootFlareScale": {
+              "value": 1,
+              "source": "default"
+            },
+            "branchCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchLength": {
+              "value": 4,
+              "source": "default"
+            },
+            "branchDistribution": {
+              "value": "tiered",
+              "source": "default"
+            },
+            "canopyShape": {
+              "value": "spherical",
+              "source": "default"
+            },
+            "canopySize": {
+              "value": 1,
+              "source": "default"
+            },
+            "leafDistribution": {
+              "value": "balanced",
+              "source": "default"
+            },
+            "foliageCount": {
+              "value": 4,
+              "source": "default"
+            },
+            "foliageDensity": {
+              "value": 1,
+              "source": "default"
+            },
+            "trunkMaterial": {
+              "value": "Wood",
+              "source": "default"
+            },
+            "leafMaterial": {
+              "value": "Grass",
+              "source": "default"
+            },
+            "trunkColor": {
+              "value": "#6e482b",
+              "source": "default"
+            },
+            "leafColor": {
+              "value": "#34843d",
+              "source": "default"
+            },
+            "variation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "leafVariation": {
+              "value": 0.25,
+              "source": "default"
+            },
+            "colorVariation": {
+              "value": 0.2,
+              "source": "default"
+            },
+            "detailLevel": {
+              "value": "medium",
+              "source": "default"
+            }
+          },
+          "warnings": [],
+          "latency_ms": 21
+        }
+      }
+    ]
+  },
+  "variationPairs": {
+    "treePromptAVsB": {
+      "assetAId": "asset-proc-0004fe79",
+      "assetBId": "asset-proc-44198872",
+      "seedA": "55101",
+      "seedB": "55202",
+      "seedDifferent": true,
+      "structuralHashDifferent": true,
+      "distinctPartCountDelta": 16,
+      "bboxDeltaStuds": {
+        "widthXDelta": 26.54,
+        "heightYDelta": 29.29,
+        "depthZDelta": 24.7,
+        "volumeRatio": 438.989
+      },
+      "distinctColorsA": [
+        "89,62,49",
+        "84,58,46",
+        "91,63,50",
+        "185,28,28",
+        "192,29,29",
+        "178,27,27",
+        "193,29,29"
+      ],
+      "distinctColorsB": [
+        "90,63,50",
+        "85,59,47",
+        "92,64,51",
+        "88,62,49",
+        "91,64,50",
+        "37,99,235",
+        "37,98,234",
+        "37,100,237",
+        "38,102,243",
+        "38,101,240",
+        "37,100,236",
+        "41,111,255"
+      ],
+      "paletteOverlapRatio": 0,
+      "distinctnessScore": 100,
+      "areVisuallyDistinct": true
+    },
+    "cowSmallSpottedVsLargeBrown": {
+      "assetAId": "asset-proc-34a9500b",
+      "assetBId": "asset-proc-3bf91bf4",
+      "seedA": "66101",
+      "seedB": "66202",
+      "seedDifferent": true,
+      "structuralHashDifferent": true,
+      "distinctPartCountDelta": 7,
+      "bboxDeltaStuds": {
+        "widthXDelta": 2.72,
+        "heightYDelta": 5.27,
+        "depthZDelta": 6.95,
+        "volumeRatio": 9.158
+      },
+      "distinctColorsA": [
+        "248,250,252",
+        "24,24,27",
+        "244,175,171",
+        "17,24,39",
+        "214,199,178",
+        "39,39,42"
+      ],
+      "distinctColorsB": [
+        "124,74,39",
+        "74,44,22",
+        "244,175,171",
+        "17,24,39",
+        "214,199,178",
+        "39,39,42"
+      ],
+      "paletteOverlapRatio": 0.5,
+      "distinctnessScore": 87,
+      "areVisuallyDistinct": true
+    }
+  },
+  "viewsExported": {
+    "viewsDir": "views",
+    "anglesPerAsset": [
+      "front",
+      "side",
+      "back",
+      "top",
+      "isometric"
+    ],
+    "totalSvgFiles": 100
+  }
+}
