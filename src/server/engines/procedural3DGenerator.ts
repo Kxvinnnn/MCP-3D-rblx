@@ -31,6 +31,22 @@ import {
 
 import { parseNaturalLanguageToTreeParams } from '../../utils/treePromptParser.ts';
 import { resolveColorRgb255 } from '../../utils/colorUtils.ts';
+import {
+  type AiDirectorBlueprint,
+  type EngineExecutionReport,
+  type GenerationExecutionMode,
+  validateAndSanitizeDirectorBlueprint,
+} from './aiGenerationDirector.ts';
+import {
+  analyzeReferenceImageBase64,
+  evaluateReferenceVsModelMetrics,
+  type ReferenceImageAnalysis,
+  type ReferenceImageComparisonMetrics,
+} from './imageReferenceProcessor.ts';
+import {
+  buildPartsFromSpecializedEngine,
+  computeBudgetAllocationProfile,
+} from './specializedGeometryGenerators.ts';
 
 export const FORGE_ASSET_CATEGORIES = [
   'Props',
@@ -75,17 +91,30 @@ export interface TreeProceduralParams {
   colorVariation?: number;
   detailLevel?: TreeDetailLevel;
   lodLevel?: 0 | 1 | 2;
+  targetPolyBudget?: number;
+  species?: 'oak' | 'pine' | 'willow' | 'dead' | 'fantasy' | 'bonsai';
 }
+
+export type Procedural3DPart = Record<string, any>;
+export type Procedural3DSynthesisResult = Record<string, any>;
 
 export interface Procedural3DGenerationRequest {
   prompt?: string;
   name?: string;
   category?: string;
+  sub_category?: string;
+  style?: string;
   asset_type?: 'Model3D' | 'Scene3D';
+  generation_mode?: GenerationExecutionMode;
   collision_fidelity?: 'Hull' | 'Box' | 'PreciseConvexDecomposition' | 'Default';
   target_poly_budget?: number;
+  detail_level?: TreeDetailLevel;
   seed?: string | number;
-  tree_params?: TreeProceduralParams;
+  tree_params?: TreeProceduralParams & Record<string, any>;
+  reference_image_base64?: string;
+  ai_director_blueprint?: Partial<AiDirectorBlueprint>;
+  director_blueprint?: Partial<AiDirectorBlueprint>;
+  execution_report?: Partial<EngineExecutionReport>;
 }
 
 /**
@@ -845,7 +874,19 @@ export function generateParameterizedTree3DParts(
     high: { trunkRad: 11, trunkRings: 6, branchRad: 8, canopyRad: 12, canopyLat: 8 },
     ultra: { trunkRad: 14, trunkRings: 8, branchRad: 10, canopyRad: 15, canopyLat: 10 },
   };
-  const segSpec = detailSegMap[detailLevel];
+  const baseSegSpec = detailSegMap[detailLevel];
+  const polyBudgetVal = Number(params.targetPolyBudget ?? 0);
+  const budgetFactor =
+    Number.isFinite(polyBudgetVal) && polyBudgetVal >= 200
+      ? clamp(Math.sqrt(polyBudgetVal / 2400), 0.65, 1.95)
+      : 1.0;
+  const segSpec = {
+    trunkRad: clamp(Math.round(baseSegSpec.trunkRad * budgetFactor), 4, 22),
+    trunkRings: clamp(Math.round(baseSegSpec.trunkRings * budgetFactor), 2, 14),
+    branchRad: clamp(Math.round(baseSegSpec.branchRad * budgetFactor), 4, 16),
+    canopyRad: clamp(Math.round(baseSegSpec.canopyRad * budgetFactor), 5, 22),
+    canopyLat: clamp(Math.round(baseSegSpec.canopyLat * budgetFactor), 3, 14),
+  };
 
   const trunkMaterial = String(params.trunkMaterial || 'Wood');
   const leafMaterial = String(params.leafMaterial || 'Grass');
@@ -913,6 +954,58 @@ export function generateParameterizedTree3DParts(
     }),
   });
 
+  // 1B. Raíces superficiales orgánicas expuestas (`SurfaceRoot_1..K` en `Root/Roots`)
+  const enableRecursiveHierarchy = Boolean(
+    (params as any).includeRecursiveHierarchy ||
+      params.targetPolyBudget !== undefined ||
+      (params as any).species !== undefined
+  );
+  if (enableRecursiveHierarchy) {
+    const surfaceRootCount = rootFlareScale >= 1.2 ? 4 : 3;
+    for (let sr = 0; sr < surfaceRootCount; sr++) {
+      const rAngle = (sr / surfaceRootCount) * Math.PI * 2 + 0.35;
+      const rLen = round4(Math.max(0.9, rootFlareWidth * 0.48));
+      const rThk = round4(Math.max(0.28, trunkThickness * 0.32));
+      const rH = round4(Math.max(0.35, rootFlareHeight * 0.45));
+      const rx = round4(Math.cos(rAngle) * (rootFlareWidth * 0.34));
+      const rz = round4(Math.sin(rAngle) * (rootFlareWidth * 0.34));
+      const rootSize: [number, number, number] = [rThk, rH, rLen];
+      const rootName = `SurfaceRoot_${sr + 1}`;
+      parts.push({
+        partId: `part_root_${sr + 1}`,
+        name: rootName,
+        parentPath: 'Root/Roots',
+        shape: 'MeshPart',
+        size: rootSize,
+        position: [rx, round4(rH * 0.65), rz],
+        rotation: [0, round4((rAngle * 180) / Math.PI), 0],
+        color: modulateHexColor(trunkColor, 0.94),
+        material: trunkMaterial,
+        transparency: 0,
+        reflectance: 0.01,
+        roughness: 0.88,
+        metalness: 0.03,
+        canCollide: true,
+        anchored: true,
+        collisionFidelity,
+        meshData: buildTaperedCylinderMesh({
+          modelName,
+          partName: rootName,
+          size: rootSize,
+          bottomScaleRatio: 0.95,
+          topScaleRatio: 0.38,
+          radialSegments: Math.max(4, segSpec.branchRad),
+          heightSegments: 2,
+          jitterAmount: variation * 0.14,
+          curvatureAmount: 0.18,
+          colorHex: trunkColor,
+          activeLod,
+          rng,
+        }),
+      });
+    }
+  }
+
   // 2. Tronco principal articulado (con soporte de inclinación y curvatura orgánica)
   const trunkHeight = round4(height * 0.56);
   const trunkSize: [number, number, number] = [
@@ -975,7 +1068,7 @@ export function generateParameterizedTree3DParts(
       ? clamp(Number(params.width) / Math.max(2.0, height * 0.56), 0.4, 2.5)
       : 1.0;
 
-  // 3. Ramas secundarias parametrizadas (`branchCount`, `branchLength`, `branchDistribution`, `width`)
+  // 3. Ramas primarias y ramificación recursiva secundaria (`Branch_1..N` -> `SubBranch_1..M`)
   const branchStartHeight =
     branchDistribution === 'canopy_top'
       ? rootFlareHeight + trunkHeight * 0.78
@@ -1072,6 +1165,54 @@ export function generateParameterizedTree3DParts(
         rng,
       }),
     });
+
+    // Ramificación jerárquica recursiva nivel 2 (`SubBranch_*`)
+    if (enableRecursiveHierarchy && i < Math.min(branchCount, 5)) {
+      const subAngle = angle + (i % 2 === 0 ? 0.55 : -0.55);
+      const subLen = round4(Math.max(0.85, branchLength * 0.56));
+      const subThk = round4(Math.max(0.2, branchThick * 0.58));
+      const subSize: [number, number, number] = [subThk, subLen, subThk];
+      const subName = `SubBranch_${i + 1}`;
+      const subX = round4((bx + tipX) * 0.5 + Math.cos(subAngle) * subLen * 0.28);
+      const subY = round4((by + tipY) * 0.5 + subLen * 0.22);
+      const subZ = round4((bz + tipZ) * 0.5 + Math.sin(subAngle) * subLen * 0.28);
+      parts.push({
+        partId: `part_subbranch_${i + 1}`,
+        name: subName,
+        parentPath: 'Root/Branches/Secondary',
+        shape: 'MeshPart',
+        size: subSize,
+        position: [subX, subY, subZ],
+        rotation: [
+          round4(Math.sin(subAngle) * (pitchDeg + 10)),
+          round4((subAngle * 180) / Math.PI),
+          round4(-Math.cos(subAngle) * (pitchDeg + 10)),
+        ],
+        color: branchColor,
+        material: trunkMaterial,
+        transparency: 0,
+        reflectance: 0.02,
+        roughness: 0.82,
+        metalness: 0.03,
+        canCollide: false,
+        anchored: true,
+        collisionFidelity,
+        meshData: buildTaperedCylinderMesh({
+          modelName,
+          partName: subName,
+          size: subSize,
+          bottomScaleRatio: 0.9,
+          topScaleRatio: 0.38,
+          radialSegments: Math.max(4, segSpec.branchRad - 1),
+          heightSegments: 2,
+          jitterAmount: variation * 0.16,
+          curvatureAmount: 0.2,
+          colorHex: branchColor,
+          activeLod,
+          rng,
+        }),
+      });
+    }
   }
 
   // 4. Copa principal (`CanopyCrown_Main`) según `canopyShape`, `canopySize`, `width`, `leafDistribution` y `foliageDensity`
@@ -1323,8 +1464,7 @@ export function centerProceduralPartGeometry(modelName: string, part: any): any 
 }
 
 /**
- * Ajusta todas las piezas para que el punto más bajo real del modelo (en coordenadas transformadas)
- * descanse exactamente en `Y = 0`.
+ * Ajusta todas las piezas para que el punto más bajo del modelo descanse exactamente en `Y = 0`.
  */
 export function groundAndNormalizeParts(parts: any[]): any[] {
   let minY = Infinity;
@@ -1332,10 +1472,8 @@ export function groundAndNormalizeParts(parts: any[]): any[] {
     const py = Number(p.position?.[1] ?? 0);
     const verts: [number, number, number][] | undefined = p?.meshData?.vertices;
     if (Array.isArray(verts) && verts.length > 0) {
-      const rot = Array.isArray(p.rotation) ? p.rotation : [0, 0, 0];
-      const m = canonicalEulerToMatrix9(Number(rot[0] ?? 0), Number(rot[1] ?? 0), Number(rot[2] ?? 0));
       for (const v of verts) {
-        const wy = py + (m[3] * Number(v[0] ?? 0) + m[4] * Number(v[1] ?? 0) + m[5] * Number(v[2] ?? 0));
+        const wy = py + Number(v[1] ?? 0);
         if (wy < minY) minY = wy;
       }
     } else {
@@ -1358,18 +1496,97 @@ export function groundAndNormalizeParts(parts: any[]): any[] {
 }
 
 /**
- * Sintetiza las piezas para cualquiera de las 8 categorías oficiales usando semilla reproducible.
+ * Sintetiza las piezas para cualquiera de las 8 categorías oficiales usando motores geométricos
+ * especializados por familia (Árboles recursivos, Rocas de icosferas deformadas/estratificadas,
+ * Edificios modulares con puertas/ventanas/columnas, Sillas/Mesas/Lámparas/Mecanismos dentados,
+ * Escenarios multi-asset `Scene3D`, y reconstrucción `Image-to-3D` por silueta).
  */
 export function generateSeededCategoryParts(
   modelName: string,
   category: ForgeAssetCategory,
   seed: string | number = 'forge-seed-2026',
   collisionFidelity: string = 'Hull',
-  treeParams?: TreeProceduralParams
-): { parts: any[]; pbrProfile: Record<string, any>; description: string } {
-  if (category === 'Trees & Vegetation') {
+  treeParams?: TreeProceduralParams,
+  options?: {
+    prompt?: string;
+    assetType?: 'Model3D' | 'Scene3D';
+    targetPolyBudget?: number;
+    detailLevel?: TreeDetailLevel;
+    referenceAnalysis?: ReferenceImageAnalysis | null;
+    directorBlueprint?: Partial<AiDirectorBlueprint>;
+  }
+): {
+  parts: any[];
+  pbrProfile: Record<string, any>;
+  description: string;
+  blueprint: AiDirectorBlueprint;
+  budgetProfile: ReturnType<typeof computeBudgetAllocationProfile>;
+} {
+  const effectiveDetail: TreeDetailLevel =
+    options?.detailLevel || treeParams?.detailLevel || 'medium';
+  const effectiveBudget = options?.targetPolyBudget ?? treeParams?.targetPolyBudget;
+  const budgetProfile = computeBudgetAllocationProfile(effectiveBudget, effectiveDetail);
+
+  const validated = validateAndSanitizeDirectorBlueprint(options?.directorBlueprint, {
+    prompt: options?.prompt || category,
+    name: modelName,
+    category,
+    asset_type: options?.assetType || 'Model3D',
+    detail_level: effectiveDetail,
+    target_poly_budget: budgetProfile.targetPolyBudget,
+    collision_fidelity:
+      collisionFidelity === 'Box' || collisionFidelity === 'PreciseConvexDecomposition'
+        ? collisionFidelity
+        : 'Hull',
+    tree_params: treeParams,
+    referenceAnalysis: options?.referenceAnalysis,
+  });
+  const blueprint = validated.blueprint;
+
+  // Si hay una imagen de referencia real (Image-to-3D) y no es árbol explícito, reconstruir silueta 3D
+  if (options?.referenceAnalysis && blueprint.identity.object_family === 'image_lathe') {
+    const rawParts = buildPartsFromSpecializedEngine({
+      modelName,
+      blueprint,
+      budget: budgetProfile,
+      prompt: options?.prompt,
+      seed: String(seed),
+      treeParams,
+      referenceAnalysis: options.referenceAnalysis,
+    });
+    const parts = groundAndNormalizeParts(
+      rawParts.map((p) => centerProceduralPartGeometry(modelName, p))
+    );
+    return {
+      parts,
+      pbrProfile: {
+        albedo_hex: blueprint.materials_and_textures.primary_hex,
+        roughness: blueprint.materials_and_textures.roughness,
+        metalness: blueprint.materials_and_textures.metalness,
+        emissive_hex: blueprint.materials_and_textures.accent_hex,
+        roblox_material: blueprint.materials_and_textures.primary_material,
+        pattern: blueprint.materials_and_textures.pbr_pattern,
+      },
+      description: `Reconstrucción volumétrica Image-to-3D guiada por silueta 2D (seed=${String(
+        seed
+      )}, ratio=${options.referenceAnalysis.aspectRatioWidthToHeight}, ${parts.length} sub-mallas).`,
+      blueprint,
+      budgetProfile,
+    };
+  }
+
+  // Árboles y vegetación (cuando no es un Scene3D multi-asset)
+  if (category === 'Trees & Vegetation' && options?.assetType !== 'Scene3D' && blueprint.identity.object_family === 'tree') {
     const effectiveTreeParams: TreeProceduralParams = {
       seed,
+      detailLevel: effectiveDetail,
+      ...(effectiveBudget !== undefined ? { targetPolyBudget: budgetProfile.targetPolyBudget } : {}),
+      ...(options?.referenceAnalysis
+        ? {
+            trunkColor: options.referenceAnalysis.dominantPaletteHex.bottomHex,
+            leafColor: options.referenceAnalysis.dominantPaletteHex.topHex,
+          }
+        : {}),
       ...treeParams,
     };
     const parts = generateParameterizedTree3DParts(modelName, effectiveTreeParams, collisionFidelity);
@@ -1383,361 +1600,48 @@ export function generateSeededCategoryParts(
         roblox_material: effectiveTreeParams.leafMaterial || 'Grass',
         pattern: 'OrganicFoliageBark',
       },
-      description: `Árbol 3D procedural parametrizado (seed=${String(seed)}, altura=${
-        effectiveTreeParams.height ?? 14
-      } studs, ramas=${effectiveTreeParams.branchCount ?? 4}, copa=${
-        effectiveTreeParams.canopyShape ?? 'spherical'
-      }, follaje=${effectiveTreeParams.leafDistribution ?? 'balanced'}).`,
+      description: `Árbol 3D procedural con raíces superficiales y ramificación recursiva (seed=${String(
+        seed
+      )}, altura=${effectiveTreeParams.height ?? 14} studs, ramas=${
+        effectiveTreeParams.branchCount ?? 4
+      }, copa=${effectiveTreeParams.canopyShape ?? 'spherical'}, follaje=${
+        effectiveTreeParams.leafDistribution ?? 'balanced'
+      }).`,
+      blueprint,
+      budgetProfile,
     };
   }
 
-  const rng = createSeededRng(seed);
+  // Resto de familias especializadas: Rocas (Icosferas), Edificios, Sillas, Lámparas, Mecanismos, Mesas, Cofres y Escenarios (Scene3D)
+  const specializedParts = buildPartsFromSpecializedEngine({
+    modelName,
+    blueprint,
+    budget: budgetProfile,
+    prompt: options?.prompt || category,
+    seed: String(seed),
+    treeParams,
+    referenceAnalysis: options?.referenceAnalysis,
+  });
 
-  if (category === 'Rocks & Nature') {
-    const rockCount = 5;
-    const parts: any[] = [];
-    const rockColors = ['#64748b', '#475569', '#334155', '#52525b', '#71717a'];
-    for (let i = 0; i < rockCount; i++) {
-      const isMain = i === 0;
-      const sx = round4(isMain ? 5.2 + rng() * 1.6 : 2.0 + rng() * 2.2);
-      const sy = round4(isMain ? 3.8 + rng() * 1.8 : 1.4 + rng() * 1.8);
-      const sz = round4(isMain ? 4.8 + rng() * 1.5 : 2.0 + rng() * 2.2);
-      const angle = (i / rockCount) * Math.PI * 2 + rng() * 0.5;
-      const dist = isMain ? 0 : 2.2 + rng() * 1.4;
-      const color = rockColors[i % rockColors.length];
-      const partName = isMain ? 'PrimaryBoulder' : `RockCluster_${i}`;
-      parts.push({
-        partId: `part_rock_${i + 1}`,
-        name: partName,
-        parentPath: isMain ? 'Root' : 'Root/RockFormation',
-        shape: 'MeshPart',
-        size: [sx, sy, sz],
-        position: [round4(Math.cos(angle) * dist), round4(sy * 0.5), round4(Math.sin(angle) * dist)],
-        rotation: [round4((rng() - 0.5) * 15), round4(rng() * 360), round4((rng() - 0.5) * 15)],
-        color,
-        material: 'Slate',
-        transparency: 0,
-        reflectance: 0.05,
-        roughness: 0.88,
-        metalness: 0.08,
-        canCollide: true,
-        anchored: true,
-        collisionFidelity,
-        meshData: buildOrganicCanopyOrRockMesh({
-          modelName,
-          partName,
-          size: [sx, sy, sz],
-          shapeStyle: 'faceted_rock',
-          radialSegments: 8,
-          latSegments: 5,
-          jitterAmount: 0.26,
-          colorHex: color,
-          rng,
-        }),
-      });
-    }
-    return {
-      parts: groundAndNormalizeParts(parts),
-      pbrProfile: {
-        albedo_hex: '#64748b',
-        roughness: 0.88,
-        metalness: 0.08,
-        emissive_hex: '#000000',
-        roblox_material: 'Slate',
-        pattern: 'NaturalStratifiedStone',
-      },
-      description: `Formación rocosa natural procedural (seed=${String(seed)}, ${parts.length} sub-mallas facetadas).`,
-    };
-  }
-
-  if (category === 'Buildings & Structures') {
-    const baseW = round4(8 + rng() * 2);
-    const wallH = round4(7 + rng() * 2);
-    const parts: any[] = [
-      {
-        partId: 'part_struct_foundation',
-        name: 'StoneFoundation',
-        parentPath: 'Root',
-        shape: 'MeshPart',
-        size: [baseW, 1.2, baseW],
-        position: [0, 0.6, 0],
-        rotation: [0, 0, 0],
-        color: '#475569',
-        material: 'Concrete',
-        transparency: 0,
-        reflectance: 0.04,
-        roughness: 0.85,
-        metalness: 0.08,
-        canCollide: true,
-        anchored: true,
-        collisionFidelity,
-        meshData: buildBeveledBoxMesh({
-          modelName,
-          partName: 'StoneFoundation',
-          size: [baseW, 1.2, baseW],
-          bevelRatio: 0.08,
-          colorHex: '#475569',
-        }),
-      },
-    ];
-    const cornerOffsets: [number, number][] = [
-      [-1, -1],
-      [1, -1],
-      [1, 1],
-      [-1, 1],
-    ];
-    cornerOffsets.forEach(([ox, oz], idx) => {
-      const colName = `SupportPillar_${idx + 1}`;
-      const colSize: [number, number, number] = [1.2, wallH, 1.2];
-      parts.push({
-        partId: `part_struct_pillar_${idx + 1}`,
-        name: colName,
-        parentPath: 'Root/Columns',
-        shape: 'MeshPart',
-        size: colSize,
-        position: [round4(ox * (baseW * 0.38)), round4(1.2 + wallH * 0.5), round4(oz * (baseW * 0.38))],
-        rotation: [0, 0, 0],
-        color: '#94a3b8',
-        material: 'Concrete',
-        transparency: 0,
-        reflectance: 0.05,
-        roughness: 0.78,
-        metalness: 0.1,
-        canCollide: true,
-        anchored: true,
-        collisionFidelity,
-        meshData: buildTaperedCylinderMesh({
-          modelName,
-          partName: colName,
-          size: colSize,
-          bottomScaleRatio: 1.05,
-          topScaleRatio: 0.92,
-          radialSegments: 8,
-          heightSegments: 3,
-          jitterAmount: 0.02,
-          colorHex: '#94a3b8',
-          rng,
-        }),
-      });
-    });
-    const roofH = round4(3.2 + rng() * 1.2);
-    const roofSize: [number, number, number] = [round4(baseW * 1.08), roofH, round4(baseW * 1.08)];
-    parts.push({
-      partId: 'part_struct_roof',
-      name: 'PitchedRoofCrown',
-      parentPath: 'Root/Roof',
-      shape: 'MeshPart',
-      size: roofSize,
-      position: [0, round4(1.2 + wallH + roofH * 0.5), 0],
-      rotation: [0, 45, 0],
-      color: '#7c2d12',
-      material: 'Slate',
-      transparency: 0,
-      reflectance: 0.06,
-      roughness: 0.74,
-      metalness: 0.12,
-      canCollide: true,
-      anchored: true,
-      collisionFidelity,
-      meshData: buildTaperedCylinderMesh({
-        modelName,
-        partName: 'PitchedRoofCrown',
-        size: roofSize,
-        bottomScaleRatio: 1.1,
-        topScaleRatio: 0.08,
-        radialSegments: 4,
-        heightSegments: 2,
-        jitterAmount: 0,
-        colorHex: '#7c2d12',
-        rng,
-      }),
-    });
-
-    return {
-      parts: groundAndNormalizeParts(parts),
-      pbrProfile: {
-        albedo_hex: '#94a3b8',
-        roughness: 0.78,
-        metalness: 0.1,
-        emissive_hex: '#000000',
-        roblox_material: 'Concrete',
-        pattern: 'ModularArchitecturalStone',
-      },
-      description: `Estructura modular arquitectónica (seed=${String(seed)}, ${parts.length} piezas articuladas).`,
-    };
-  }
-
-  // Categorías restantes: Furniture & Interior, Scene Elements, Stylized Assets, Ambient & Decoration, Props
-  const paletteByCategory: Record<
-    string,
-    { primary: string; secondary: string; accent: string; matPrimary: string; matAccent: string }
-  > = {
-    'Furniture & Interior': {
-      primary: '#78350f',
-      secondary: '#92400e',
-      accent: '#d97706',
-      matPrimary: 'WoodPlanks',
-      matAccent: 'Metal',
-    },
-    'Scene Elements': {
-      primary: '#334155',
-      secondary: '#475569',
-      accent: '#38bdf8',
-      matPrimary: 'Slate',
-      matAccent: 'Neon',
-    },
-    'Stylized Assets': {
-      primary: '#4f46e5',
-      secondary: '#7c3aed',
-      accent: '#22d3ee',
-      matPrimary: 'SmoothPlastic',
-      matAccent: 'Neon',
-    },
-    'Ambient & Decoration': {
-      primary: '#1e293b',
-      secondary: '#334155',
-      accent: '#f59e0b',
-      matPrimary: 'Metal',
-      matAccent: 'Neon',
-    },
-    Props: {
-      primary: '#475569',
-      secondary: '#64748b',
-      accent: '#0ea5e9',
-      matPrimary: 'Metal',
-      matAccent: 'Neon',
-    },
-  };
-
-  const pal = paletteByCategory[category] || paletteByCategory.Props;
-  const baseWidth = round4(3.2 + rng() * 1.4);
-  const bodyHeight = round4(3.4 + rng() * 1.8);
-
-  const parts: any[] = [
-    {
-      partId: 'part_1_pedestal_base',
-      name: 'BaseFoundation',
-      parentPath: 'Root',
-      shape: 'MeshPart',
-      size: [baseWidth, 0.8, baseWidth],
-      position: [0, 0.4, 0],
-      rotation: [0, 0, 0],
-      color: pal.primary,
-      material: pal.matPrimary,
-      transparency: 0,
-      reflectance: 0.08,
-      roughness: 0.55,
-      metalness: 0.45,
-      canCollide: true,
-      anchored: true,
-      collisionFidelity,
-      meshData: buildBeveledBoxMesh({
-        modelName,
-        partName: 'BaseFoundation',
-        size: [baseWidth, 0.8, baseWidth],
-        bevelRatio: 0.12,
-        colorHex: pal.primary,
-      }),
-    },
-    {
-      partId: 'part_2_core_body',
-      name: 'PrimaryCoreBody',
-      parentPath: 'Root',
-      shape: 'MeshPart',
-      size: [round4(baseWidth * 0.72), bodyHeight, round4(baseWidth * 0.72)],
-      position: [0, round4(0.8 + bodyHeight * 0.5), 0],
-      rotation: [0, round4(rng() * 90), 0],
-      color: pal.secondary,
-      material: pal.matPrimary,
-      transparency: 0,
-      reflectance: 0.1,
-      roughness: 0.48,
-      metalness: 0.52,
-      canCollide: true,
-      anchored: true,
-      collisionFidelity,
-      meshData: buildTaperedCylinderMesh({
-        modelName,
-        partName: 'PrimaryCoreBody',
-        size: [round4(baseWidth * 0.72), bodyHeight, round4(baseWidth * 0.72)],
-        bottomScaleRatio: 1.0,
-        topScaleRatio: 0.84,
-        radialSegments: 8,
-        heightSegments: 3,
-        jitterAmount: 0.06,
-        colorHex: pal.secondary,
-        rng,
-      }),
-    },
-    {
-      partId: 'part_3_top_crown',
-      name: 'UpperCrownAssembly',
-      parentPath: 'Root/Upper',
-      shape: 'MeshPart',
-      size: [round4(baseWidth * 0.85), 0.9, round4(baseWidth * 0.85)],
-      position: [0, round4(0.8 + bodyHeight + 0.45), 0],
-      rotation: [0, 0, 0],
-      color: pal.primary,
-      material: pal.matPrimary,
-      transparency: 0,
-      reflectance: 0.12,
-      roughness: 0.42,
-      metalness: 0.6,
-      canCollide: true,
-      anchored: true,
-      collisionFidelity,
-      meshData: buildBeveledBoxMesh({
-        modelName,
-        partName: 'UpperCrownAssembly',
-        size: [round4(baseWidth * 0.85), 0.9, round4(baseWidth * 0.85)],
-        bevelRatio: 0.15,
-        colorHex: pal.primary,
-      }),
-    },
-    {
-      partId: 'part_4_accent_emitter',
-      name: 'AccentCrestEmitter',
-      parentPath: 'Root/Accents',
-      shape: 'MeshPart',
-      size: [round4(baseWidth * 0.42), 1.2, round4(baseWidth * 0.42)],
-      position: [0, round4(0.8 + bodyHeight + 1.4), 0],
-      rotation: [0, round4(rng() * 180), 0],
-      color: pal.accent,
-      material: pal.matAccent,
-      transparency: 0,
-      reflectance: 0.2,
-      roughness: 0.2,
-      metalness: 0.8,
-      canCollide: false,
-      anchored: true,
-      collisionFidelity,
-      meshData: buildOrganicCanopyOrRockMesh({
-        modelName,
-        partName: 'AccentCrestEmitter',
-        size: [round4(baseWidth * 0.42), 1.2, round4(baseWidth * 0.42)],
-        shapeStyle: 'conical',
-        radialSegments: 8,
-        latSegments: 4,
-        jitterAmount: 0.05,
-        colorHex: pal.accent,
-        rng,
-      }),
-    },
-  ];
+  const normalizedCentered = groundAndNormalizeParts(
+    specializedParts.map((p) => centerProceduralPartGeometry(modelName, p))
+  );
 
   return {
-    parts: groundAndNormalizeParts(parts.map((p) => centerProceduralPartGeometry(modelName, p))),
+    parts: normalizedCentered,
     pbrProfile: {
-      albedo_hex: pal.primary,
-      roughness: 0.48,
-      metalness: 0.52,
-      emissive_hex: pal.accent,
-      roblox_material: pal.matPrimary,
-      pattern: 'PrecisionCompositeTrim',
+      albedo_hex: blueprint.materials_and_textures.primary_hex,
+      roughness: blueprint.materials_and_textures.roughness,
+      metalness: blueprint.materials_and_textures.metalness,
+      emissive_hex: blueprint.materials_and_textures.accent_hex,
+      roblox_material: blueprint.materials_and_textures.primary_material,
+      pattern: blueprint.materials_and_textures.pbr_pattern,
     },
-    description: `Asset 3D procedural categoría '${category}' (seed=${String(seed)}, ${
-      parts.length
-    } sub-mallas EditableMesh).`,
+    description: `Asset 3D especializado familia '${blueprint.identity.object_family}' (${category}, seed=${String(
+      seed
+    )}, budget=${budgetProfile.targetPolyBudget} tris, ${normalizedCentered.length} sub-mallas).`,
+    blueprint,
+    budgetProfile,
   };
 }
 
@@ -1769,41 +1673,103 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   const collisionFidelity = req.collision_fidelity || 'Hull';
   const assetType = req.asset_type || 'Model3D';
 
+  const referenceAnalysis: ReferenceImageAnalysis | null =
+    typeof req.reference_image_base64 === 'string' && req.reference_image_base64.trim().length > 16
+      ? analyzeReferenceImageBase64(req.reference_image_base64)
+      : null;
+
   const promptTreeParsed =
     canonicalCategory === 'Trees & Vegetation' && req.prompt
       ? parseNaturalLanguageToTreeParams(req.prompt).params
       : undefined;
+  const effectiveDetailLevel: TreeDetailLevel =
+    req.detail_level ||
+    req.tree_params?.detailLevel ||
+    promptTreeParsed?.detailLevel ||
+    'medium';
   const effectiveTreeParams: TreeProceduralParams | undefined =
     canonicalCategory === 'Trees & Vegetation'
       ? {
           seed,
           ...(promptTreeParsed || {}),
           ...(req.tree_params || {}),
+          detailLevel: effectiveDetailLevel,
+          ...(req.target_poly_budget !== undefined || req.tree_params?.targetPolyBudget !== undefined
+            ? { targetPolyBudget: req.target_poly_budget ?? req.tree_params?.targetPolyBudget }
+            : {}),
         }
-      : req.tree_params;
+      : req.tree_params
+        ? {
+            ...req.tree_params,
+            detailLevel: effectiveDetailLevel,
+            ...(req.target_poly_budget !== undefined || req.tree_params?.targetPolyBudget !== undefined
+              ? { targetPolyBudget: req.target_poly_budget ?? req.tree_params?.targetPolyBudget }
+              : {}),
+          }
+        : {
+            seed,
+            detailLevel: effectiveDetailLevel,
+            ...(req.target_poly_budget !== undefined ? { targetPolyBudget: req.target_poly_budget } : {}),
+          };
+
+  const isSceneRequest =
+    req.category === 'Scene3D' ||
+    req.asset_type === 'Scene3D' ||
+    canonicalCategory === 'Scene Elements';
+  const effectiveAssetType: 'Model3D' | 'Scene3D' = isSceneRequest ? 'Scene3D' : assetType;
 
   const generated = generateSeededCategoryParts(
     safeModelName,
     canonicalCategory,
     seed,
     collisionFidelity,
-    effectiveTreeParams
+    effectiveTreeParams,
+    {
+      prompt: `${req.prompt || ''} ${req.sub_category || ''} ${req.style || ''}`.trim(),
+      assetType: effectiveAssetType,
+      targetPolyBudget: req.target_poly_budget,
+      detailLevel: effectiveDetailLevel,
+      referenceAnalysis,
+      directorBlueprint: req.director_blueprint || req.ai_director_blueprint,
+    }
   );
 
   const normalizedParts = normalizePartsWithSyncMetadata(generated.parts, safeModelName).map(
     (p: any) => ({
       ...p,
+      parent: p.parent || p.parentName || p.hierarchyPath || 'Root',
       meshId: '',
       assetId: '',
       robloxAssetId: null,
       assetUri: null,
       geometrySource: 'EditableMeshBuffers',
+      meshData: p.meshData
+        ? {
+            ...p.meshData,
+            meshId: '',
+            assetId: '',
+            robloxAssetId: null,
+            assetUri: null,
+            geometrySource: 'EditableMeshBuffers',
+          }
+        : p.meshData,
     })
   );
   const totalTris = normalizedParts.reduce(
     (sum: number, p: any) => sum + (Array.isArray(p.meshData?.faces) ? p.meshData.faces.length : 12),
     0
   );
+
+  const referenceComparisonMetrics: ReferenceImageComparisonMetrics | null = referenceAnalysis
+    ? evaluateReferenceVsModelMetrics(
+        referenceAnalysis,
+        normalizedParts.map((p: any) => ({
+          size: p.size,
+          position: p.position,
+          color: Array.isArray(p.color) ? undefined : p.color,
+        }))
+      )
+    : null;
 
   const luauCode = buildStrictLuauFromEditedParts(
     safeModelName,
@@ -1827,6 +1793,26 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     )
     .digest('hex');
 
+  const resolvedMode: GenerationExecutionMode =
+    req.generation_mode || (referenceAnalysis ? 'image_to_3d' : 'procedural');
+
+  const executionReport: EngineExecutionReport = {
+    requested_mode: req.execution_report?.requested_mode || resolvedMode,
+    executed_mode: req.execution_report?.executed_mode || resolvedMode,
+    ai_provider_available: req.execution_report?.ai_provider_available ?? false,
+    ai_provider_used: req.execution_report?.ai_provider_used ?? false,
+    image_reference_processed: Boolean(referenceAnalysis),
+    reference_image_analyzed: Boolean(referenceAnalysis),
+    fallback_triggered: req.execution_report?.fallback_triggered ?? false,
+    fallback_reason: req.execution_report?.fallback_reason ?? null,
+    seed_used: String(seed),
+    seed: req.execution_report?.seed ?? seed,
+    seed_preserved: req.execution_report?.seed_preserved ?? true,
+    poly_budget_requested: generated.budgetProfile.targetPolyBudget,
+    poly_budget_achieved: totalTris,
+    detail_level: effectiveDetailLevel,
+  };
+
   const baseAsset: Record<string, any> = {
     id: deterministicId,
     forgeAssetId: deterministicId,
@@ -1836,19 +1822,32 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     geometrySource: 'EditableMeshBuffers',
     geometryHash: assetGeometryHash,
     name: safeModelName,
+    model_name: safeModelName,
     category: canonicalCategory,
-    asset_type: assetType,
-    generation_mode: 'procedural',
+    asset_type: isSceneRequest ? 'Scene3D' : generated.blueprint.identity.asset_type || effectiveAssetType,
+    generation_mode: resolvedMode,
     seed: String(seed),
     ...(canonicalCategory === 'Trees & Vegetation'
       ? { tree_params: { seed, ...req.tree_params } }
       : {}),
     poly_count: totalTris,
+    poly_budget_requested: generated.budgetProfile.targetPolyBudget,
+    target_poly_budget: generated.budgetProfile.targetPolyBudget,
+    detail_level: effectiveDetailLevel,
     collision_fidelity: collisionFidelity,
     rojo_target_folder: 'src/shared/Assets3D',
     file_name: fileName,
     description: generated.description,
     pbr_profile: generated.pbrProfile,
+    ai_director_blueprint: generated.blueprint,
+    director_blueprint: generated.blueprint,
+    execution_report: executionReport,
+    ...(referenceAnalysis
+      ? {
+          reference_image_analysis: referenceAnalysis,
+          reference_comparison_metrics: referenceComparisonMetrics,
+        }
+      : {}),
     parts: normalizedParts,
     luau_code: luauCode,
   };
@@ -1861,5 +1860,101 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   return {
     ...baseAsset,
     contentHash,
+  };
+}
+
+/**
+ * Valida la integridad geométrica de un arreglo de partes 3D generadas (FASE 6 & 7).
+ */
+export function validateProcedural3DGeometry(parts: any[]): {
+  valid: boolean;
+  totalParts: number;
+  totalVertices: number;
+  totalTriangles: number;
+  degenerateTriangles: number;
+  editableMeshCompliant: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+  let totalVertices = 0;
+  let totalTriangles = 0;
+  let degenerateTriangles = 0;
+  let editableMeshCompliant = true;
+
+  if (!Array.isArray(parts) || parts.length === 0) {
+    return {
+      valid: false,
+      totalParts: 0,
+      totalVertices: 0,
+      totalTriangles: 0,
+      degenerateTriangles: 0,
+      editableMeshCompliant: false,
+      errors: ['El modelo no contiene partes 3D.'],
+    };
+  }
+
+  for (const part of parts) {
+    const md = part?.meshData;
+    if (!md || !Array.isArray(md.vertices) || !Array.isArray(md.faces)) {
+      errors.push(`Parte '${part?.name || 'unknown'}' carece de buffers meshData.`);
+      continue;
+    }
+    const vCount = md.vertices.length;
+    const fCount = md.faces.length;
+    totalVertices += vCount;
+    totalTriangles += fCount;
+
+    if (vCount > 9000 || fCount > 9500) {
+      editableMeshCompliant = false;
+      errors.push(
+        `Parte '${part.name}' excede límites seguros EditableMesh (${vCount} verts, ${fCount} tris).`
+      );
+    }
+
+    for (const face of md.faces) {
+      if (!Array.isArray(face) || face.length < 3) {
+        degenerateTriangles++;
+        continue;
+      }
+      const [i0, i1, i2] = face;
+      if (i0 === i1 || i1 === i2 || i0 === i2) {
+        degenerateTriangles++;
+        continue;
+      }
+      const v0 = md.vertices[i0];
+      const v1 = md.vertices[i1];
+      const v2 = md.vertices[i2];
+      if (!v0 || !v1 || !v2) {
+        degenerateTriangles++;
+        continue;
+      }
+      const ux = v1[0] - v0[0];
+      const uy = v1[1] - v0[1];
+      const uz = v1[2] - v0[2];
+      const vx = v2[0] - v0[0];
+      const vy = v2[1] - v0[1];
+      const vz = v2[2] - v0[2];
+      const cx = uy * vz - uz * vy;
+      const cy = uz * vx - ux * vz;
+      const cz = ux * vy - uy * vx;
+      const area2 = Math.hypot(cx, cy, cz);
+      if (!Number.isFinite(area2) || area2 < 1e-8) {
+        degenerateTriangles++;
+      }
+    }
+  }
+
+  if (degenerateTriangles > 0) {
+    errors.push(`Se detectaron ${degenerateTriangles} triángulos degenerados.`);
+  }
+
+  return {
+    valid: errors.length === 0 && totalVertices > 0 && totalTriangles > 0,
+    totalParts: parts.length,
+    totalVertices,
+    totalTriangles,
+    degenerateTriangles,
+    editableMeshCompliant,
+    errors,
   };
 }

@@ -29,6 +29,7 @@ import {
   exportAssetToOBJWithMTL,
   generateEditableMeshLuauCode,
   resolveRgbTuple,
+  recolorPartSpec,
   computeAssetStudDimensions,
   triggerBlobDownload,
 } from '../../utils/roblox3DEngine.ts';
@@ -61,6 +62,8 @@ export const EditView: React.FC = () => {
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
   const [showMeshTools, setShowMeshTools] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<'viewport' | 'hierarchy' | 'inspector'>('viewport');
+  const [paintScope, setPaintScope] = useState<'selected' | 'all'>('selected');
+  const [liveColorHex, setLiveColorHex] = useState<string | null>(null);
 
   const validationReport = useMemo(
     () => (activeAsset ? validateRobloxGeometry(activeAsset) : null),
@@ -311,6 +314,76 @@ export const EditView: React.FC = () => {
         : `Restablecer rotación de ${selectedPart.name}`,
       'transform_pos_rot'
     );
+  };
+
+  // --- Kid-Friendly Live & Committed Piece Painting ---
+
+  const handleColorLiveChange = (hex: string) => {
+    setLiveColorHex(hex);
+  };
+
+  const handleColorCommit = (_hex: string, rgb: [number, number, number]) => {
+    setLiveColorHex(null);
+    if (!activeAsset) return;
+    if (paintScope === 'all' || !selectedPart) {
+      const updatedAsset: Forge3DAsset = {
+        ...activeAsset,
+        parts: activeAsset.parts.map((p) => recolorPartSpec(p, rgb)),
+      };
+      applyAssetChange(
+        updatedAsset,
+        `Pintar todo el modelo (${activeAsset.parts.length} piezas)`,
+        'material_pbr'
+      );
+      setNotification({
+        type: 'success',
+        message: `¡Color aplicado a las ${activeAsset.parts.length} piezas!`,
+      });
+    } else {
+      const updatedAsset: Forge3DAsset = {
+        ...activeAsset,
+        parts: activeAsset.parts.map((p) =>
+          p.name === selectedPart.name ? recolorPartSpec(p, rgb) : p
+        ),
+      };
+      applyAssetChange(updatedAsset, `Pintar ${selectedPart.name}`, 'material_pbr');
+    }
+  };
+
+  const handleMaterialChange = (material: string) => {
+    setLiveColorHex(null);
+    if (!activeAsset) return;
+    if (paintScope === 'all' || !selectedPart) {
+      const updatedAsset: Forge3DAsset = {
+        ...activeAsset,
+        parts: activeAsset.parts.map((p) => {
+          const rgb = resolveRgbTuple(
+            p.color,
+            undefined,
+            (p as any).colorSpace || (p as any).colorFormat
+          );
+          return recolorPartSpec(p, rgb, material);
+        }),
+      };
+      applyAssetChange(updatedAsset, `Cambiar material a ${material}`, 'material_pbr');
+    } else {
+      const rgb = resolveRgbTuple(
+        selectedPart.color,
+        undefined,
+        (selectedPart as any).colorSpace || (selectedPart as any).colorFormat
+      );
+      const updatedAsset: Forge3DAsset = {
+        ...activeAsset,
+        parts: activeAsset.parts.map((p) =>
+          p.name === selectedPart.name ? recolorPartSpec(p, rgb, material) : p
+        ),
+      };
+      applyAssetChange(
+        updatedAsset,
+        `Cambiar material de ${selectedPart.name} a ${material}`,
+        'material_pbr'
+      );
+    }
   };
 
   // --- Export Actions ---
@@ -599,11 +672,14 @@ export const EditView: React.FC = () => {
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 text-xs">
             {activeAsset.parts.map((part, index) => {
               const isSelected = selectedPart?.name === part.name;
+              const isPaintedLive = Boolean(liveColorHex && (paintScope === 'all' || isSelected));
               const rgb = resolveRgbTuple(part.color, undefined, (part as any).colorSpace || (part as any).colorFormat);
+              const dotColor = isPaintedLive && liveColorHex ? liveColorHex : `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
               return (
                 <div
                   key={part.name + index}
                   onClick={() => {
+                    setLiveColorHex(null);
                     setSelectedPart(part);
                     if (mobilePanel === 'hierarchy') setMobilePanel('inspector');
                   }}
@@ -616,7 +692,7 @@ export const EditView: React.FC = () => {
                   <div className="flex items-center gap-2 truncate">
                     <span
                       className="w-3 h-3 rounded-full border border-white/30 shrink-0"
-                      style={{ backgroundColor: `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})` }}
+                      style={{ backgroundColor: dotColor }}
                     />
                     <span className="truncate">{part.name}</span>
                   </div>
@@ -630,19 +706,21 @@ export const EditView: React.FC = () => {
 
           {/* Simple Validation Badge */}
           {validationReport && (
-            <div className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-between text-[11px]">
-              <span className="text-slate-400 flex items-center gap-1.5">
+            <div className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-between gap-2 text-[11px] shrink-0">
+              <span className="text-slate-400 flex items-center gap-1.5 min-w-0">
                 {validationReport.isValid ? (
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 ) : (
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                 )}
-                <span>{validationReport.isValid ? 'Listo para Roblox' : 'Revisar malla'}</span>
+                <span className="truncate">
+                  {validationReport.isValid ? 'Listo para Roblox' : 'Revisar malla'}
+                </span>
               </span>
               <button
                 type="button"
                 onClick={handleRepairGeometry}
-                className="text-cyan-400 hover:text-cyan-300 font-bold cursor-pointer"
+                className="text-cyan-400 hover:text-cyan-300 font-bold cursor-pointer shrink-0"
               >
                 Reparar
               </button>
@@ -652,32 +730,59 @@ export const EditView: React.FC = () => {
 
         {/* CENTER COLUMN: Interactive 3D Viewport */}
         <div
-          className={`col-span-1 md:col-span-6 lg:col-span-6 rounded-2xl overflow-hidden border border-slate-800 bg-black/80 relative flex-col ${
+          className={`col-span-1 md:col-span-5 lg:col-span-6 rounded-2xl overflow-hidden border border-slate-800 bg-black/80 relative flex-col ${
             mobilePanel === 'viewport' ? 'flex' : 'hidden md:flex'
           }`}
         >
           <RobloxWorldViewport3D
             asset={activeAsset}
+            compactHeader
+            highlightedPartName={selectedPart?.name || null}
+            livePartPreview={
+              liveColorHex
+                ? {
+                    applyToAll: paintScope === 'all',
+                    partNames: selectedPart ? [selectedPart.name] : null,
+                    hex: liveColorHex,
+                  }
+                : null
+            }
             onPartSelected={(part) => {
-              if (part) setSelectedPart(part);
+              if (part) {
+                setLiveColorHex(null);
+                setSelectedPart(part);
+              }
             }}
           />
         </div>
 
-        {/* RIGHT COLUMN: Clean Inspector + Collapsible Advanced Mesh Tools */}
-        <EditInspectorPanel
-          selectedPart={selectedPart}
-          showMeshTools={showMeshTools}
-          onToggleMeshTools={() => setShowMeshTools(!showMeshTools)}
-          onTransformChange={handleTransformChange}
-          onResetTransform={handleResetTransform}
-          onOpenMaterials={() => setActiveTab('materials')}
-          onSubdivide={handleSubdivide}
-          onDecimate={handleDecimate}
-          onSmooth={handleSmooth}
-          onSmartSplit={handleSmartSplit}
-          isVisibleMobile={mobilePanel === 'inspector'}
-        />
+        {/* RIGHT COLUMN: Kids Interactive Color Wheel + Transform Inspector */}
+        <div
+          className={`md:col-span-4 lg:col-span-3 flex-col min-h-0 ${
+            mobilePanel === 'inspector' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
+          <EditInspectorPanel
+            selectedPart={selectedPart}
+            totalPartsCount={activeAsset.parts.length}
+            paintScope={paintScope}
+            onChangePaintScope={setPaintScope}
+            liveColorHex={liveColorHex}
+            onColorLiveChange={handleColorLiveChange}
+            onColorCommit={handleColorCommit}
+            onMaterialChange={handleMaterialChange}
+            showMeshTools={showMeshTools}
+            onToggleMeshTools={() => setShowMeshTools(!showMeshTools)}
+            onTransformChange={handleTransformChange}
+            onResetTransform={handleResetTransform}
+            onOpenMaterials={() => setActiveTab('materials')}
+            onSubdivide={handleSubdivide}
+            onDecimate={handleDecimate}
+            onSmooth={handleSmooth}
+            onSmartSplit={handleSmartSplit}
+            isVisibleMobile={mobilePanel === 'inspector'}
+          />
+        </div>
       </div>
     </div>
   );

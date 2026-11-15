@@ -55,10 +55,11 @@ export const CreateWizardView: React.FC = () => {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
   const [category, setCategory] = useState<ObjectCategory>('Trees & Vegetation');
   const [inputMethod, setInputMethod] = useState<InputMethod>('text');
-  const [generationMode, setGenerationMode] = useState<'procedural' | 'ai'>('procedural');
+  const [generationMode, setGenerationMode] = useState<'procedural' | 'hybrid' | 'ai' | 'image_to_3d'>('hybrid');
   const [seed, setSeed] = useState<string>('forge-tree-2026');
   const [selectedPresetId, setSelectedPresetId] = useState<string>('ancient-oak');
   const [showAdvancedTreeParams, setShowAdvancedTreeParams] = useState<boolean>(false);
+  const [loadingBenchmarkId, setLoadingBenchmarkId] = useState<string | null>(null);
 
   // Tree Procedural Parameters (23 configurable parameters)
   const [treeHeight, setTreeHeight] = useState<number>(14);
@@ -151,8 +152,47 @@ export const CreateWizardView: React.FC = () => {
     reader.onload = (event) => {
       const dataUrl = event.target?.result as string;
       setReferenceImage(dataUrl);
+      setGenerationMode('image_to_3d');
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleLoadBenchmarkCase = async (caseId: string) => {
+    setLoadingBenchmarkId(caseId);
+    try {
+      const res = await forgeFetch('/api/v1/benchmarks/generate-case', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          case_id: caseId,
+          save_to_rojo: true,
+          save_to_library: true,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (data.asset) {
+        setGeneratedAsset(data.asset);
+        applyAssetChange(data.asset, `Benchmark: ${data.asset.name}`, 'add_part');
+        setActiveAsset(data.asset);
+        fetchAssetLibrary();
+        setCurrentStep(5);
+        setNotification({
+          type: 'success',
+          message: `Benchmark '${data.benchmark?.title || data.asset.name}' cargado (${data.asset.parts.length} piezas, ${data.asset.poly_count} tris).`,
+        });
+      }
+    } catch (err: any) {
+      setNotification({
+        type: 'error',
+        message: `Error cargando benchmark: ${err.message}`,
+      });
+    } finally {
+      setLoadingBenchmarkId(null);
+    }
   };
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -226,9 +266,9 @@ export const CreateWizardView: React.FC = () => {
         signal: controller.signal,
         body: JSON.stringify({
           prompt: inputMethod === 'text' ? prompt : `Asset de tipo ${category} generado con referencia/relieve`,
-          asset_type: 'Model3D',
+          asset_type: category === 'Ambient & Decoration' && prompt.toLowerCase().includes('escena') ? 'Scene3D' : 'Model3D',
           category,
-          generation_mode: generationMode,
+          generation_mode: inputMethod === 'image' && referenceImage ? 'image_to_3d' : generationMode,
           seed: seed.trim() || 'forge-seed-2026',
           tree_params:
             category === 'Trees & Vegetation'
@@ -502,6 +542,45 @@ export const CreateWizardView: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+
+            {/* FASE 7: 8 Canonical Visual Benchmarks Quick Loader */}
+            <div className="bg-slate-950/90 border border-cyan-500/30 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <span className="text-xs font-extrabold text-cyan-300 uppercase tracking-wider block">
+                    Suite de Benchmarks Visuales 3D (8 Casos Canónicos)
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    Inspecciona al instante los 8 modelos de referencia con geometría especializada, LODs y jerarquía:
+                  </span>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { id: 'stylized_tree', label: '1. Árbol Roble', sub: 'Raíces + Sub-ramas' },
+                  { id: 'fantasy_tree', label: '2. Árbol Fantástico', sub: 'Cristales Neón' },
+                  { id: 'detailed_rock', label: '3. Roca Detallada', sub: 'Icosfera + Estratos' },
+                  { id: 'modular_building', label: '4. Edificio Modular', sub: 'Arco + Ventanas + Tejado' },
+                  { id: 'ergonomic_chair', label: '5. Silla / Trono', sub: 'Patas + Cojín + Brazos' },
+                  { id: 'street_lamp', label: '6. Lámpara / Farol', sub: 'Poste + Cristal + Luz' },
+                  { id: 'mechanical_gearbox', label: '7. Objeto Mecánico', sub: 'Engranajes Dentados' },
+                  { id: 'coherent_scene', label: '8. Escenario 3D', sub: 'Multi-Asset Zonas' },
+                ].map((bm) => (
+                  <button
+                    key={bm.id}
+                    type="button"
+                    disabled={loadingBenchmarkId !== null}
+                    onClick={() => handleLoadBenchmarkCase(bm.id)}
+                    className="p-2.5 rounded-xl bg-slate-900 hover:bg-cyan-950/50 border border-slate-800 hover:border-cyan-500/50 text-left transition cursor-pointer disabled:opacity-50"
+                  >
+                    <div className="text-xs font-bold text-white truncate">
+                      {loadingBenchmarkId === bm.id ? 'Cargando...' : bm.label}
+                    </div>
+                    <div className="text-[10px] text-cyan-400 font-mono truncate">{bm.sub}</div>
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
@@ -1023,6 +1102,76 @@ export const CreateWizardView: React.FC = () => {
                 <span>Crear Otro Modelo</span>
               </button>
             </div>
+
+            {/* Engine Execution Report & AI Director Blueprint Diagnostics */}
+            {(generatedAsset as any).execution_report && (
+              <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-4 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-2.5 py-1 rounded-lg bg-violet-950/80 border border-violet-500/40 text-[11px] font-bold text-violet-300 font-mono">
+                      Modo solicitado: {(generatedAsset as any).execution_report.requested_mode}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-cyan-950/80 border border-cyan-500/40 text-[11px] font-bold text-cyan-300 font-mono">
+                      Modo ejecutado: {(generatedAsset as any).execution_report.executed_mode}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-[11px] font-bold text-emerald-300 font-mono">
+                      Triángulos: {generatedAsset.poly_count} / Budget: {(generatedAsset as any).poly_budget_requested || POLY_BUDGETS[detailLevel].tris}
+                    </span>
+                    {(generatedAsset as any).director_blueprint?.objectFamily && (
+                      <span className="px-2.5 py-1 rounded-lg bg-fuchsia-950/80 border border-fuchsia-500/40 text-[11px] font-bold text-fuchsia-300 font-mono">
+                        Motor geométrico: {(generatedAsset as any).director_blueprint.objectFamily}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {(generatedAsset as any).execution_report.fallback_triggered && (
+                  <div className="text-xs text-amber-300 bg-amber-950/40 border border-amber-500/40 rounded-xl px-3 py-2 font-medium">
+                    Aviso explícito: {(generatedAsset as any).execution_report.fallback_reason} (Semilla determinista conservada: {(generatedAsset as any).execution_report.seed}).
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Reference Image 2D vs 3D Model Quantitative Comparison Panel (FASE 5) */}
+            {(generatedAsset as any).reference_image_analysis && (generatedAsset as any).reference_comparison_metrics && (
+              <div className="bg-slate-950/90 border border-fuchsia-500/30 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <span className="text-xs font-extrabold text-fuchsia-300 uppercase tracking-wider">
+                    Comparación Reconstrucción Imagen 2D vs Modelo 3D
+                  </span>
+                  <span className="text-xs font-mono text-emerald-400 font-bold">
+                    Coincidencia de Silueta (IoU): {Math.round((generatedAsset as any).reference_comparison_metrics.silhouetteMatchIoU * 100)}%
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="bg-slate-900 p-3 rounded-xl border border-slate-800">
+                    <span className="text-slate-400 block text-[11px]">Proporción (Alto/Ancho)</span>
+                    <span className="text-white font-mono font-bold">
+                      Img: {(generatedAsset as any).reference_comparison_metrics.aspectRatioReference} · 3D: {(generatedAsset as any).reference_comparison_metrics.aspectRatioModel}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900 p-3 rounded-xl border border-slate-800">
+                    <span className="text-slate-400 block text-[11px]">Simetría Detectada</span>
+                    <span className="text-white font-mono font-bold">
+                      {Math.round((generatedAsset as any).reference_image_analysis.symmetryScore * 100)}% ({(generatedAsset as any).reference_image_analysis.inferredFamily})
+                    </span>
+                  </div>
+                  <div className="bg-slate-900 p-3 rounded-xl border border-slate-800">
+                    <span className="text-slate-400 block text-[11px] mb-1">Paleta Extraída de Imagen</span>
+                    <div className="flex items-center gap-1.5">
+                      {((generatedAsset as any).reference_image_analysis.dominantHexColors || []).map((hex: string, idx: number) => (
+                        <span
+                          key={idx}
+                          className="w-5 h-5 rounded-md border border-white/30"
+                          style={{ backgroundColor: hex }}
+                          title={hex}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Interactive 3D Canvas Preview */}
             <div className="w-full h-96 rounded-2xl overflow-hidden border border-slate-800 bg-black/60 relative">

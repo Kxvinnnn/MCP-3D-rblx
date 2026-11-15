@@ -1,21 +1,29 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Sparkles,
   Palette,
-  Eye,
   Send,
-  Box,
-  Image as ImageIcon,
   Save,
+  RotateCcw,
+  Layers,
+  ChevronDown,
+  ChevronUp,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { useForge } from '../../context/ForgeContext.tsx';
 import {
   Forge3DAsset,
   PBRTextureSet,
   generateProceduralPBRTextures,
+  resolveRgbTuple,
+  recolorPartSpec,
 } from '../../utils/roblox3DEngine.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
-import { HelpTooltip, FORGE_GLOSSARY } from '../common/HelpTooltip.tsx';
+import {
+  InteractiveColorWheel,
+  rgbToHex,
+} from '../common/InteractiveColorWheel.tsx';
+import { SIMPLE_ROBLOX_MATERIALS } from './edit/EditInspectorPanel.tsx';
 import { forgeFetch } from '../../utils/forgeApiClient.ts';
 
 interface MaterialPreset {
@@ -26,10 +34,9 @@ interface MaterialPreset {
   defaultEmissive: string;
   roughness: number;
   metalness: number;
-  description: string;
 }
 
-const MATERIAL_PRESETS: MaterialPreset[] = [
+const ADVANCED_PBR_PRESETS: MaterialPreset[] = [
   {
     id: 'titanium',
     name: 'Titanio Hexagonal',
@@ -38,7 +45,6 @@ const MATERIAL_PRESETS: MaterialPreset[] = [
     defaultEmissive: '#38bdf8',
     roughness: 0.25,
     metalness: 0.85,
-    description: 'Blindaje sci-fi con placas hexagonales y alta reflectividad metálica.',
   },
   {
     id: 'carbon',
@@ -48,17 +54,6 @@ const MATERIAL_PRESETS: MaterialPreset[] = [
     defaultEmissive: '#0ea5e9',
     roughness: 0.45,
     metalness: 0.1,
-    description: 'Tejido entrelazado de polímero reforzado con brillo mate satinado.',
-  },
-  {
-    id: 'brushed_metal',
-    name: 'Metal Cepillado',
-    pattern: 'BrushedTitanium',
-    defaultAlbedo: '#64748b',
-    defaultEmissive: '#94a3b8',
-    roughness: 0.35,
-    metalness: 0.9,
-    description: 'Acero inoxidable industrial con líneas finas de cepillado horizontal.',
   },
   {
     id: 'stone',
@@ -68,7 +63,6 @@ const MATERIAL_PRESETS: MaterialPreset[] = [
     defaultEmissive: '#a8a29e',
     roughness: 0.85,
     metalness: 0.05,
-    description: 'Superficie pétrea porosa con relieve rugoso y nula conductividad.',
   },
   {
     id: 'gold_chrome',
@@ -78,17 +72,6 @@ const MATERIAL_PRESETS: MaterialPreset[] = [
     defaultEmissive: '#fef08a',
     roughness: 0.15,
     metalness: 0.95,
-    description: 'Acabado espejo dorado de lujo para accesorios y reliquias.',
-  },
-  {
-    id: 'obsidian',
-    name: 'Obsidiana Volcánica',
-    pattern: 'HexPlate',
-    defaultAlbedo: '#0f172a',
-    defaultEmissive: '#818cf8',
-    roughness: 0.12,
-    metalness: 0.3,
-    description: 'Vidrio volcánico oscuro con reflejos nítidos y relieve fractal.',
   },
 ];
 
@@ -100,57 +83,102 @@ export const MaterialsView: React.FC = () => {
     selectedPart,
     setSelectedPart,
     applyAssetChange,
+    undo,
+    canUndo,
+    pendingChanges,
     saveAssetToDisk,
     pushToStudio,
     setNotification,
     setActiveTab,
   } = useForge();
 
-  const [selectedPresetId, setSelectedPresetId] = useState<string>('titanium');
-  const [albedoHex, setAlbedoHex] = useState<string>('#06b6d4');
-  const [emissiveHex, setEmissiveHex] = useState<string>('#38bdf8');
-  const [roughness, setRoughness] = useState<number>(0.25);
-  const [metalness, setMetalness] = useState<number>(0.85);
-  const [applyScope, setApplyScope] = useState<'all' | 'selected'>('all');
+  const [paintScope, setPaintScope] = useState<'selected' | 'same_material' | 'all'>('selected');
+  const [liveColorHex, setLiveColorHex] = useState<string | null>(null);
+  const [mobilePanel, setMobilePanel] = useState<'paint' | 'viewport' | 'parts'>('paint');
 
+  // Collapsible Advanced PBR section (hidden by default so kids see a clean, fun painter)
+  const [showAdvancedPbr, setShowAdvancedPbr] = useState<boolean>(false);
+  const [selectedPresetId, setSelectedPresetId] = useState<string>('titanium');
   const [pbrTextures, setPbrTextures] = useState<PBRTextureSet | null>(null);
   const [isPublishing, setIsPublishing] = useState<boolean>(false);
+  const [saving, setSaving] = useState<boolean>(false);
 
-  // Generate real PBR texture cards whenever preset/colors change
+  const activeTargetPart = useMemo(() => {
+    if (!activeAsset || activeAsset.parts.length === 0) return null;
+    if (selectedPart) {
+      return activeAsset.parts.find((p) => p.name === selectedPart.name) || activeAsset.parts[0];
+    }
+    return activeAsset.parts[0];
+  }, [activeAsset, selectedPart]);
+
+  const activePartRgb = useMemo<[number, number, number]>(() => {
+    if (!activeTargetPart) return [59, 130, 246];
+    return resolveRgbTuple(
+      activeTargetPart.color,
+      undefined,
+      (activeTargetPart as any).colorSpace || (activeTargetPart as any).colorFormat
+    );
+  }, [activeTargetPart]);
+
+  const currentHex =
+    liveColorHex || rgbToHex(activePartRgb[0], activePartRgb[1], activePartRgb[2]);
+
+  // Compute target part names for 60fps live preview
+  const targetPartNames = useMemo<string[] | null>(() => {
+    if (!activeAsset || !activeTargetPart) return null;
+    if (paintScope === 'all') return null;
+    if (paintScope === 'same_material') {
+      const targetMat = activeTargetPart.material || 'SmoothPlastic';
+      return activeAsset.parts
+        .filter((p) => (p.material || 'SmoothPlastic') === targetMat)
+        .map((p) => p.name);
+    }
+    return [activeTargetPart.name];
+  }, [activeAsset, activeTargetPart, paintScope]);
+
+  // Generate PBR preview textures only when advanced accordion is opened
   useEffect(() => {
-    const preset = MATERIAL_PRESETS.find((p) => p.id === selectedPresetId);
+    if (!showAdvancedPbr) return;
+    const preset = ADVANCED_PBR_PRESETS.find((p) => p.id === selectedPresetId);
     const pattern = preset?.pattern || 'HexPlate';
-    const textures = generateProceduralPBRTextures(pattern, albedoHex, emissiveHex, 8);
+    const textures = generateProceduralPBRTextures(
+      pattern,
+      currentHex,
+      preset?.defaultEmissive || '#38bdf8',
+      8
+    );
     setPbrTextures(textures);
-  }, [selectedPresetId, albedoHex, emissiveHex]);
+  }, [showAdvancedPbr, selectedPresetId, currentHex]);
 
   if (!activeAsset) {
     return (
-      <div className="py-12 px-6 text-center space-y-5 max-w-xl mx-auto bg-slate-900/60 border border-slate-800 rounded-2xl my-6">
-        <div className="w-14 h-14 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-cyan-400 mx-auto">
-          <Palette className="w-7 h-7" />
+      <div className="py-12 px-6 text-center space-y-5 max-w-xl mx-auto bg-slate-900/75 border border-fuchsia-500/30 rounded-3xl my-6 shadow-2xl">
+        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-fuchsia-500 to-amber-500 flex items-center justify-center text-white mx-auto shadow-lg">
+          <Palette className="w-8 h-8" />
         </div>
         <div className="space-y-1.5">
-          <h3 className="text-lg font-bold text-white">No hay modelo cargado para pintar materiales</h3>
-          <p className="text-slate-400 text-xs leading-relaxed max-w-md mx-auto">
-            Selecciona un modelo de tu biblioteca aquí mismo o crea uno nuevo con el asistente 3D.
+          <h3 className="text-xl font-extrabold text-white">
+            Elige un modelo para empezar a pintar
+          </h3>
+          <p className="text-slate-300 text-xs leading-relaxed max-w-md mx-auto">
+            Selecciona uno de tus modelos guardados o crea uno nuevo para pintarlo pieza por pieza con el círculo de colores.
           </p>
         </div>
 
         {assetLibrary.length > 0 && (
-          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 text-left space-y-2 max-w-md mx-auto">
-            <span className="text-xs font-semibold text-slate-300 block">
-              Abrir rápidamente desde tu biblioteca ({assetLibrary.length}):
+          <div className="bg-slate-950/85 border border-slate-800 rounded-2xl p-4 text-left space-y-2 max-w-md mx-auto">
+            <span className="text-xs font-bold text-fuchsia-300 block">
+              Tus modelos ({assetLibrary.length}):
             </span>
-            <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+            <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
               {assetLibrary.slice(0, 6).map((item) => (
                 <button
                   key={item.name}
                   type="button"
                   onClick={() => setActiveAsset(item)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 flex items-center justify-between text-xs cursor-pointer transition"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 hover:bg-fuchsia-950/50 border border-slate-800 hover:border-fuchsia-400/50 flex items-center justify-between text-xs cursor-pointer transition"
                 >
-                  <span className="font-semibold text-white truncate">{item.name}</span>
+                  <span className="font-bold text-white truncate">{item.name}</span>
                   <span className="text-[11px] font-mono text-slate-400 shrink-0 ml-2">
                     {item.parts?.length || 0} pzs
                   </span>
@@ -164,556 +192,525 @@ export const MaterialsView: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('create')}
-            className="px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition"
+            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white text-xs font-bold inline-flex items-center gap-2 cursor-pointer transition shadow-lg"
           >
             <Sparkles className="w-4 h-4" />
-            <span>Crear nuevo modelo</span>
+            <span>Crear Nuevo Modelo</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('home')}
-            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer transition"
+            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold cursor-pointer transition"
           >
-            Ver toda la biblioteca
+            Ir al Menú
           </button>
         </div>
       </div>
     );
   }
 
-  const handleSelectPreset = (preset: MaterialPreset) => {
-    setSelectedPresetId(preset.id);
-    setAlbedoHex(preset.defaultAlbedo);
-    setEmissiveHex(preset.defaultEmissive);
-    setRoughness(preset.roughness);
-    setMetalness(preset.metalness);
+  const handleColorLiveChange = (hex: string) => {
+    setLiveColorHex(hex);
   };
 
-  const handleApplyMaterialToAsset = () => {
-    const preset = MATERIAL_PRESETS.find((p) => p.id === selectedPresetId);
-    const pattern = preset?.pattern || 'HexPlate';
+  const handleColorCommit = (_hex: string, rgb: [number, number, number]) => {
+    setLiveColorHex(null);
+    if (!activeTargetPart) return;
 
-    const newPbrProfile = {
-      albedo_hex: albedoHex,
-      roughness,
-      metalness,
-      emissive_hex: emissiveHex,
-      roblox_material: metalness > 0.5 ? 'Metal' : 'SmoothPlastic',
-      pattern,
-      color_map_asset_id: '',
-      normal_map_asset_id: '',
-      roughness_map_asset_id: '',
-      metalness_map_asset_id: '',
+    const targetSet = targetPartNames ? new Set(targetPartNames) : null;
+    const updatedAsset: Forge3DAsset = {
+      ...activeAsset,
+      parts: activeAsset.parts.map((part) => {
+        const shouldPaint =
+          paintScope === 'all' || (targetSet ? targetSet.has(part.name) : part.name === activeTargetPart.name);
+        return shouldPaint ? recolorPartSpec(part, rgb) : part;
+      }),
     };
 
-    let updatedAsset: Forge3DAsset;
+    const summary =
+      paintScope === 'all'
+        ? `Pintar todo el modelo (${activeAsset.parts.length} piezas)`
+        : paintScope === 'same_material'
+        ? `Pintar piezas de ${activeTargetPart.material || 'SmoothPlastic'}`
+        : `Pintar ${activeTargetPart.name}`;
 
-    if (applyScope === 'all' || !selectedPart) {
-      updatedAsset = {
-        ...activeAsset,
-        pbr_profile: newPbrProfile,
-        parts: activeAsset.parts.map((part) => ({
-          ...part,
-          roughness,
-          metalness,
-          pbrMaterial: {
-            pattern,
-            albedoHex,
-            emissiveHex,
-            roughness,
-            metalness,
-            albedoDataUrl: pbrTextures?.albedoDataUrl,
-            normalDataUrl: pbrTextures?.normalDataUrl,
-            roughnessDataUrl: pbrTextures?.roughnessDataUrl,
-            metalnessDataUrl: pbrTextures?.metalnessDataUrl,
-          },
-        })),
-      };
-      applyAssetChange(
-        updatedAsset,
-        `Aplicar material '${preset?.name}' a todo el modelo`,
-        'material_pbr'
-      );
-      setNotification({
-        type: 'success',
-        message: `Material '${preset?.name}' aplicado a todas las ${activeAsset.parts.length} piezas.`,
-      });
-    } else {
-      updatedAsset = {
-        ...activeAsset,
-        parts: activeAsset.parts.map((part) =>
-          part.name === selectedPart.name
-            ? {
-                ...part,
-                roughness,
-                metalness,
-                pbrMaterial: {
-                  pattern,
-                  albedoHex,
-                  emissiveHex,
-                  roughness,
-                  metalness,
-                  albedoDataUrl: pbrTextures?.albedoDataUrl,
-                  normalDataUrl: pbrTextures?.normalDataUrl,
-                  roughnessDataUrl: pbrTextures?.roughnessDataUrl,
-                  metalnessDataUrl: pbrTextures?.metalnessDataUrl,
-                },
-              }
-            : part
-        ),
-      };
-      applyAssetChange(
-        updatedAsset,
-        `Aplicar material '${preset?.name}' a ${selectedPart.name}`,
-        'material_pbr'
-      );
-      setNotification({
-        type: 'success',
-        message: `Material aplicado a la pieza '${selectedPart.name}'.`,
-      });
-    }
+    applyAssetChange(updatedAsset, summary, 'material_pbr');
   };
 
-  const handleGenerateSurfaceAppearance = async () => {
+  const handleSelectMaterial = (materialId: string) => {
+    setLiveColorHex(null);
+    if (!activeTargetPart) return;
+    const targetSet = targetPartNames ? new Set(targetPartNames) : null;
+
+    const updatedAsset: Forge3DAsset = {
+      ...activeAsset,
+      parts: activeAsset.parts.map((part) => {
+        const shouldUpdate =
+          paintScope === 'all' || (targetSet ? targetSet.has(part.name) : part.name === activeTargetPart.name);
+        if (!shouldUpdate) return part;
+        const partRgb = resolveRgbTuple(
+          part.color,
+          undefined,
+          (part as any).colorSpace || (part as any).colorFormat
+        );
+        return recolorPartSpec(part, partRgb, materialId);
+      }),
+    };
+
+    applyAssetChange(updatedAsset, `Cambiar acabado a ${materialId}`, 'material_pbr');
+  };
+
+  const handleApplyAdvancedPbr = async () => {
     setIsPublishing(true);
-    handleApplyMaterialToAsset();
+    const preset = ADVANCED_PBR_PRESETS.find((p) => p.id === selectedPresetId) || ADVANCED_PBR_PRESETS[0];
+    const targetSet = targetPartNames ? new Set(targetPartNames) : null;
+    const textures = generateProceduralPBRTextures(
+      preset.pattern,
+      currentHex,
+      preset.defaultEmissive,
+      8
+    );
+
+    const updatedAsset: Forge3DAsset = {
+      ...activeAsset,
+      pbr_profile: {
+        albedo_hex: currentHex,
+        roughness: preset.roughness,
+        metalness: preset.metalness,
+        emissive_hex: preset.defaultEmissive,
+        roblox_material: preset.metalness > 0.5 ? 'Metal' : 'SmoothPlastic',
+        pattern: preset.pattern,
+        color_map_asset_id: '',
+        normal_map_asset_id: '',
+        roughness_map_asset_id: '',
+        metalness_map_asset_id: '',
+      },
+      parts: activeAsset.parts.map((part) => {
+        const shouldUpdate =
+          paintScope === 'all' || (targetSet ? targetSet.has(part.name) : part.name === activeTargetPart?.name);
+        if (!shouldUpdate) return part;
+        return {
+          ...part,
+          roughness: preset.roughness,
+          metalness: preset.metalness,
+          pbrMaterial: {
+            pattern: preset.pattern,
+            albedoHex: currentHex,
+            emissiveHex: preset.defaultEmissive,
+            roughness: preset.roughness,
+            metalness: preset.metalness,
+            albedoDataUrl: textures.albedoDataUrl,
+            normalDataUrl: textures.normalDataUrl,
+            roughnessDataUrl: textures.roughnessDataUrl,
+            metalnessDataUrl: textures.metalnessDataUrl,
+          },
+        };
+      }),
+    };
+
+    applyAssetChange(updatedAsset, `Aplicar textura PBR '${preset.name}'`, 'material_pbr');
 
     try {
-      const preset = MATERIAL_PRESETS.find((p) => p.id === selectedPresetId);
-      const pattern = preset?.pattern || 'HexPlate';
-
       const res = await forgeFetch('/api/v1/assets/publish-pbr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           asset_name: activeAsset.name,
-          pbr_profile: {
-            albedo_hex: albedoHex,
-            emissive_hex: emissiveHex,
-            roughness,
-            metalness,
-            pattern,
-          },
+          pbr_profile: updatedAsset.pbr_profile,
         }),
       });
-
-      const data = await res.json();
       if (res.ok) {
+        const data = await res.json();
         setNotification({
           type: 'success',
           message:
             data.status === 'cloud_published'
-              ? 'SurfaceAppearance publicada en Roblox Cloud con IDs oficiales.'
-              : 'Texturas PBR guardadas localmente en disco para Roblox Studio.',
+              ? 'Texturas PBR publicadas en Roblox Cloud.'
+              : 'Texturas PBR guardadas para Roblox Studio.',
         });
       }
     } catch (err: any) {
       setNotification({
         type: 'error',
-        message: `Error al publicar PBR: ${err.message}`,
+        message: `Error al guardar PBR: ${err.message}`,
       });
     } finally {
       setIsPublishing(false);
     }
   };
 
-  return (
-    <div className="space-y-6 pb-12 animate-in fade-in duration-200">
-      {/* Header & Top Action Bar */}
-      <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
-          <div>
-            <div className="inline-flex items-center gap-2 text-cyan-400 text-xs font-semibold uppercase tracking-wider">
-              <Palette className="w-3.5 h-3.5" />
-              <span>Editor de Materiales PBR &amp; SurfaceAppearance</span>
-            </div>
-            <h2 className="text-xl font-bold text-white mt-0.5">
-              Materiales Realistas para {activeAsset.name}
-            </h2>
-          </div>
+  const handleSave = async () => {
+    setSaving(true);
+    await saveAssetToDisk(true);
+    setSaving(false);
+  };
 
-          <div className="flex flex-wrap items-center gap-2">
-            <HelpTooltip
-              term={FORGE_GLOSSARY.surfaceAppearance.term}
-              explanation={FORGE_GLOSSARY.surfaceAppearance.explanation}
-              variant="badge"
-            />
-            <button
-              type="button"
-              onClick={handleApplyMaterialToAsset}
-              className="px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Aplicar Material</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => saveAssetToDisk(true)}
-              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
-            >
-              <Save className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Guardar</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => pushToStudio(activeAsset)}
-              className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
-            >
-              <Send className="w-3.5 h-3.5" />
-              <span>Enviar a Studio</span>
-            </button>
+  const sameMaterialCount = activeTargetPart
+    ? activeAsset.parts.filter(
+        (p) => (p.material || 'SmoothPlastic') === (activeTargetPart.material || 'SmoothPlastic')
+      ).length
+    : 0;
+
+  return (
+    <div className="flex flex-col h-[calc(100vh-140px)] min-h-[640px] space-y-3 animate-slide-up">
+      {/* Clean & Friendly Top Bar */}
+      <div className="bg-slate-900/90 border border-fuchsia-500/30 rounded-2xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0 shadow-lg">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-fuchsia-500 to-amber-500 flex items-center justify-center text-white shadow-md shrink-0">
+            <Palette className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="font-extrabold text-white text-sm truncate">
+              Pintar: {activeAsset.name}
+            </h2>
+            <p className="text-[11px] text-slate-400 truncate">
+              Toca una pieza en el 3D o en la lista y gira el círculo de colores
+            </p>
           </div>
         </div>
 
-        {/* Clean Unboxed Status Line */}
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span>Estado de Texturas:</span>
-            <strong className="text-cyan-300 font-semibold">Texturas PBR en sesión local y carpeta Rojo</strong>
-            <span className="text-slate-700">·</span>
-            <span>Haz clic en una pieza del visor 3D o usa el selector inferior para pintar por partes.</span>
-          </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={undo}
+            disabled={!canUndo}
+            className={`px-3 py-2 rounded-xl border border-slate-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap ${
+              canUndo
+                ? 'bg-slate-950 hover:bg-slate-800 text-slate-200'
+                : 'bg-slate-950/40 text-slate-600 cursor-not-allowed'
+            }`}
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Deshacer</span>
+          </button>
+
+          {pendingChanges && (
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>{saving ? '...' : 'Guardar'}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => pushToStudio(activeAsset)}
+            className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition shadow-md whitespace-nowrap"
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>Enviar a Roblox</span>
+          </button>
         </div>
       </div>
 
-      {/* Main Grid: Left Controls (5 cols) | Right 3D Preview & 4 Channels (7 cols) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* LEFT COLUMN: Scope, Presets & Sliders (5 cols) */}
-        <div className="lg:col-span-5 space-y-5">
-          {/* Application Scope + Inline Part Selector */}
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
-            <span className="text-xs font-bold text-white block">
-              1. ¿Dónde deseas aplicar el material?
+      {/* Responsive Mobile Tab Switcher */}
+      <div className="flex md:hidden items-center gap-1.5 bg-slate-900/90 p-1.5 rounded-xl border border-slate-800 shrink-0">
+        <button
+          type="button"
+          onClick={() => setMobilePanel('paint')}
+          className={`flex-1 py-2 rounded-lg text-xs font-bold cursor-pointer transition ${
+            mobilePanel === 'paint' ? 'bg-fuchsia-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Colores
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobilePanel('viewport')}
+          className={`flex-1 py-2 rounded-lg text-xs font-bold cursor-pointer transition ${
+            mobilePanel === 'viewport' ? 'bg-cyan-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Vista 3D
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobilePanel('parts')}
+          className={`flex-1 py-2 rounded-lg text-xs font-bold cursor-pointer transition ${
+            mobilePanel === 'parts' ? 'bg-violet-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Piezas ({activeAsset.parts.length})
+        </button>
+      </div>
+
+      {/* Main 3-Column Studio */}
+      <div className="flex-1 grid grid-cols-1 md:grid-cols-12 gap-3 min-h-0">
+        {/* LEFT COLUMN: Piece Picker List */}
+        <div
+          className={`md:col-span-3 lg:col-span-3 flex-col bg-slate-900/85 border border-slate-800 rounded-2xl p-3.5 overflow-hidden ${
+            mobilePanel === 'parts' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2 shrink-0">
+            <span className="font-bold text-xs text-white flex items-center gap-1.5">
+              <Layers className="w-3.5 h-3.5 text-fuchsia-400" />
+              <span>Piezas del Modelo</span>
             </span>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <button
-                type="button"
-                onClick={() => setApplyScope('all')}
-                className={`p-2.5 rounded-xl border text-center transition cursor-pointer font-semibold ${
-                  applyScope === 'all'
-                    ? 'bg-cyan-950/60 border-cyan-500 text-white'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                }`}
-              >
-                Todo el modelo ({activeAsset.parts.length} pzs)
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setApplyScope('selected');
-                  if (!selectedPart && activeAsset.parts.length > 0) {
-                    setSelectedPart(activeAsset.parts[0]);
-                  }
-                }}
-                className={`p-2.5 rounded-xl border text-center transition cursor-pointer font-semibold ${
-                  applyScope === 'selected'
-                    ? 'bg-cyan-950/60 border-cyan-500 text-white'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                }`}
-              >
-                Una pieza específica
-              </button>
-            </div>
-
-            {applyScope === 'selected' && (
-              <div className="pt-1">
-                <label className="text-[11px] text-slate-400 block mb-1">
-                  Selecciona la pieza del modelo:
-                </label>
-                <select
-                  aria-label="Seleccionar pieza para aplicar material"
-                  value={selectedPart?.name || activeAsset.parts[0]?.name || ''}
-                  onChange={(e) => {
-                    const found = activeAsset.parts.find((p) => p.name === e.target.value);
-                    if (found) setSelectedPart(found);
-                  }}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500 cursor-pointer"
-                >
-                  {activeAsset.parts.map((part, idx) => (
-                    <option key={part.name + idx} value={part.name}>
-                      {idx + 1}. {part.name} ({part.material || 'Metal'})
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+            <span className="text-[11px] font-mono tabular-nums text-fuchsia-300 font-bold">
+              {activeAsset.parts.length}
+            </span>
           </div>
 
-          {/* Material Presets Grid */}
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
-            <span className="text-xs font-bold text-white block">
-              2. Elige un Acabado Predefinido (Preset)
-            </span>
+          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 text-xs">
+            {activeAsset.parts.map((part, index) => {
+              const isSelected = activeTargetPart?.name === part.name;
+              const isInBatch =
+                paintScope === 'all' ||
+                (paintScope === 'same_material' && targetPartNames?.includes(part.name));
+              const rgb = resolveRgbTuple(
+                part.color,
+                undefined,
+                (part as any).colorSpace || (part as any).colorFormat
+              );
+              const partDisplayColor =
+                liveColorHex && (isSelected || isInBatch)
+                  ? liveColorHex
+                  : `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
 
-            <div className="grid grid-cols-2 gap-2.5">
-              {MATERIAL_PRESETS.map((preset) => {
-                const isSelected = selectedPresetId === preset.id;
+              return (
+                <button
+                  key={part.name + index}
+                  type="button"
+                  onClick={() => {
+                    setLiveColorHex(null);
+                    setSelectedPart(part);
+                    if (mobilePanel === 'parts') setMobilePanel('paint');
+                  }}
+                  className={`w-full p-2.5 rounded-xl cursor-pointer transition flex items-center justify-between text-left ${
+                    isSelected
+                      ? 'bg-gradient-to-r from-fuchsia-950/90 to-violet-950/80 text-white border border-fuchsia-400/70 font-bold shadow-sm'
+                      : isInBatch
+                      ? 'bg-slate-800/80 text-slate-100 border border-fuchsia-500/30'
+                      : 'hover:bg-slate-800/70 text-slate-300 border border-transparent'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span
+                      className="w-4 h-4 rounded-full border border-white/40 shrink-0 shadow-sm"
+                      style={{ backgroundColor: partDisplayColor }}
+                    />
+                    <span className="truncate">{part.name}</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 shrink-0 ml-1">
+                    {part.material || 'Plástico'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* CENTER COLUMN: Interactive 3D Viewport */}
+        <div
+          className={`col-span-1 md:col-span-5 lg:col-span-5 rounded-2xl overflow-hidden border border-slate-800 bg-black/80 relative flex-col ${
+            mobilePanel === 'viewport' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
+          <RobloxWorldViewport3D
+            asset={activeAsset}
+            compactHeader
+            highlightedPartName={activeTargetPart?.name || null}
+            livePartPreview={
+              liveColorHex
+                ? {
+                    applyToAll: paintScope === 'all',
+                    partNames: targetPartNames,
+                    hex: liveColorHex,
+                  }
+                : null
+            }
+            onPartSelected={(part) => {
+              if (part) {
+                setLiveColorHex(null);
+                setSelectedPart(part);
+              }
+            }}
+          />
+        </div>
+
+        {/* RIGHT COLUMN: Kids Interactive Color Wheel & Material Studio */}
+        <div
+          className={`md:col-span-4 lg:col-span-4 flex-col bg-slate-900/90 border border-slate-800 rounded-2xl p-4 overflow-y-auto space-y-4 ${
+            mobilePanel === 'paint' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
+          {/* Current Piece & Scope Selector */}
+          <div className="space-y-2.5 border-b border-slate-800 pb-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <span className="text-[11px] font-bold text-fuchsia-300 block">
+                  {paintScope === 'all'
+                    ? 'Pintando todo el modelo'
+                    : paintScope === 'same_material'
+                    ? `Pintando piezas de ${activeTargetPart?.material || 'este tipo'}`
+                    : 'Pintando esta pieza:'}
+                </span>
+                <h3 className="text-base font-extrabold text-white truncate">
+                  {paintScope === 'all'
+                    ? `${activeAsset.parts.length} piezas juntas`
+                    : activeTargetPart?.name || 'Modelo'}
+                </h3>
+              </div>
+
+              <div
+                className="w-9 h-9 rounded-xl border-2 border-white/60 shadow-md shrink-0"
+                style={{ backgroundColor: currentHex }}
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+              <button
+                type="button"
+                onClick={() => setPaintScope('selected')}
+                className={`py-2 px-2 rounded-xl border font-bold cursor-pointer transition truncate ${
+                  paintScope === 'selected'
+                    ? 'bg-fuchsia-950/70 border-fuchsia-400 text-white'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                Solo 1 pieza
+              </button>
+              <button
+                type="button"
+                onClick={() => setPaintScope('same_material')}
+                className={`py-2 px-2 rounded-xl border font-bold cursor-pointer transition truncate ${
+                  paintScope === 'same_material'
+                    ? 'bg-cyan-950/70 border-cyan-400 text-white'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                Similares ({sameMaterialCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setPaintScope('all')}
+                className={`py-2 px-2 rounded-xl border font-bold cursor-pointer transition truncate ${
+                  paintScope === 'all'
+                    ? 'bg-amber-950/70 border-amber-400 text-white'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                Todo ({activeAsset.parts.length})
+              </button>
+            </div>
+          </div>
+
+          {/* Interactive Rainbow Color Wheel */}
+          <div className="bg-slate-950/75 border border-slate-800/90 rounded-2xl p-4">
+            <InteractiveColorWheel
+              value={currentHex}
+              size={200}
+              title="Círculo de Colores"
+              onChangeLive={handleColorLiveChange}
+              onCommit={handleColorCommit}
+            />
+          </div>
+
+          {/* Kid-Friendly Roblox Material Finish Picker */}
+          <div className="space-y-2">
+            <span className="text-xs font-extrabold text-white block">
+              Elige el estilo del material:
+            </span>
+            <div className="grid grid-cols-3 gap-2">
+              {SIMPLE_ROBLOX_MATERIALS.map((mat) => {
+                const isActive = (activeTargetPart?.material || 'SmoothPlastic') === mat.id;
                 return (
-                  <div
-                    key={preset.id}
-                    onClick={() => handleSelectPreset(preset)}
-                    className={`p-3 rounded-xl border cursor-pointer transition flex flex-col justify-between ${
-                      isSelected
-                        ? 'bg-cyan-950/40 border-cyan-500 shadow-sm'
-                        : 'bg-slate-950/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900/60'
+                  <button
+                    key={mat.id}
+                    type="button"
+                    onClick={() => handleSelectMaterial(mat.id)}
+                    className={`py-2.5 px-2 rounded-xl border text-center cursor-pointer transition ${
+                      isActive
+                        ? 'bg-cyan-950/80 border-cyan-400 text-white shadow-sm'
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700 hover:text-white'
                     }`}
                   >
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className={`text-xs font-semibold ${isSelected ? 'text-cyan-300' : 'text-slate-200'}`}>
-                          {preset.name}
-                        </span>
-                        <div
-                          className="w-3.5 h-3.5 rounded-full border border-white/20 shadow-inner shrink-0"
-                          style={{ backgroundColor: preset.defaultAlbedo }}
-                        />
-                      </div>
-                      <p className="text-[10px] text-slate-400 leading-tight line-clamp-2">
-                        {preset.description}
-                      </p>
-                    </div>
-
-                    <div className="mt-2 text-[10px] text-slate-500 font-mono tabular-nums flex items-center justify-between">
-                      <span>R: {preset.roughness}</span>
-                      <span>M: {preset.metalness}</span>
-                    </div>
-                  </div>
+                    <span className="text-xs font-extrabold block truncate">{mat.label}</span>
+                    <span className="text-[10px] text-slate-400 block truncate">{mat.hint}</span>
+                  </button>
                 );
               })}
             </div>
           </div>
 
-          {/* Color & Accent Palettes */}
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
-            <span className="text-xs font-bold text-white block">
-              3. Color Base, Rugosidad y Metalicidad
-            </span>
-
-            <div className="grid grid-cols-2 gap-3">
-              {/* Albedo / Base Color */}
-              <div className="space-y-1.5">
-                <label className="text-xs text-slate-300 block">Color Albedo / Base:</label>
-                <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl p-2">
-                  <input
-                    type="color"
-                    value={albedoHex}
-                    onChange={(e) => setAlbedoHex(e.target.value)}
-                    className="w-7 h-7 rounded border-0 bg-transparent cursor-pointer"
-                  />
-                  <input
-                    type="text"
-                    value={albedoHex}
-                    onChange={(e) => setAlbedoHex(e.target.value)}
-                    className="w-full bg-transparent text-xs text-white font-mono uppercase focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {/* Emissive / Accent Color */}
-              <div className="space-y-1.5">
-                <label className="text-xs text-slate-300 block">Color Emisivo / Acento:</label>
-                <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl p-2">
-                  <input
-                    type="color"
-                    value={emissiveHex}
-                    onChange={(e) => setEmissiveHex(e.target.value)}
-                    className="w-7 h-7 rounded border-0 bg-transparent cursor-pointer"
-                  />
-                  <input
-                    type="text"
-                    value={emissiveHex}
-                    onChange={(e) => setEmissiveHex(e.target.value)}
-                    className="w-full bg-transparent text-xs text-white font-mono uppercase focus:outline-none"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Sliders for Roughness and Metalness */}
-            <div className="space-y-3 pt-2">
-              <div>
-                <div className="flex justify-between text-xs text-slate-300 mb-1">
-                  <span>Rugosidad (Roughness / Brillo difuso):</span>
-                  <span className="font-mono tabular-nums text-cyan-400">{roughness}</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={roughness}
-                  onChange={(e) => setRoughness(parseFloat(e.target.value))}
-                  className="w-full accent-cyan-500"
-                />
-              </div>
-
-              <div>
-                <div className="flex justify-between text-xs text-slate-300 mb-1">
-                  <span>Metalicidad (Metalness / Conductividad):</span>
-                  <span className="font-mono tabular-nums text-cyan-400">{metalness}</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={metalness}
-                  onChange={(e) => setMetalness(parseFloat(e.target.value))}
-                  className="w-full accent-cyan-500"
-                />
-              </div>
-            </div>
-
-            {/* Primary Action Button */}
+          {/* Collapsible Advanced PBR Options */}
+          <div className="pt-2 border-t border-slate-800">
             <button
               type="button"
-              onClick={handleGenerateSurfaceAppearance}
-              disabled={isPublishing}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition shadow-lg shadow-cyan-900/30"
+              onClick={() => setShowAdvancedPbr(!showAdvancedPbr)}
+              className="w-full py-2.5 px-3 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-bold flex items-center justify-between cursor-pointer transition"
             >
-              <Sparkles className="w-4 h-4 text-cyan-200" />
-              <span>
-                {isPublishing
-                  ? 'Aplicando y guardando SurfaceAppearance...'
-                  : 'Aplicar y Guardar SurfaceAppearance PBR'}
-              </span>
+              <span>Texturas Avanzadas (PBR Roblox Studio)</span>
+              {showAdvancedPbr ? (
+                <ChevronUp className="w-4 h-4 text-cyan-400" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-cyan-400" />
+              )}
             </button>
-          </div>
-        </div>
 
-        {/* RIGHT COLUMN: 3D Preview (Top) & 4-Channel PBR Inspector (Bottom) (7 cols) */}
-        <div className="lg:col-span-7 space-y-5">
-          {/* Real-time 3D Viewport Preview */}
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                <Eye className="w-4 h-4 text-cyan-400" />
-                <span>Previsualización 3D Interactiva</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => setActiveTab('edit')}
-                className="text-xs text-slate-300 hover:text-cyan-300 flex items-center gap-1 transition cursor-pointer font-semibold"
-              >
-                <Box className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Abrir en Editor 3D ›</span>
-              </button>
-            </div>
-
-            <div className="w-full h-72 rounded-xl overflow-hidden border border-slate-800 bg-black/80 relative">
-              <RobloxWorldViewport3D
-                asset={activeAsset}
-                onPartSelected={(part) => {
-                  if (part) {
-                    setSelectedPart(part);
-                    setApplyScope('selected');
-                  }
-                }}
-              />
-            </div>
-          </div>
-
-          {/* 4 PBR Channel Cards */}
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <span className="text-xs font-bold text-white">
-                Inspección de los 4 Canales PBR (SurfaceAppearance)
-              </span>
-              <span className="text-[11px] text-slate-400 font-mono">
-                {MATERIAL_PRESETS.find((p) => p.id === selectedPresetId)?.pattern || 'HexPlate'} · 512x512
-              </span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {/* Channel 1: Color / Albedo */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="font-semibold text-slate-200">ColorMap</span>
-                  <span className="text-slate-500 font-mono text-[10px]">Albedo</span>
+            {showAdvancedPbr && (
+              <div className="mt-3 space-y-3 bg-slate-950/80 border border-slate-800 rounded-2xl p-3.5">
+                <div className="grid grid-cols-2 gap-2">
+                  {ADVANCED_PBR_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => setSelectedPresetId(preset.id)}
+                      className={`p-2 rounded-xl border text-left text-xs cursor-pointer transition ${
+                        selectedPresetId === preset.id
+                          ? 'bg-cyan-950/60 border-cyan-400 text-white font-bold'
+                          : 'bg-slate-900 border-slate-800 text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {preset.name}
+                    </button>
+                  ))}
                 </div>
-                <div className="w-full aspect-square rounded-lg overflow-hidden border border-slate-800 bg-black/60 flex items-center justify-center">
-                  {pbrTextures?.albedoDataUrl ? (
-                    <img
-                      src={pbrTextures.albedoDataUrl}
-                      alt="ColorMap"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <ImageIcon className="w-6 h-6 text-slate-600" />
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-400 leading-tight">
-                  Color difuso y patrones gráficos base.
-                </p>
+
+                {pbrTextures && (
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { label: 'Color', src: pbrTextures.albedoDataUrl },
+                      { label: 'Relieve', src: pbrTextures.normalDataUrl },
+                      { label: 'Rugoso', src: pbrTextures.roughnessDataUrl },
+                      { label: 'Metal', src: pbrTextures.metalnessDataUrl },
+                    ].map((mapItem) => (
+                      <div key={mapItem.label} className="space-y-1 text-center">
+                        <div className="aspect-square rounded-lg overflow-hidden border border-slate-800 bg-black flex items-center justify-center">
+                          {mapItem.src ? (
+                            <img
+                              src={mapItem.src}
+                              alt={mapItem.label}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <ImageIcon className="w-4 h-4 text-slate-600" />
+                          )}
+                        </div>
+                        <span className="text-[10px] text-slate-400 block">{mapItem.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  disabled={isPublishing}
+                  onClick={handleApplyAdvancedPbr}
+                  className="w-full py-2.5 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>
+                    {isPublishing ? 'Guardando texturas...' : 'Aplicar Textura PBR'}
+                  </span>
+                </button>
               </div>
-
-              {/* Channel 2: Normal (Bump / Relief) */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="font-semibold text-slate-200">NormalMap</span>
-                  <span className="text-slate-500 font-mono text-[10px]">Relieve</span>
-                </div>
-                <div className="w-full aspect-square rounded-lg overflow-hidden border border-slate-800 bg-black/60 flex items-center justify-center">
-                  {pbrTextures?.normalDataUrl ? (
-                    <img
-                      src={pbrTextures.normalDataUrl}
-                      alt="NormalMap"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <ImageIcon className="w-6 h-6 text-slate-600" />
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-400 leading-tight">
-                  Simula profundidad y detalle poligonal sin lag.
-                </p>
-              </div>
-
-              {/* Channel 3: Roughness (Glossiness) */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="font-semibold text-slate-200">Roughness</span>
-                  <span className="text-slate-500 font-mono text-[10px]">Rugosidad</span>
-                </div>
-                <div className="w-full aspect-square rounded-lg overflow-hidden border border-slate-800 bg-black/60 flex items-center justify-center">
-                  {pbrTextures?.roughnessDataUrl ? (
-                    <img
-                      src={pbrTextures.roughnessDataUrl}
-                      alt="RoughnessMap"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <ImageIcon className="w-6 h-6 text-slate-600" />
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-400 leading-tight">
-                  Controla la dispersión de luz y micro-brillo.
-                </p>
-              </div>
-
-              {/* Channel 4: Metalness (Conductivity) */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="font-semibold text-slate-200">Metalness</span>
-                  <span className="text-slate-500 font-mono text-[10px]">Metálico</span>
-                </div>
-                <div className="w-full aspect-square rounded-lg overflow-hidden border border-slate-800 bg-black/60 flex items-center justify-center">
-                  {pbrTextures?.metalnessDataUrl ? (
-                    <img
-                      src={pbrTextures.metalnessDataUrl}
-                      alt="MetalnessMap"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <ImageIcon className="w-6 h-6 text-slate-600" />
-                  )}
-                </div>
-                <p className="text-[10px] text-slate-400 leading-tight">
-                  Distingue metales conductores de dieléctricos.
-                </p>
-              </div>
-            </div>
+            )}
           </div>
         </div>
       </div>

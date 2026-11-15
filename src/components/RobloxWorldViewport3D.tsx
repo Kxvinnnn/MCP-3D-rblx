@@ -29,9 +29,19 @@ import {
 import { default3DEngineProcessor } from './engines/3dEngine.ts';
 import { forgeFetch } from '../utils/forgeApiClient.ts';
 
+interface LivePartPreview {
+  partNames?: string[] | null;
+  applyToAll?: boolean;
+  hex: string;
+  material?: string;
+}
+
 interface RobloxWorldViewport3DProps {
   asset: Forge3DAsset | null;
   heightmapImageDataUrl?: string | null;
+  livePartPreview?: LivePartPreview | null;
+  highlightedPartName?: string | null;
+  compactHeader?: boolean;
   onPartSelected?: (part: MeshPart3DSpec | null) => void;
   onPreprocessedAssetReady?: (asset: Forge3DAsset) => void;
   onImportedModelStats?: (stats: {
@@ -48,30 +58,35 @@ interface RobloxWorldViewport3DProps {
 const _targetCamPos = new THREE.Vector3(9, 6.5, 11);
 const _targetLookAt = new THREE.Vector3(0, 2.2, 0);
 const _partOffsetVec = new THREE.Vector3();
+const _livePreviewColor = new THREE.Color();
 
 export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
   asset,
   heightmapImageDataUrl,
+  livePartPreview,
+  highlightedPartName,
+  compactHeader = false,
   onPartSelected,
   onPreprocessedAssetReady,
   onImportedModelStats,
 }) => {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
 
-  // Interactive HUD state (consolidated into Collapsible Bottom Dock)
-  const [dockCollapsed, setDockCollapsed] = useState<boolean>(false);
+  // Interactive HUD state (consolidated into Collapsible Bottom Dock — collapsed by default for unobstructed 3D view)
+  const [dockCollapsed, setDockCollapsed] = useState<boolean>(true);
   const [explodedFactor, setExplodedFactor] = useState<number>(0);
   const [lodRatio, setLodRatio] = useState<number>(1.0);
   const [wireframe, setWireframe] = useState<boolean>(false);
   const [showCollisions, setShowCollisions] = useState<boolean>(false);
   const [showR15Dummy, setShowR15Dummy] = useState<boolean>(false);
-  const [pbrPattern, setPbrPattern] = useState<string>('BrushedTitanium');
+  const [pbrPattern, setPbrPattern] = useState<string>('Natural');
   const [stats, setStats] = useState<{ tris: number; parts: number; status: string }>({
     tris: 0,
     parts: 0,
     status: 'Roblox WorldModel Ready',
   });
   const [selectedPartName, setSelectedPartName] = useState<string | null>(null);
+  const [webglLost, setWebglLost] = useState<boolean>(false);
 
   // Refs for Three.js objects so UI updates never tear down the WebGL context
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -345,6 +360,17 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     };
     renderer.domElement.addEventListener('pointerdown', handlePointerDown);
 
+    const handleContextLost = (e: Event) => {
+      e.preventDefault();
+      setWebglLost(true);
+    };
+    const handleContextRestored = () => {
+      setWebglLost(false);
+      requestRender();
+    };
+    renderer.domElement.addEventListener('webglcontextlost', handleContextLost);
+    renderer.domElement.addEventListener('webglcontextrestored', handleContextRestored);
+
     const handleResize = () => {
       if (!mount) return;
       const w = mount.clientWidth || 800;
@@ -364,6 +390,8 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     return () => {
       window.removeEventListener('resize', handleResize);
       renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
+      renderer.domElement.removeEventListener('webglcontextlost', handleContextLost);
+      renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
       cancelAnimationFrame(frameId);
       clearTimeout(frameId);
       timer.dispose();
@@ -385,12 +413,15 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     }
 
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
-    const pbrTextures = generateProceduralPBRTextures(
-      pbrPattern || asset.pbr_profile?.pattern || 'BrushedTitanium',
-      asset.pbr_profile?.albedo_hex || '#334155',
-      asset.pbr_profile?.emissive_hex || '#06b6d4',
-      maxAniso
-    );
+    const pbrTextures =
+      pbrPattern && pbrPattern !== 'Natural'
+        ? generateProceduralPBRTextures(
+            pbrPattern,
+            asset.pbr_profile?.albedo_hex || '#64748b',
+            asset.pbr_profile?.emissive_hex || '#06b6d4',
+            maxAniso
+          )
+        : null;
 
     const { group, triangleCount, partCount } = buildThreeGroupFromAsset(asset, {
       lodRatio,
@@ -409,6 +440,67 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
 
     requestRenderRef.current?.();
   }, [asset, lodRatio, wireframe, showCollisions, pbrPattern]);
+
+  // Real-time 60fps in-place color & material preview during interactive color-wheel dragging
+  useEffect(() => {
+    const subjectGroup = subjectGroupRef.current;
+    if (!subjectGroup || !livePartPreview) return;
+
+    const targetSet =
+      livePartPreview.partNames && livePartPreview.partNames.length > 0
+        ? new Set(livePartPreview.partNames)
+        : null;
+
+    _livePreviewColor.set(livePartPreview.hex);
+    const rn = _livePreviewColor.r;
+    const gn = _livePreviewColor.g;
+    const bn = _livePreviewColor.b;
+
+    subjectGroup.traverse((obj) => {
+      if (!(obj as THREE.Mesh).isMesh) return;
+      const mesh = obj as THREE.Mesh;
+      if (!livePartPreview.applyToAll && (!targetSet || !targetSet.has(mesh.name))) {
+        return;
+      }
+
+      const mat = mesh.material as THREE.MeshPhysicalMaterial;
+      if (!mat) return;
+
+      const colorAttr = mesh.geometry?.getAttribute('color') as THREE.BufferAttribute | undefined;
+      const baseVCols = mesh.userData?.baseVertexColors as Float32Array | null | undefined;
+      if (colorAttr && baseVCols && baseVCols.length === colorAttr.array.length) {
+        const arr = colorAttr.array as Float32Array;
+        let sumLum = 0;
+        const count = baseVCols.length / 3;
+        for (let i = 0; i < baseVCols.length; i += 3) {
+          sumLum += 0.299 * baseVCols[i] + 0.587 * baseVCols[i + 1] + 0.114 * baseVCols[i + 2];
+        }
+        const avgLum = Math.max(0.08, sumLum / Math.max(1, count));
+        for (let i = 0; i < baseVCols.length; i += 3) {
+          const lum = 0.299 * baseVCols[i] + 0.587 * baseVCols[i + 1] + 0.114 * baseVCols[i + 2];
+          const ratio = Math.max(0.75, Math.min(1.25, lum / avgLum));
+          arr[i] = Math.min(1, Math.max(0, rn * ratio));
+          arr[i + 1] = Math.min(1, Math.max(0, gn * ratio));
+          arr[i + 2] = Math.min(1, Math.max(0, bn * ratio));
+        }
+        colorAttr.needsUpdate = true;
+      } else {
+        mat.color.copy(_livePreviewColor);
+      }
+
+      if (livePartPreview.material === 'Neon') {
+        mat.emissive.copy(_livePreviewColor);
+        mat.emissiveIntensity = 1.4;
+        mat.roughness = 0.08;
+        mat.metalness = 0.1;
+      } else if (livePartPreview.material) {
+        mat.emissive.setHex(0x000000);
+        mat.emissiveIntensity = 0;
+      }
+    });
+
+    requestRenderRef.current?.();
+  }, [livePartPreview]);
 
   // Convert 2D Reference Image to 3D Heightmap Relief Mesh when requested
   useEffect(() => {
@@ -585,36 +677,41 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     triggerBlobDownload(exportObject3DToOBJ(subjectGroupRef.current), 'text/plain;charset=utf-8', `${safeName}.obj`);
   };
 
+  const displaySelectedName = highlightedPartName ?? selectedPartName;
+
   return (
-    <div className="relative w-full h-full min-h-[540px] rounded-xl border border-slate-800 bg-[#0b0f17] overflow-hidden flex flex-col">
-      {/* Top Minimal Spec Header (No Pulsating Dots, No Clutter) */}
-      <div className="z-10 px-4 py-2.5 bg-[#0f172a] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5 text-xs text-slate-300">
-          <span className="font-semibold text-white">
-            {asset?.name || 'Roblox 3D WorldModel Viewport'}
+    <div className="relative w-full h-full min-h-[420px] rounded-xl border border-slate-800 bg-[#0b0f17] overflow-hidden flex flex-col">
+      {/* Top Minimal Spec Header (Compact Single Row) */}
+      <div className="z-10 px-3.5 py-2 bg-[#0f172a] border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs text-slate-300 min-w-0">
+          <span className="font-semibold text-white truncate max-w-[160px] sm:max-w-[220px]">
+            {asset?.name || 'Visor 3D'}
           </span>
           <span aria-hidden="true">·</span>
-          <span className="font-mono tabular-nums text-sky-400">
+          <span className="font-mono tabular-nums text-sky-400 whitespace-nowrap">
             {stats.tris.toLocaleString()} Tris
           </span>
           <span aria-hidden="true">·</span>
-          <span className="font-mono tabular-nums text-slate-400">
-            {stats.parts} MeshParts
+          <span className="font-mono tabular-nums text-slate-400 whitespace-nowrap">
+            {stats.parts} pzs
           </span>
-          {selectedPartName && (
+          {displaySelectedName && (
             <>
               <span aria-hidden="true">·</span>
-              <span className="text-amber-300 font-mono">
-                Pieza: {selectedPartName}
+              <span className="text-amber-300 font-semibold truncate max-w-[140px]">
+                Pieza: {displaySelectedName}
               </span>
             </>
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          <label className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <label
+            title="Importar archivo 3D (.RBXMX, .GLB, .GLTF, .OBJ, .FBX)"
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap shrink-0"
+          >
             <Upload className="w-3.5 h-3.5 text-sky-400" />
-            <span>Importar (.RBXMX / .GLB / .GLTF / .OBJ / .FBX)</span>
+            <span>{compactHeader ? 'Importar 3D' : 'Importar (.RBXMX / .GLB / .OBJ)'}</span>
             <input
               type="file"
               accept=".rbxmx,.glb,.gltf,.obj,.fbx"
@@ -623,37 +720,54 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
             />
           </label>
 
-          <button
-            onClick={handleDownloadRBXMX}
-            title="Descargar modelo XML nativo de Roblox Studio (.rbxmx)"
-            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>.RBXMX (Roblox Studio)</span>
-          </button>
+          {!compactHeader && (
+            <>
+              <button
+                type="button"
+                onClick={handleDownloadRBXMX}
+                title="Descargar modelo XML nativo de Roblox Studio (.rbxmx)"
+                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>.RBXMX</span>
+              </button>
 
-          <button
-            onClick={handleDownloadGLTF}
-            title="Descargar escena glTF 2.0 con geometría y materiales PBR (.gltf)"
-            className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>.GLTF (PBR)</span>
-          </button>
+              <button
+                type="button"
+                onClick={handleDownloadGLTF}
+                title="Descargar escena glTF 2.0 con geometría y materiales PBR (.gltf)"
+                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>.GLTF</span>
+              </button>
 
-          <button
-            onClick={handleDownloadOBJ}
-            title="Descargar malla Wavefront (.obj)"
-            className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>.OBJ</span>
-          </button>
+              <button
+                type="button"
+                onClick={handleDownloadOBJ}
+                title="Descargar malla Wavefront (.obj)"
+                className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white flex items-center gap-1 cursor-pointer transition whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>.OBJ</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
       {/* Dedicated Isolated WebGL Canvas Container (100% Unobstructed Center) */}
-      <div ref={canvasMountRef} className="relative flex-1 w-full h-full min-h-[460px]" />
+      <div className="relative flex-1 w-full h-full min-h-[340px]">
+        <div ref={canvasMountRef} className="w-full h-full" />
+        {webglLost && (
+          <div className="absolute inset-0 bg-slate-950/90 flex items-center justify-center p-4 text-center">
+            <div className="space-y-2 text-xs text-slate-300">
+              <p className="font-bold text-white">Vista 3D pausada temporalmente</p>
+              <p>Restaurando el visor gráfico...</p>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Unified Collapsible Bottom Control Dock (No backdrop-blur over WebGL, No side cards) */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 w-[94%] max-w-[920px] flex flex-col items-center">
@@ -713,25 +827,26 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
             </div>
 
             {/* PBR Material Pattern Switcher */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-xs font-medium text-slate-400 whitespace-nowrap">
-                PBR:
+                Acabado:
               </span>
-              {(['BrushedTitanium', 'HexGridCarbon', 'WeatheredStone', 'CyberPanel'] as const).map(
-                (pat) => (
-                  <button
-                    key={pat}
-                    onClick={() => setPbrPattern(pat)}
-                    className={`px-2 py-1 rounded text-[11px] font-medium transition cursor-pointer whitespace-nowrap shrink-0 ${
-                      pbrPattern === pat
-                        ? 'bg-indigo-600 text-white'
-                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                    }`}
-                  >
-                    {pat.replace(/([A-Z])/g, ' $1').trim()}
-                  </button>
-                )
-              )}
+              {(
+                ['Natural', 'BrushedTitanium', 'HexGridCarbon', 'WeatheredStone', 'CyberPanel'] as const
+              ).map((pat) => (
+                <button
+                  key={pat}
+                  type="button"
+                  onClick={() => setPbrPattern(pat)}
+                  className={`px-2 py-1 rounded text-[11px] font-medium transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    pbrPattern === pat
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  {pat === 'Natural' ? 'Colores Reales' : pat.replace(/([A-Z])/g, ' $1').trim()}
+                </button>
+              ))}
             </div>
 
             {/* Viewport Inspection Toggles & Camera Presets */}

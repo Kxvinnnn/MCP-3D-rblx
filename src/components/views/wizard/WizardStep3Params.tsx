@@ -36,8 +36,8 @@ interface WizardStep3ParamsProps {
   onChangeFoliageDensity: (val: number) => void;
   detailLevel: DetailLevel;
   onChangeDetailLevel: (val: DetailLevel) => void;
-  generationMode: 'procedural' | 'ai';
-  onChangeGenerationMode: (val: 'procedural' | 'ai') => void;
+  generationMode: 'procedural' | 'hybrid' | 'ai' | 'image_to_3d';
+  onChangeGenerationMode: (val: 'procedural' | 'hybrid' | 'ai' | 'image_to_3d') => void;
   collisionFidelity: 'Hull' | 'Box' | 'PreciseConvexDecomposition';
   onChangeCollisionFidelity: (val: 'Hull' | 'Box' | 'PreciseConvexDecomposition') => void;
   seed: string;
@@ -324,11 +324,15 @@ export const WizardStep3Params: React.FC<WizardStep3ParamsProps> = ({
           </label>
           <select
             value={generationMode}
-            onChange={(e) => onChangeGenerationMode(e.target.value as 'procedural' | 'ai')}
+            onChange={(e) =>
+              onChangeGenerationMode(e.target.value as 'procedural' | 'hybrid' | 'ai' | 'image_to_3d')
+            }
             className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-white"
           >
-            <option value="procedural">Instantáneo (Procedural Local)</option>
-            <option value="ai">Asistido por IA + Procedural</option>
+            <option value="procedural">Procedural (Local Determinista)</option>
+            <option value="hybrid">Híbrido (Director IA + Motores Geométricos)</option>
+            <option value="ai">IA Completa (Proveedor Configurado)</option>
+            <option value="image_to_3d">Image-to-3D (Silueta 2D a Volumen 3D)</option>
           </select>
         </div>
 

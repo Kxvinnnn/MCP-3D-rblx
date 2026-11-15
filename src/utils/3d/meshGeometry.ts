@@ -309,10 +309,12 @@ export function buildThreeGroupFromAsset(
       geom = new THREE.BoxGeometry(sx, sy, sz, boxSeg, boxSeg, boxSeg);
     }
 
+    const matDefaults = getRobloxMaterialDefaults(part.material);
     const isNeon = part.material === 'Neon';
     const isGlass = part.material === 'Glass' || (part.transparency || 0) > 0.15;
     const baseColor = new THREE.Color(`rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`);
-    const hasVertexColors = Boolean(geom.getAttribute('color'));
+    const colorAttr = geom.getAttribute('color');
+    const hasVertexColors = Boolean(colorAttr);
 
     let resolvedPbr = pbrTextures;
     if (part.pbrMaterial && part.pbrMaterial.pattern) {
@@ -321,28 +323,38 @@ export function buildThreeGroupFromAsset(
         part.pbrMaterial.albedoHex || `#${baseColor.getHexString()}`,
         part.pbrMaterial.emissiveHex || '#38bdf8',
         4,
-        part.pbrMaterial.roughness ?? part.roughness ?? 0.35,
-        part.pbrMaterial.metalness ?? part.metalness ?? 0.65
+        part.pbrMaterial.roughness ?? part.roughness ?? matDefaults.roughness,
+        part.pbrMaterial.metalness ?? part.metalness ?? matDefaults.metalness
       );
     }
+
+    const usePbrTextures = Boolean(
+      !isNeon &&
+        resolvedPbr &&
+        (part.pbrMaterial?.pattern || pbrTextures)
+    );
 
     const mat = new THREE.MeshPhysicalMaterial({
       color: hasVertexColors ? new THREE.Color(0xffffff) : baseColor,
       vertexColors: hasVertexColors,
-      roughness: isNeon ? 0.08 : Math.max(0.05, Math.min(1, part.pbrMaterial?.roughness ?? part.roughness ?? 0.35)),
-      metalness: isNeon ? 0.1 : Math.max(0, Math.min(1, part.pbrMaterial?.metalness ?? part.metalness ?? 0.65)),
+      roughness: isNeon
+        ? 0.08
+        : Math.max(0.05, Math.min(1, part.pbrMaterial?.roughness ?? part.roughness ?? matDefaults.roughness)),
+      metalness: isNeon
+        ? 0.1
+        : Math.max(0, Math.min(1, part.pbrMaterial?.metalness ?? part.metalness ?? matDefaults.metalness)),
       emissive: isNeon ? baseColor : new THREE.Color(0x000000),
-      emissiveIntensity: isNeon ? 1.6 : 0,
+      emissiveIntensity: isNeon ? 1.4 : 0,
       transparent: isGlass,
-      opacity: isGlass ? Math.max(0.2, 1 - (part.transparency || 0.45)) : 1,
-      transmission: isGlass && !isSoftwareGl ? 0.75 : 0,
-      clearcoat: part.material === 'SmoothPlastic' || isGlass ? 0.8 : 0.2,
+      opacity: isGlass ? Math.max(0.22, 1 - (part.transparency || 0.45)) : 1,
+      transmission: isGlass && !isSoftwareGl ? 0.65 : 0,
+      clearcoat: part.material === 'SmoothPlastic' || isGlass ? 0.65 : 0.08,
       side: part.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
       wireframe,
-      map: !isNeon && resolvedPbr ? resolvedPbr.albedoMap : null,
-      normalMap: !isNeon && resolvedPbr ? resolvedPbr.normalMap : null,
-      roughnessMap: !isNeon && resolvedPbr ? resolvedPbr.roughnessMap : null,
-      metalnessMap: !isNeon && resolvedPbr ? resolvedPbr.metalnessMap : null,
+      map: usePbrTextures && resolvedPbr ? resolvedPbr.albedoMap : null,
+      normalMap: usePbrTextures && resolvedPbr ? resolvedPbr.normalMap : null,
+      roughnessMap: usePbrTextures && resolvedPbr ? resolvedPbr.roughnessMap : null,
+      metalnessMap: usePbrTextures && resolvedPbr ? resolvedPbr.metalnessMap : null,
     });
 
     const mesh = new THREE.Mesh(geom, mat);
@@ -355,7 +367,11 @@ export function buildThreeGroupFromAsset(
     );
     mesh.castShadow = !isSoftwareGl && !isGlass;
     mesh.receiveShadow = !isSoftwareGl;
-    mesh.userData = { partSpec: part };
+    mesh.userData = {
+      partSpec: part,
+      baseColorHex: `#${baseColor.getHexString()}`,
+      baseVertexColors: colorAttr ? new Float32Array(colorAttr.array as ArrayLike<number>) : null,
+    };
 
     const indexAttr = geom.getIndex();
     const posAttr = geom.getAttribute('position');
@@ -386,6 +402,121 @@ export function buildThreeGroupFromAsset(
     group,
     triangleCount: totalTriangles,
     partCount: (asset.parts || []).length,
+  };
+}
+
+export function getRobloxMaterialDefaults(material?: string): {
+  roughness: number;
+  metalness: number;
+} {
+  switch (material) {
+    case 'Metal':
+    case 'CorrodedMetal':
+    case 'DiamondPlate':
+      return { roughness: 0.28, metalness: 0.85 };
+    case 'Foil':
+      return { roughness: 0.18, metalness: 0.92 };
+    case 'Glass':
+    case 'Ice':
+      return { roughness: 0.08, metalness: 0.08 };
+    case 'Neon':
+      return { roughness: 0.08, metalness: 0.1 };
+    case 'SmoothPlastic':
+    case 'Plastic':
+      return { roughness: 0.32, metalness: 0.04 };
+    case 'Wood':
+    case 'WoodPlanks':
+      return { roughness: 0.82, metalness: 0.03 };
+    case 'Grass':
+    case 'Fabric':
+      return { roughness: 0.88, metalness: 0.02 };
+    case 'Concrete':
+    case 'Slate':
+    case 'Cobblestone':
+    case 'Brick':
+    case 'Granite':
+    case 'Pebble':
+    case 'Sand':
+    case 'Marble':
+      return { roughness: 0.82, metalness: 0.05 };
+    default:
+      return { roughness: 0.55, metalness: 0.12 };
+  }
+}
+
+/**
+ * Recolors a MeshPart3DSpec cleanly in `forge-color-v1` (`rgb8`) format,
+ * preserving relative vertex luminance shading when `meshData.vertexColors` exists.
+ */
+export function recolorPartSpec(
+  part: MeshPart3DSpec,
+  rgb: readonly [number, number, number],
+  nextMaterial?: string
+): MeshPart3DSpec {
+  const clampByte = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  const r = clampByte(rgb[0]);
+  const g = clampByte(rgb[1]);
+  const b = clampByte(rgb[2]);
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const hex =
+    '#' +
+    [r, g, b]
+      .map((x) => x.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+
+  let updatedMeshData = part.meshData;
+  if (part.meshData?.vertexColors && part.meshData.vertexColors.length > 0) {
+    const vCols = part.meshData.vertexColors;
+    let sumLum = 0;
+    for (let i = 0; i < vCols.length; i++) {
+      const [vr = 0, vg = 0, vb = 0] = vCols[i];
+      sumLum += 0.299 * vr + 0.587 * vg + 0.114 * vb;
+    }
+    const avgLum = Math.max(0.08, sumLum / vCols.length);
+    const tinted = vCols.map(([vr = 0, vg = 0, vb = 0]) => {
+      const lum = 0.299 * vr + 0.587 * vg + 0.114 * vb;
+      const ratio = Math.max(0.75, Math.min(1.25, lum / avgLum));
+      return [
+        Number(Math.min(1, Math.max(0, rn * ratio)).toFixed(4)),
+        Number(Math.min(1, Math.max(0, gn * ratio)).toFixed(4)),
+        Number(Math.min(1, Math.max(0, bn * ratio)).toFixed(4)),
+      ];
+    });
+    updatedMeshData = {
+      ...part.meshData,
+      vertexColors: tinted,
+    };
+  }
+
+  const finalMaterial = nextMaterial || part.material || 'SmoothPlastic';
+  const matDefaults = nextMaterial ? getRobloxMaterialDefaults(nextMaterial) : null;
+
+  return {
+    ...part,
+    color: [r, g, b],
+    colorSpace: 'rgb8',
+    material: finalMaterial,
+    roughness: matDefaults ? matDefaults.roughness : part.roughness,
+    metalness: matDefaults ? matDefaults.metalness : part.metalness,
+    transparency:
+      nextMaterial === 'Glass'
+        ? Math.max(part.transparency || 0, 0.45)
+        : nextMaterial
+        ? 0
+        : part.transparency,
+    meshData: updatedMeshData,
+    pbrMaterial: part.pbrMaterial
+      ? {
+          ...part.pbrMaterial,
+          albedoHex: hex,
+          ...(matDefaults
+            ? { roughness: matDefaults.roughness, metalness: matDefaults.metalness }
+            : {}),
+        }
+      : undefined,
   };
 }
 

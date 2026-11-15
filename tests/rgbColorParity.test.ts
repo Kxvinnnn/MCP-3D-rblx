@@ -32,6 +32,16 @@ import {
   exportAssetToOBJWithMTL,
   exportAssetToGLTF,
 } from '../src/utils/3d/formatExporters.ts';
+import {
+  recolorPartSpec,
+  getRobloxMaterialDefaults,
+} from '../src/utils/3d/meshGeometry.ts';
+import {
+  rgbToHsv,
+  hsvToRgb,
+  rgbToHex,
+  KID_COLOR_PRESETS,
+} from '../src/components/common/InteractiveColorWheel.tsx';
 
 function makeMinimalTrianglePart(overrides: Record<string, any> = {}) {
   const vertices: Array<[number, number, number]> = [
@@ -272,4 +282,90 @@ test('RGB Parity 4 — procedural3DGenerator normaliza colores de árboles proce
   }
   assert.match(tree.luau_code, /Color3\.fromRGB\(255, 0, 0\)/);
   assert.match(tree.luau_code, /Color3\.fromRGB\(92, 64, 51\)/);
+});
+
+test('RGB Parity 5 — InteractiveColorWheel HSV/RGB roundtrip y recolorPartSpec preservan rgb8 y materiales naturales', () => {
+  const sampleColors: Array<[number, number, number]> = [
+    [0, 0, 0],
+    [255, 255, 255],
+    [255, 0, 0],
+    [0, 255, 0],
+    [0, 0, 255],
+    [255, 0, 128],
+    [34, 197, 94],
+    [124, 74, 45],
+  ];
+
+  for (const [r, g, b] of sampleColors) {
+    const hsv = rgbToHsv(r, g, b);
+    assert.ok(Number.isFinite(hsv.h) && Number.isFinite(hsv.s) && Number.isFinite(hsv.v));
+    const roundtrip = hsvToRgb(hsv.h, hsv.s, hsv.v);
+    assert.ok(Math.abs(roundtrip[0] - r) <= 1, `R mismatch for [${r},${g},${b}]`);
+    assert.ok(Math.abs(roundtrip[1] - g) <= 1, `G mismatch for [${r},${g},${b}]`);
+    assert.ok(Math.abs(roundtrip[2] - b) <= 1, `B mismatch for [${r},${g},${b}]`);
+    assert.equal(rgbToHex(r, g, b).length, 7);
+  }
+
+  assert.ok(KID_COLOR_PRESETS.length >= 12);
+
+  // Natural materials must NOT default to metallic appearance
+  const woodDefaults = getRobloxMaterialDefaults('Wood');
+  const grassDefaults = getRobloxMaterialDefaults('Grass');
+  const neonDefaults = getRobloxMaterialDefaults('Neon');
+  assert.ok(woodDefaults.metalness <= 0.1 && woodDefaults.roughness >= 0.75);
+  assert.ok(grassDefaults.metalness <= 0.1 && grassDefaults.roughness >= 0.8);
+  assert.ok(neonDefaults.roughness <= 0.15);
+
+  // recolorPartSpec updates color to rgb8, updates material defaults, and re-tints vertexColors cleanly in [0..1]
+  const partWithVertexColors = makeMinimalTrianglePart({
+    material: 'Wood',
+    color: [92, 64, 51],
+    meshData: {
+      vertices: [
+        [-1, -1, 0],
+        [1, -1, 0],
+        [0, 1, 0],
+      ],
+      normals: [
+        [0, 0, 1],
+        [0, 0, 1],
+        [0, 0, 1],
+      ],
+      uvs: [
+        [0, 0],
+        [1, 0],
+        [0.5, 1],
+      ],
+      faces: [[0, 1, 2]],
+      vertexColors: [
+        [0.4, 0.3, 0.2],
+        [0.36, 0.25, 0.18],
+        [0.44, 0.33, 0.24],
+      ],
+    },
+  });
+
+  const paintedRed = recolorPartSpec(partWithVertexColors as any, [255, 0, 0], 'SmoothPlastic');
+  assert.deepEqual(paintedRed.color, [255, 0, 0]);
+  assert.equal(paintedRed.colorSpace, 'rgb8');
+  assert.equal(paintedRed.material, 'SmoothPlastic');
+  assert.equal(paintedRed.roughness, 0.32);
+  assert.equal(paintedRed.metalness, 0.04);
+  for (const vc of paintedRed.meshData!.vertexColors!) {
+    assert.ok(vc.every((c) => Number.isFinite(c) && c >= 0 && c <= 1));
+    assert.ok(vc[0] > 0.7 && vc[1] === 0 && vc[2] === 0);
+  }
+
+  const paintedWhite = recolorPartSpec(partWithVertexColors as any, [255, 255, 255], 'Glass');
+  assert.deepEqual(paintedWhite.color, [255, 255, 255]);
+  assert.equal(paintedWhite.colorSpace, 'rgb8');
+  assert.equal(paintedWhite.material, 'Glass');
+  assert.ok((paintedWhite.transparency || 0) >= 0.45);
+
+  const paintedBlack = recolorPartSpec(partWithVertexColors as any, [0, 0, 0], 'Wood');
+  assert.deepEqual(paintedBlack.color, [0, 0, 0]);
+  assert.equal(paintedBlack.colorSpace, 'rgb8');
+  for (const vc of paintedBlack.meshData!.vertexColors!) {
+    assert.deepEqual(vc, [0, 0, 0]);
+  }
 });

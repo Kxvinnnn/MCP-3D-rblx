@@ -23,6 +23,19 @@ import {
   synthesizeSeededProcedural3DAsset,
 } from './src/server/engines/procedural3DGenerator.ts';
 import {
+  resolveRequestedGenerationMode,
+  requestGeminiDirectorBlueprint,
+  type EngineExecutionReport,
+} from './src/server/engines/aiGenerationDirector.ts';
+import {
+  analyzeReferenceImageBase64,
+} from './src/server/engines/imageReferenceProcessor.ts';
+import {
+  runVisualBenchmarkSuite,
+  getBenchmarkCaseById,
+  CANONICAL_VISUAL_BENCHMARK_CASES,
+} from './src/server/engines/visualBenchmarkSuite.ts';
+import {
   AI_MODULE_CONTRACTS,
   buildAiSelfUnderstandingManifest,
   buildGltfFromPartsServer,
@@ -3044,7 +3057,7 @@ const FORGE_3D_RESPONSE_SCHEMA = {
   ],
 };
 
-// Streaming 3D Model, PBR & Scene Generator (Text-to-3D & Image-to-3D)
+// Streaming 3D Model, PBR & Scene Generator (Procedural, Hybrid AI+Geometry, Full AI & Image-to-3D)
 app.post('/api/v1/generate-3d-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -3056,7 +3069,11 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       name,
       asset_type = 'Model3D',
       category = 'Props',
+      sub_category,
+      style,
       generation_mode,
+      strict_ai = false,
+      require_ai_provider = false,
       seed,
       tree_params,
       height,
@@ -3086,7 +3103,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       uploaded_mesh_obj,
       uploaded_sub_meshes,
       collision_fidelity = 'Hull',
-      target_poly_budget = 2500,
+      target_poly_budget,
       save_to_rojo = true,
       save_to_library = true,
       model_tier = 'fast',
@@ -3211,30 +3228,59 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
           }
         : undefined);
 
-    const useProceduralEngine =
-      generation_mode === 'procedural' ||
-      seed !== undefined ||
-      effectiveTreeParams !== undefined ||
-      !ai;
+    // FASE 2: Selección explícita y coherente de motores (la semilla NUNCA fuerza procedural cuando el usuario eligió IA, Hybrid o Image-to-3D)
+    const requestedMode = resolveRequestedGenerationMode({
+      generation_mode,
+      reference_image_base64,
+    });
+    const effectiveSeed = Number.isFinite(Number(seed ?? effectiveTreeParams?.seed))
+      ? Math.max(1, Math.floor(Number(seed ?? effectiveTreeParams?.seed)))
+      : 1337;
+    const enforceStrictAi = Boolean(strict_ai || require_ai_provider);
 
-    if (useProceduralEngine) {
+    if ((requestedMode === 'ai' || requestedMode === 'hybrid') && !ai && enforceStrictAi) {
+      const errMsg = `Proveedor IA no disponible: GEMINI_API_KEY no configurada para ejecutar el modo '${requestedMode}' (strict_ai=true).`;
+      sendSseEvent(res, {
+        type: 'error',
+        error_code: 'AI_PROVIDER_UNAVAILABLE',
+        requested_mode: requestedMode,
+        message: errMsg,
+        error: errMsg,
+      });
+      return res.end();
+    }
+
+    // 1. MODO PROCEDURAL EXPLÍCITO (determinista local con motores geométricos especializados)
+    if (requestedMode === 'procedural') {
       sendSseEvent(res, {
         type: 'log',
         level: 'info',
-        message: `Iniciando Motor Procedural Parametrizado [${category}] (Semilla: ${
-          seed ?? effectiveTreeParams?.seed ?? 'auto'
-        }, Fidelidad Colisión: ${collision_fidelity})`,
+        message: `Iniciando Motor Geométrico Especializado [Modo: procedural | Categoría: ${category}] (Semilla reproducible: ${effectiveSeed}, Budget: ${target_poly_budget} tris)`,
       });
 
       const procAsset = synthesizeSeededProcedural3DAsset({
         prompt,
         name,
         category,
+        sub_category,
+        style,
         asset_type,
         collision_fidelity,
         target_poly_budget,
-        seed,
+        seed: effectiveSeed,
+        generation_mode: 'procedural',
         tree_params: effectiveTreeParams,
+        execution_report: {
+          requested_mode: 'procedural',
+          executed_mode: 'procedural',
+          seed: effectiveSeed,
+          seed_preserved: true,
+          ai_provider_available: Boolean(ai),
+          ai_provider_used: false,
+          fallback_triggered: false,
+          fallback_reason: null,
+          reference_image_analyzed: false,
+        },
       });
 
       if (save_to_rojo) {
@@ -3248,7 +3294,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
           type: 'rojo_write',
           saved: true,
           path: savedPath,
-          message: `ROJO 3D SYNC CONFIRMADO: Módulo MeshPart procedural escrito en ${savedPath} (${procAsset.parts.length} sub-mallas)`,
+          message: `ROJO 3D SYNC CONFIRMADO: Módulo MeshPart '${procAsset.file_name}' sincronizado (${procAsset.parts.length} sub-mallas, ${procAsset.poly_count} tris)`,
         });
       }
 
@@ -3263,135 +3309,191 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       return res.end();
     }
 
+    // 2. MODO IMAGE-TO-3D O HYBRID (Planificación mediante Director IA + Construcción con Motores Geométricos Especializados)
+    if (requestedMode === 'image_to_3d' || requestedMode === 'hybrid' || (requestedMode === 'ai' && !ai)) {
+      const refAnalysis =
+        typeof reference_image_base64 === 'string' && reference_image_base64.trim().length > 20
+          ? analyzeReferenceImageBase64(reference_image_base64)
+          : null;
+
+      if (refAnalysis) {
+        sendSseEvent(res, {
+          type: 'log',
+          level: 'info',
+          message: `Imagen de referencia 2D analizada (${refAnalysis.format.toUpperCase()} ${refAnalysis.width}x${refAnalysis.height}, Aspect Ratio: ${refAnalysis.aspectRatio}, Simetría: ${refAnalysis.symmetryScore}, Paleta dominante: ${refAnalysis.dominantHexColors.slice(0, 3).join(', ')})`,
+        });
+      }
+
+      const directorRes = await requestGeminiDirectorBlueprint({
+        aiClient: ai,
+        prompt: String(prompt || name || category),
+        category,
+        subCategory: sub_category,
+        style,
+        seed: effectiveSeed,
+        targetPolyBudget: Number(target_poly_budget || 2500),
+        referenceImageBase64: reference_image_base64,
+        referenceImageMimeType: reference_image_mime_type,
+        referenceAnalysis: refAnalysis,
+      });
+
+      const fallbackTriggered =
+        (requestedMode === 'hybrid' || requestedMode === 'ai') && !directorRes.usedAiProvider;
+      const executedMode: EngineExecutionReport['executed_mode'] =
+        requestedMode === 'image_to_3d'
+          ? 'image_to_3d'
+          : requestedMode === 'hybrid'
+          ? directorRes.usedAiProvider
+            ? 'hybrid'
+            : 'hybrid_fallback_procedural'
+          : directorRes.usedAiProvider
+          ? 'ai'
+          : 'ai_fallback_procedural';
+
+      if (fallbackTriggered) {
+        sendSseEvent(res, {
+          type: 'log',
+          level: 'warning',
+          message: `AVISO EXPLÍCITO DE MOTOR: El modo '${requestedMode}' no pudo usar proveedor IA (${directorRes.fallbackReason}). Ejecutando fallback explícito y visible '${executedMode}' con semilla reproducible ${effectiveSeed}.`,
+        });
+      } else {
+        sendSseEvent(res, {
+          type: 'log',
+          level: 'info',
+          message: `Director de Generación 3D [${executedMode}] planificó familia '${directorRes.blueprint.objectFamily}' (${directorRes.blueprint.subPartsPlan.length} sub-partes, simetría ${directorRes.blueprint.proportions.symmetry}). Construyendo geometría especializada...`,
+        });
+      }
+
+      const executionReport: EngineExecutionReport = {
+        requested_mode: requestedMode,
+        executed_mode: executedMode,
+        seed: effectiveSeed,
+        seed_preserved: true,
+        ai_provider_available: Boolean(ai),
+        ai_provider_used: directorRes.usedAiProvider,
+        fallback_triggered: fallbackTriggered,
+        fallback_reason: directorRes.fallbackReason,
+        reference_image_analyzed: Boolean(refAnalysis),
+      };
+
+      const hybridAsset = synthesizeSeededProcedural3DAsset({
+        prompt,
+        name,
+        category,
+        sub_category,
+        style,
+        asset_type,
+        collision_fidelity,
+        target_poly_budget,
+        seed: effectiveSeed,
+        generation_mode: requestedMode,
+        reference_image_base64,
+        director_blueprint: directorRes.blueprint,
+        execution_report: executionReport,
+        tree_params: effectiveTreeParams,
+      });
+
+      if (save_to_rojo) {
+        const savedPath = writeToRojoWorkspace(
+          hybridAsset.rojo_target_folder || 'src/shared/Assets3D',
+          hybridAsset.file_name,
+          hybridAsset.luau_code
+        );
+        hybridAsset.saved_path = savedPath;
+        sendSseEvent(res, {
+          type: 'rojo_write',
+          saved: true,
+          path: savedPath,
+          message: `ROJO 3D SYNC CONFIRMADO: Módulo MeshPart '${hybridAsset.file_name}' escrito en ${savedPath} (${hybridAsset.parts.length} sub-mallas, ${hybridAsset.poly_count} tris)`,
+        });
+      }
+
+      const savedHybridAsset = save_to_library ? saveAssetToLibrary(hybridAsset) : hybridAsset;
+      sendSseEvent(res, {
+        type: 'done',
+        status: 'complete',
+        progress: 100,
+        result: savedHybridAsset,
+        data: savedHybridAsset,
+      });
+      return res.end();
+    }
+
+    // 3. MODO AI EXPLÍCITO CON PROVEEDOR GEMINI DISPONIBLE (Planificación IA + Respaldo Geométrico Especializado)
     const model = model_tier === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
+    const refAnalysis =
+      typeof reference_image_base64 === 'string' && reference_image_base64.trim().length > 20
+        ? analyzeReferenceImageBase64(reference_image_base64)
+        : null;
 
     sendSseEvent(res, {
       type: 'log',
       level: 'info',
-      message: `Iniciando Motor 3D [${asset_type}] con '${model}' (Fidelidad Colisión: ${collision_fidelity}, Budget: ${target_poly_budget} tris)`,
+      message: `Iniciando Motor IA 3D [${asset_type}] con '${model}' (Semilla reproducible: ${effectiveSeed}, Fidelidad Colisión: ${collision_fidelity}, Budget: ${target_poly_budget} tris)`,
     });
 
-    const localContext = getLocalProjectContext('3d');
+    const directorRes = await requestGeminiDirectorBlueprint({
+      aiClient: ai,
+      prompt: String(prompt || name || category),
+      category,
+      subCategory: sub_category,
+      style,
+      seed: effectiveSeed,
+      targetPolyBudget: Number(target_poly_budget || 2500),
+      referenceImageBase64: reference_image_base64,
+      referenceImageMimeType: reference_image_mime_type,
+      referenceAnalysis: refAnalysis,
+    });
 
-    const systemInstruction = `
-You are the Principal 3D Geometry, PBR Material & Roblox WorldModel Architect for "Forge AI".
-You design composite 3D models and full 3D scenes composed of 6 to 12 articulated MeshPart sub-parts across three silhouette scales:
-1. Primary Silhouette (chassis, hull, foundation, trunk, main body)
-2. Secondary Read (turrets, wings, columns, canopy, structural supports)
-3. Accent Details (neon emitters, optic sensors, vents, bevel trims, control terminals)
+    const aiExecutionReport: EngineExecutionReport = {
+      requested_mode: 'ai',
+      executed_mode: directorRes.usedAiProvider ? 'ai' : 'ai_fallback_procedural',
+      seed: effectiveSeed,
+      seed_preserved: true,
+      ai_provider_available: Boolean(ai),
+      ai_provider_used: directorRes.usedAiProvider,
+      fallback_triggered: !directorRes.usedAiProvider,
+      fallback_reason: directorRes.fallbackReason,
+      reference_image_analyzed: Boolean(refAnalysis),
+    };
 
-RULES FOR 3D GEOMETRY (parts):
-- Ground the model so the lowest point rests flush at Y = 0 (bottom-center pivot).
-- Vary roughness (0.05 to 0.9) and metalness (0.05 to 0.98) realistically between adjacent parts.
-- Assign authentic Roblox Enum.Material values (Metal, Neon, DiamondPlate, Glass, Slate, SmoothPlastic, Concrete, WoodPlanks).
-- Construct real MeshPart geometry via AssetService:CreateEditableMesh() and AssetService:CreateMeshPartAsync().
-`;
-
-    const promptText = `
-ASSET MODE: ${asset_type}
-CATEGORY: ${category}
-COLLISION FIDELITY: ${collision_fidelity}
-POLYGON BUDGET: ${target_poly_budget} triangles
-
-USER PROMPT:
-${prompt}
-
-${localContext}
-`;
-
-    const contents: any[] = [];
-    if (reference_image_base64) {
-      let rawB64 = reference_image_base64;
-      let mimeType = String(reference_image_mime_type || 'image/png').trim() || 'image/png';
-      if (rawB64.includes(',')) {
-        const [header, data] = rawB64.split(',', 2);
-        rawB64 = data;
-        if (header.includes('jpeg') || header.includes('jpg')) mimeType = 'image/jpeg';
-        else if (header.includes('webp')) mimeType = 'image/webp';
-      }
-      contents.push({ inlineData: { mimeType, data: rawB64 } });
+    if (!directorRes.usedAiProvider) {
       sendSseEvent(res, {
         type: 'log',
-        level: 'info',
-        message: `Imagen de referencia 2D cargada (${mimeType}) para reconstrucción volumétrica 3D.`,
+        level: 'warning',
+        message: `AVISO EXPLÍCITO DE MOTOR: Falló llamada al proveedor IA (${directorRes.fallbackReason}). Ejecutando fallback explícito 'ai_fallback_procedural'.`,
       });
     }
-    contents.push({ text: promptText });
 
-    sendSseEvent(res, {
-      type: 'log',
-      level: 'stream',
-      message: 'Sintetizando sub-ensamblajes MeshPart 3D, buffers de vértices/índices y materiales PBR...',
+    const aiSynthesizedAsset = synthesizeSeededProcedural3DAsset({
+      prompt,
+      name,
+      category,
+      sub_category,
+      style,
+      asset_type,
+      collision_fidelity,
+      target_poly_budget,
+      seed: effectiveSeed,
+      generation_mode: 'ai',
+      reference_image_base64,
+      director_blueprint: directorRes.blueprint,
+      execution_report: aiExecutionReport,
+      tree_params: effectiveTreeParams,
     });
-
-    const streamResponse = await ai.models.generateContentStream({
-      model,
-      contents: contents.length === 1 ? contents[0].text : { parts: contents },
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: FORGE_3D_RESPONSE_SCHEMA,
-      },
-    });
-
-    let fullText = '';
-    for await (const chunk of streamResponse) {
-      const chunkText = chunk.text || '';
-      if (chunkText) {
-        fullText += chunkText;
-        sendSseEvent(res, { type: 'chunk', delta: chunkText, text: chunkText });
-      }
-    }
-
-    const parsed = JSON.parse(fullText || '{}');
-    parsed.id = `asset-${Date.now()}`;
-    const safeModelName = String(parsed.name || 'GeneratedMeshModel').replace(/[^a-zA-Z0-9_]/g, '') || 'GeneratedMeshModel';
-    parsed.parts = (parsed.parts || []).map((p: any, idx: number) => {
-      const partName = p.name || `MeshPart_${idx + 1}`;
-      const meshData = extractGeometryFromProcessedMesh(p, `${safeModelName}.obj`, safeModelName);
-      const meshId = normalizeValidMeshId(
-        p.meshId || meshData.meshId,
-        safeModelName,
-        partName,
-        meshData.vertices.length,
-        meshData.faces.length
-      );
-      const assetId = normalizeValidMeshId(
-        p.assetId || meshData.assetId || meshId,
-        safeModelName,
-        partName,
-        meshData.vertices.length,
-        meshData.faces.length
-      );
-      meshData.meshId = meshId;
-      meshData.assetId = assetId;
-      return {
-        ...p,
-        name: partName,
-        shape: 'MeshPart',
-        meshId,
-        assetId,
-        meshData,
-      };
-    });
-    parsed.luau_code = buildStrictLuauFromEditedParts(
-      safeModelName,
-      parsed.parts,
-      parsed.collision_fidelity || collision_fidelity
-    );
 
     if (save_to_rojo) {
       const savedPath = writeToRojoWorkspace(
-        parsed.rojo_target_folder || 'src/shared/Assets3D',
-        parsed.file_name,
-        parsed.luau_code
+        aiSynthesizedAsset.rojo_target_folder || 'src/shared/Assets3D',
+        aiSynthesizedAsset.file_name,
+        aiSynthesizedAsset.luau_code
       );
-      parsed.saved_path = savedPath;
+      aiSynthesizedAsset.saved_path = savedPath;
       sendSseEvent(res, {
         type: 'rojo_write',
         saved: true,
         path: savedPath,
-        message: `ROJO 3D SYNC CONFIRMADO: Módulo MeshPart escrito en ${savedPath} (${(parsed.parts || []).length} sub-mallas)`,
+        message: `ROJO 3D SYNC CONFIRMADO: Módulo MeshPart escrito en ${savedPath} (${aiSynthesizedAsset.parts.length} sub-mallas)`,
       });
     } else {
       sendSseEvent(res, {
@@ -3402,11 +3504,11 @@ ${localContext}
       });
     }
 
-    const savedAsset = save_to_library ? saveAssetToLibrary(parsed) : parsed;
+    const savedAsset = save_to_library ? saveAssetToLibrary(aiSynthesizedAsset) : aiSynthesizedAsset;
     sendSseEvent(res, {
       type: 'log',
       level: 'success',
-      message: `Asset MeshPart 3D '${savedAsset.name}' registrado (${savedAsset.poly_count} triángulos).`,
+      message: `Asset MeshPart 3D '${savedAsset.name}' registrado (${savedAsset.poly_count} triángulos, modo ejecutado: ${aiExecutionReport.executed_mode}).`,
     });
 
     sendSseEvent(res, {
@@ -3424,7 +3526,7 @@ ${localContext}
   }
 });
 
-// Non-streaming 3D endpoint for Roblox Studio Plugin HttpService & Procedural/Tree 3D API
+// Non-streaming 3D endpoint for Roblox Studio Plugin HttpService & Procedural/Hybrid/AI/Image-to-3D API
 app.post('/api/v1/generate-3d', async (req, res) => {
   try {
     const {
@@ -3432,7 +3534,11 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       name,
       asset_type = 'Model3D',
       category = 'Props',
+      sub_category,
+      style,
       generation_mode,
+      strict_ai = false,
+      require_ai_provider = false,
       seed,
       tree_params,
       height,
@@ -3458,13 +3564,13 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       detailLevel,
       lodLevel,
       reference_image_base64,
+      reference_image_mime_type = 'image/png',
       uploaded_mesh_obj,
       uploaded_sub_meshes,
       collision_fidelity = 'Hull',
-      target_poly_budget = 2500,
+      target_poly_budget,
       save_to_rojo = true,
       save_to_library = true,
-      model_tier = 'fast',
     } = req.body || {};
 
     if (
@@ -3568,22 +3674,48 @@ app.post('/api/v1/generate-3d', async (req, res) => {
           }
         : undefined);
 
-    const useProceduralEngine =
-      generation_mode === 'procedural' ||
-      seed !== undefined ||
-      effectiveTreeParams !== undefined ||
-      !ai;
+    // FASE 2: Selección explícita y coherente de motores (la semilla NUNCA fuerza procedural cuando el usuario eligió IA, Hybrid o Image-to-3D)
+    const requestedMode = resolveRequestedGenerationMode({
+      generation_mode,
+      reference_image_base64,
+    });
+    const effectiveSeed = Number.isFinite(Number(seed ?? effectiveTreeParams?.seed))
+      ? Math.max(1, Math.floor(Number(seed ?? effectiveTreeParams?.seed)))
+      : 1337;
+    const enforceStrictAi = Boolean(strict_ai || require_ai_provider);
 
-    if (useProceduralEngine) {
+    if ((requestedMode === 'ai' || requestedMode === 'hybrid') && !ai && enforceStrictAi) {
+      return res.status(503).json({
+        error: `Proveedor IA no disponible: GEMINI_API_KEY no configurada para ejecutar el modo '${requestedMode}' (strict_ai=true).`,
+        error_code: 'AI_PROVIDER_UNAVAILABLE',
+        requested_mode: requestedMode,
+      });
+    }
+
+    if (requestedMode === 'procedural') {
       const procAsset = synthesizeSeededProcedural3DAsset({
         prompt,
         name,
         category,
+        sub_category,
+        style,
         asset_type,
         collision_fidelity,
         target_poly_budget,
-        seed,
+        seed: effectiveSeed,
+        generation_mode: 'procedural',
         tree_params: effectiveTreeParams,
+        execution_report: {
+          requested_mode: 'procedural',
+          executed_mode: 'procedural',
+          seed: effectiveSeed,
+          seed_preserved: true,
+          ai_provider_available: Boolean(ai),
+          ai_provider_used: false,
+          fallback_triggered: false,
+          fallback_reason: null,
+          reference_image_analyzed: false,
+        },
       });
       if (save_to_rojo) {
         procAsset.saved_path = writeToRojoWorkspace(
@@ -3596,79 +3728,131 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       return res.json(saved);
     }
 
-    const model = model_tier === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
-    const localContext = getLocalProjectContext('3d');
+    const refAnalysis =
+      typeof reference_image_base64 === 'string' && reference_image_base64.trim().length > 20
+        ? analyzeReferenceImageBase64(reference_image_base64)
+        : null;
 
-    const contents: any[] = [];
-    if (reference_image_base64) {
-      let rawB64 = reference_image_base64;
-      let mimeType = 'image/png';
-      if (rawB64.includes(',')) {
-        const [header, data] = rawB64.split(',', 2);
-        rawB64 = data;
-        if (header.includes('jpeg') || header.includes('jpg')) mimeType = 'image/jpeg';
-        else if (header.includes('webp')) mimeType = 'image/webp';
-      }
-      contents.push({ inlineData: { mimeType, data: rawB64 } });
-    }
-    contents.push({
-      text: `Generate a composite 3D Roblox ${asset_type} (${category}) with 6-10 MeshPart sub-parts grounded at Y=0, CollisionFidelity=${collision_fidelity}, max ${target_poly_budget} tris:\n${prompt}\n${localContext}`,
+    const directorRes = await requestGeminiDirectorBlueprint({
+      aiClient: ai,
+      prompt: String(prompt || name || category),
+      category,
+      subCategory: sub_category,
+      style,
+      seed: effectiveSeed,
+      targetPolyBudget: Number(target_poly_budget || 2500),
+      referenceImageBase64: reference_image_base64,
+      referenceImageMimeType: reference_image_mime_type,
+      referenceAnalysis: refAnalysis,
     });
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: contents.length === 1 ? contents[0].text : { parts: contents },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: FORGE_3D_RESPONSE_SCHEMA,
-      },
+    const fallbackTriggered =
+      (requestedMode === 'hybrid' || requestedMode === 'ai') && !directorRes.usedAiProvider;
+    const executedMode: EngineExecutionReport['executed_mode'] =
+      requestedMode === 'image_to_3d'
+        ? 'image_to_3d'
+        : requestedMode === 'hybrid'
+        ? directorRes.usedAiProvider
+          ? 'hybrid'
+          : 'hybrid_fallback_procedural'
+        : directorRes.usedAiProvider
+        ? 'ai'
+        : 'ai_fallback_procedural';
+
+    const executionReport: EngineExecutionReport = {
+      requested_mode: requestedMode,
+      executed_mode: executedMode,
+      seed: effectiveSeed,
+      seed_preserved: true,
+      ai_provider_available: Boolean(ai),
+      ai_provider_used: directorRes.usedAiProvider,
+      fallback_triggered: fallbackTriggered,
+      fallback_reason: directorRes.fallbackReason,
+      reference_image_analyzed: Boolean(refAnalysis),
+    };
+
+    const generatedAsset = synthesizeSeededProcedural3DAsset({
+      prompt,
+      name,
+      category,
+      sub_category,
+      style,
+      asset_type,
+      collision_fidelity,
+      target_poly_budget,
+      seed: effectiveSeed,
+      generation_mode: requestedMode,
+      reference_image_base64,
+      director_blueprint: directorRes.blueprint,
+      execution_report: executionReport,
+      tree_params: effectiveTreeParams,
     });
 
-    const parsed = JSON.parse(response.text || '{}');
-    parsed.id = `asset-${Date.now()}`;
-    const safeModelName = String(parsed.name || 'GeneratedMeshModel').replace(/[^a-zA-Z0-9_]/g, '') || 'GeneratedMeshModel';
-    parsed.parts = (parsed.parts || []).map((p: any, idx: number) => {
-      const partName = p.name || `MeshPart_${idx + 1}`;
-      const meshData = extractGeometryFromProcessedMesh(p, `${safeModelName}.obj`, safeModelName);
-      const meshId = normalizeValidMeshId(
-        p.meshId || meshData.meshId,
-        safeModelName,
-        partName,
-        meshData.vertices.length,
-        meshData.faces.length
-      );
-      const assetId = normalizeValidMeshId(
-        p.assetId || meshData.assetId || meshId,
-        safeModelName,
-        partName,
-        meshData.vertices.length,
-        meshData.faces.length
-      );
-      meshData.meshId = meshId;
-      meshData.assetId = assetId;
-      return {
-        ...p,
-        name: partName,
-        shape: 'MeshPart',
-        meshId,
-        assetId,
-        meshData,
-      };
-    });
-    parsed.luau_code = buildStrictLuauFromEditedParts(
-      safeModelName,
-      parsed.parts,
-      parsed.collision_fidelity || collision_fidelity
-    );
     if (save_to_rojo) {
-      parsed.saved_path = writeToRojoWorkspace(
-        parsed.rojo_target_folder || 'src/shared/Assets3D',
-        parsed.file_name,
-        parsed.luau_code
+      generatedAsset.saved_path = writeToRojoWorkspace(
+        generatedAsset.rojo_target_folder || 'src/shared/Assets3D',
+        generatedAsset.file_name,
+        generatedAsset.luau_code
       );
     }
-    const saved = saveAssetToLibrary(parsed);
+    const saved = save_to_library ? saveAssetToLibrary(generatedAsset) : generatedAsset;
     res.json(saved);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// FASE 7: Visual Benchmark Suite Endpoints (8 Canonical Cases)
+app.get('/api/v1/benchmarks/visual-suite', (req, res) => {
+  try {
+    const includeGeometry = String(req.query.include_geometry || 'false').toLowerCase() === 'true';
+    const report = runVisualBenchmarkSuite();
+    if (!includeGeometry) {
+      const compactCases = report.cases.map((c) => ({
+        ...c,
+        synthesis: undefined,
+      }));
+      return res.json({
+        ...report,
+        cases: compactCases,
+      });
+    }
+    res.json(report);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/v1/benchmarks/cases', (_req, res) => {
+  res.json({ cases: CANONICAL_VISUAL_BENCHMARK_CASES });
+});
+
+app.post('/api/v1/benchmarks/generate-case', (req, res) => {
+  try {
+    const { case_id, save_to_rojo = false, save_to_library = false } = req.body || {};
+    const benchmarkCase = getBenchmarkCaseById(String(case_id || 'stylized_tree'));
+    if (!benchmarkCase) {
+      return res.status(404).json({
+        error: `Caso de benchmark '${case_id}' no encontrado.`,
+        available_cases: CANONICAL_VISUAL_BENCHMARK_CASES.map((c) => c.id),
+      });
+    }
+    const asset = { ...benchmarkCase.synthesis };
+    if (save_to_rojo) {
+      asset.saved_path = writeToRojoWorkspace(
+        asset.rojo_target_folder || 'src/shared/Assets3D',
+        asset.file_name,
+        asset.luau_code
+      );
+    }
+    const savedAsset = save_to_library ? saveAssetToLibrary(asset) : asset;
+    res.json({
+      benchmark: {
+        ...benchmarkCase,
+        synthesis: undefined,
+      },
+      asset: savedAsset,
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

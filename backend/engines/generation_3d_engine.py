@@ -829,7 +829,10 @@ class Generate3DEngineRequest(BaseModel):
     name: Optional[str] = None
     asset_type: Literal["Model3D", "Scene3D", "PBRMaterial"] = "Model3D"
     category: str = "Props"
+    sub_category: Optional[str] = None
+    style: Optional[str] = None
     generation_mode: Optional[str] = None
+    strict_ai: bool = False
     seed: Optional[str] = None
     tree_params: Optional[Dict[str, Any]] = None
     model_tier: Literal["fast", "pro"] = "fast"
@@ -856,6 +859,7 @@ class Model3DResponse(BaseModel):
     asset_type: Literal["Model3D", "Scene3D", "PBRMaterial"] = Field(default="Model3D")
     generation_mode: Optional[str] = Field(default=None)
     seed: Optional[str] = Field(default=None)
+    execution_report: Optional[Dict[str, Any]] = Field(default=None)
     poly_count: int = Field(description="Estimated triangle count (<10,000 per MeshPart)")
     collision_fidelity: Literal["Default", "Box", "Hull", "PreciseConvexDecomposition"] = Field(default="Hull")
     rojo_target_folder: str = Field(default="src/shared/Assets3D")
@@ -2664,6 +2668,47 @@ REQUIREMENTS:
                         collisionFidelity=req.collision_fidelity,
                     )
                 )
+                sub_len = round(max(0.9, b_len * 0.56), 4)
+                sub_thk = round(max(0.18, b_thk * 0.6), 4)
+                parts_specs.append(
+                    MeshPart3DSpec(
+                        partId=f"part_subbranch_{b_idx + 1}_1",
+                        name=f"SubBranch_{b_idx + 1}_1",
+                        parentPath="Root/Branches/Secondary",
+                        shape="MeshPart",
+                        size=[sub_thk, sub_len, sub_thk],
+                        position=[round(bx * 1.25, 4), round(by + sub_len * 0.35, 4), round(bz * 1.25, 4)],
+                        rotation=[round(math.sin(angle + 0.4) * 52.0, 4), round(math.degrees(angle + 0.4), 4), round(-math.cos(angle + 0.4) * 52.0, 4)],
+                        color=trunk_col,
+                        material=trunk_mat,
+                        roughness=0.82,
+                        metalness=0.04,
+                        canCollide=True,
+                        anchored=True,
+                        collisionFidelity=req.collision_fidelity,
+                    )
+                )
+            for r_idx in range(3):
+                r_angle = (r_idx / 3.0) * math.pi * 2.0 + rng() * 0.3
+                r_len = round(max(1.2, trunk_thick * 1.4), 4)
+                parts_specs.append(
+                    MeshPart3DSpec(
+                        partId=f"part_surfaceroot_{r_idx + 1}",
+                        name=f"SurfaceRoot_{r_idx + 1}",
+                        parentPath="Root/Roots",
+                        shape="MeshPart",
+                        size=[round(trunk_thick * 0.4, 4), r_len, round(trunk_thick * 0.4, 4)],
+                        position=[round(math.cos(r_angle) * trunk_thick * 0.85, 4), round(flare_h * 0.42, 4), round(math.sin(r_angle) * trunk_thick * 0.85, 4)],
+                        rotation=[round(math.sin(r_angle) * 62.0, 4), round(math.degrees(r_angle), 4), round(-math.cos(r_angle) * 62.0, 4)],
+                        color=trunk_col,
+                        material=trunk_mat,
+                        roughness=0.88,
+                        metalness=0.03,
+                        canCollide=True,
+                        anchored=True,
+                        collisionFidelity=req.collision_fidelity,
+                    )
+                )
             crown_w = round(max(2.6, height * 0.52), 4)
             crown_h = round(max(2.2, height * 0.42), 4)
             crown_y = round(flare_h + trunk_h * 0.88 + crown_h * 0.26, 4)
@@ -2685,57 +2730,88 @@ REQUIREMENTS:
                     collisionFidelity=req.collision_fidelity,
                 )
             )
+            for c_idx in range(3):
+                c_ang = (c_idx / 3.0) * math.pi * 2.0 + 0.35
+                parts_specs.append(
+                    MeshPart3DSpec(
+                        partId=f"part_foliage_cluster_{c_idx + 1}",
+                        name=f"FoliageCluster_{c_idx + 1}",
+                        parentPath="Root/Canopy",
+                        shape="MeshPart",
+                        size=[round(crown_w * 0.62, 4), round(crown_h * 0.65, 4), round(crown_w * 0.62, 4)],
+                        position=[round(math.cos(c_ang) * crown_w * 0.32, 4), round(crown_y + (rng() - 0.4) * 0.8, 4), round(math.sin(c_ang) * crown_w * 0.32, 4)],
+                        rotation=[0.0, round(rng() * 180.0, 4), 0.0],
+                        color=leaf_col,
+                        material=leaf_mat,
+                        roughness=0.74,
+                        metalness=0.02,
+                        canCollide=True,
+                        anchored=True,
+                        collisionFidelity=req.collision_fidelity,
+                    )
+                )
         else:
-            parts_specs = [
-                MeshPart3DSpec(
-                    partId="part_1_base",
-                    name="BaseFoundation",
-                    parentPath="Root",
-                    shape="MeshPart",
-                    size=[round(3.4 + rng(), 4), 0.8, round(3.4 + rng(), 4)],
-                    position=[0.0, 0.4, 0.0],
-                    rotation=[0.0, 0.0, 0.0],
-                    color="#475569",
-                    material="Metal",
-                    roughness=0.5,
-                    metalness=0.5,
-                    canCollide=True,
-                    anchored=True,
-                    collisionFidelity=req.collision_fidelity,
-                ),
-                MeshPart3DSpec(
-                    partId="part_2_core",
-                    name="PrimaryCoreBody",
-                    parentPath="Root",
-                    shape="MeshPart",
-                    size=[round(2.4 + rng() * 0.6, 4), 3.6, round(2.4 + rng() * 0.6, 4)],
-                    position=[0.0, 2.6, 0.0],
-                    rotation=[0.0, round(rng() * 90.0, 4), 0.0],
-                    color="#64748b",
-                    material="Slate",
-                    roughness=0.6,
-                    metalness=0.35,
-                    canCollide=True,
-                    anchored=True,
-                    collisionFidelity=req.collision_fidelity,
-                ),
-            ]
+            cat_lower = f"{req.category} {req.sub_category or ''} {req.prompt}".lower()
+            if "rock" in cat_lower or "roca" in cat_lower or "nature" in cat_lower:
+                parts_specs = [
+                    MeshPart3DSpec(partId="part_rock_bed", name="GeologicBedrockBase", parentPath="Root/Base", shape="MeshPart", size=[7.8, 1.4, 7.2], position=[0.0, 0.7, 0.0], rotation=[0.0, 0.0, 0.0], color="#475569", material="Slate", roughness=0.9, metalness=0.08, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_rock_main", name="PrimaryMonolithCore", parentPath="Root/Mass", shape="MeshPart", size=[5.2, 6.4, 4.8], position=[0.0, 3.6, 0.0], rotation=[4.0, round(rng() * 90.0, 4), -3.0], color="#64748b", material="Slate", roughness=0.86, metalness=0.1, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_rock_flank_1", name="FracturedFlank_1", parentPath="Root/Slabs", shape="MeshPart", size=[3.2, 3.8, 2.9], position=[-2.4, 2.1, 1.2], rotation=[12.0, 35.0, -8.0], color="#475569", material="Rock", roughness=0.88, metalness=0.08, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_rock_flank_2", name="FracturedFlank_2", parentPath="Root/Slabs", shape="MeshPart", size=[3.0, 3.4, 2.7], position=[2.3, 1.9, -1.1], rotation=[-10.0, 140.0, 9.0], color="#64748b", material="Rock", roughness=0.88, metalness=0.08, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_rock_ledge", name="StratifiedLedgeShelf", parentPath="Root/Strata", shape="MeshPart", size=[5.8, 0.9, 5.2], position=[0.2, 2.8, -0.2], rotation=[2.0, 15.0, 0.0], color="#334155", material="Cobblestone", roughness=0.92, metalness=0.05, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_rock_crystal", name="MineralSpireCrystal_1", parentPath="Root/Accents", shape="MeshPart", size=[0.9, 2.6, 0.9], position=[0.8, 5.2, 0.6], rotation=[18.0, 45.0, -14.0], color="#38bdf8", material="Neon", roughness=0.15, metalness=0.2, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                ]
+            elif "build" in cat_lower or "edific" in cat_lower or "torre" in cat_lower or "struct" in cat_lower:
+                parts_specs = [
+                    MeshPart3DSpec(partId="part_bldg_plinth", name="SteppedFoundationPlinth", parentPath="Root/Foundation", shape="MeshPart", size=[11.0, 1.2, 9.5], position=[0.0, 0.6, 0.0], rotation=[0.0, 0.0, 0.0], color="#475569", material="Cobblestone", roughness=0.88, metalness=0.08, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_bldg_core", name="PrimaryStructuralCore", parentPath="Root/Walls", shape="MeshPart", size=[9.4, 8.6, 8.0], position=[0.0, 5.5, 0.0], rotation=[0.0, 0.0, 0.0], color="#cbd5e1", material="Brick", roughness=0.78, metalness=0.06, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_bldg_arch", name="EntranceArchFrame", parentPath="Root/Facade", shape="MeshPart", size=[2.8, 3.8, 0.6], position=[0.0, 3.1, 4.15], rotation=[0.0, 0.0, 0.0], color="#64748b", material="Slate", roughness=0.82, metalness=0.1, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_bldg_door", name="RecessedPortalDoor", parentPath="Root/Facade", shape="MeshPart", size=[2.1, 3.3, 0.35], position=[0.0, 2.85, 4.05], rotation=[0.0, 0.0, 0.0], color="#78350f", material="WoodPlanks", roughness=0.75, metalness=0.12, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_bldg_win_1", name="WindowFrame_Front_1", parentPath="Root/Windows", shape="MeshPart", size=[1.6, 2.1, 0.4], position=[-2.6, 6.2, 4.1], rotation=[0.0, 0.0, 0.0], color="#38bdf8", material="Glass", roughness=0.15, metalness=0.1, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_bldg_win_2", name="WindowFrame_Front_2", parentPath="Root/Windows", shape="MeshPart", size=[1.6, 2.1, 0.4], position=[2.6, 6.2, 4.1], rotation=[0.0, 0.0, 0.0], color="#38bdf8", material="Glass", roughness=0.15, metalness=0.1, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_bldg_cornice", name="UpperPerimeterCornice", parentPath="Root/Cornice", shape="MeshPart", size=[10.2, 0.7, 8.8], position=[0.0, 10.1, 0.0], rotation=[0.0, 0.0, 0.0], color="#64748b", material="Concrete", roughness=0.8, metalness=0.08, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_bldg_roof", name="ArchitecturalRoofAssembly", parentPath="Root/Roof", shape="MeshPart", size=[10.8, 3.8, 9.4], position=[0.0, 12.3, 0.0], rotation=[0.0, 0.0, 0.0], color="#7c2d12", material="Slate", roughness=0.76, metalness=0.12, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                ]
+            else:
+                parts_specs = [
+                    MeshPart3DSpec(partId="part_1_base", name="BaseFoundation", parentPath="Root/Base", shape="MeshPart", size=[round(3.6 + rng(), 4), 0.7, round(3.6 + rng(), 4)], position=[0.0, 0.35, 0.0], rotation=[0.0, 0.0, 0.0], color="#334155", material="Metal", roughness=0.45, metalness=0.65, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_2_core", name="PrimaryCoreBody", parentPath="Root/Core", shape="MeshPart", size=[round(2.6 + rng() * 0.5, 4), 2.8, round(2.4 + rng() * 0.5, 4)], position=[0.0, 2.1, 0.0], rotation=[0.0, round(rng() * 45.0, 4), 0.0], color="#475569", material="Slate", roughness=0.55, metalness=0.45, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_3_col_l", name="SupportColumn_Left", parentPath="Root/Supports", shape="MeshPart", size=[0.6, 2.6, 0.6], position=[-1.4, 1.9, 1.2], rotation=[0.0, 0.0, 0.0], color="#64748b", material="Metal", roughness=0.35, metalness=0.75, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_4_col_r", name="SupportColumn_Right", parentPath="Root/Supports", shape="MeshPart", size=[0.6, 2.6, 0.6], position=[1.4, 1.9, 1.2], rotation=[0.0, 0.0, 0.0], color="#64748b", material="Metal", roughness=0.35, metalness=0.75, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_5_crest", name="UpperCrownAssembly", parentPath="Root/Crown", shape="MeshPart", size=[3.0, 0.9, 2.8], position=[0.0, 3.85, 0.0], rotation=[0.0, 0.0, 0.0], color="#1e293b", material="DiamondPlate", roughness=0.4, metalness=0.8, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                    MeshPart3DSpec(partId="part_6_beacon", name="EmissiveEnergyCore", parentPath="Root/Accents", shape="MeshPart", size=[1.1, 1.1, 1.1], position=[0.0, 2.3, 1.35], rotation=[0.0, 45.0, 0.0], color="#06b6d4", material="Neon", roughness=0.1, metalness=0.1, canCollide=True, anchored=True, collisionFidelity=req.collision_fidelity),
+                ]
 
         parts_with_mesh = self.ensure_mesh_data_on_parts(safe_name, parts_specs)
         luau_code = self.build_luau_from_parts(safe_name, parts_with_mesh, req.collision_fidelity)
         total_tris = sum(len(p.meshData.faces) for p in parts_with_mesh if p.meshData)
+        req_mode = (req.generation_mode or ("image_to_3d" if req.reference_image_base64 else "procedural")).lower()
+        fallback_triggered = req_mode in ("ai", "hybrid") and not self.client
+        executed_mode = (
+            f"{req_mode}_fallback_procedural" if fallback_triggered else req_mode
+        )
         return Model3DResponse(
             id=f"asset-proc-{abs(hash(raw_seed)) % 100000000}",
             name=safe_name,
             category="Trees & Vegetation" if is_tree else req.category,
             asset_type=req.asset_type,
-            generation_mode="procedural",
+            generation_mode=executed_mode,
             seed=raw_seed,
+            execution_report={
+                "requested_mode": req_mode,
+                "executed_mode": executed_mode,
+                "seed": raw_seed,
+                "seed_preserved": True,
+                "ai_provider_available": bool(self.client),
+                "ai_provider_used": False,
+                "fallback_triggered": fallback_triggered,
+                "fallback_reason": "GEMINI_API_KEY no configurada en el servidor Python" if fallback_triggered else None,
+            },
             poly_count=total_tris,
             collision_fidelity=req.collision_fidelity,
             rojo_target_folder="src/shared/Assets3D",
             file_name=f"{safe_name}.luau",
-            description=f"Asset 3D procedural determinista (seed={raw_seed}, {len(parts_with_mesh)} sub-mallas).",
+            description=f"Asset 3D sintetizado ({executed_mode}, seed={raw_seed}, {len(parts_with_mesh)} sub-mallas).",
             pbr_profile=PBRProfileSpec(
                 albedo_hex=leaf_col if is_tree else "#475569",
                 roughness=0.75 if is_tree else 0.5,
@@ -2783,10 +2859,12 @@ REQUIREMENTS:
                 save_library_fn(parsed.model_dump())
             return parsed
 
+        requested_mode = (req.generation_mode or ("image_to_3d" if req.reference_image_base64 else "procedural")).lower()
+        if requested_mode in ("ai", "hybrid") and not self.client and req.strict_ai:
+            raise RuntimeError(f"AI_PROVIDER_UNAVAILABLE: GEMINI_API_KEY no configurada para el modo '{requested_mode}' (strict_ai=True).")
+
         use_procedural = (
-            req.generation_mode == "procedural"
-            or req.seed is not None
-            or req.tree_params is not None
+            requested_mode == "procedural"
             or not self.client
         )
         if use_procedural:
@@ -2881,13 +2959,23 @@ REQUIREMENTS:
             })
             return
 
+        requested_mode = (req.generation_mode or ("image_to_3d" if req.reference_image_base64 else "procedural")).lower()
+        if requested_mode in ("ai", "hybrid") and not self.client and req.strict_ai:
+            err_msg = f"AI_PROVIDER_UNAVAILABLE: GEMINI_API_KEY no configurada para el modo '{requested_mode}' (strict_ai=True)."
+            yield sse({"type": "error", "error_code": "AI_PROVIDER_UNAVAILABLE", "message": err_msg, "error": err_msg})
+            return
+
         use_procedural = (
-            req.generation_mode == "procedural"
-            or req.seed is not None
-            or req.tree_params is not None
+            requested_mode == "procedural"
             or not self.client
         )
         if use_procedural:
+            if requested_mode in ("ai", "hybrid") and not self.client:
+                yield sse({
+                    "type": "log",
+                    "level": "warning",
+                    "message": f"AVISO EXPLÍCITO DE MOTOR: Proveedor IA no disponible para '{requested_mode}'. Ejecutando fallback explícito '{requested_mode}_fallback_procedural'.",
+                })
             parsed = self.synthesize_seeded_procedural_asset(req)
             if req.save_to_rojo and save_luau_fn:
                 parsed.saved_path = save_luau_fn(parsed.rojo_target_folder, parsed.file_name, parsed.luau_code)
