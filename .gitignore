@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+__pycache__/
+*.pyc
+.aistudio/
+.antigravity/
+.vscode/
+*.forge-bridge-state.json
+rojo_workspace/.forge-bridge-state.json
