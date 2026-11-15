@@ -259,6 +259,11 @@ export const CreateWizardView: React.FC = () => {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    const effectiveSeed =
+      seed.trim() && seed.trim() !== 'forge-tree-2026' && seed.trim() !== 'forge-seed-2026'
+        ? seed.trim()
+        : `forge-${Math.floor(1000 + Math.random() * 9000)}-${Date.now().toString(36).slice(-4)}`;
+
     try {
       const response = await forgeFetch('/api/v1/generate-3d-stream', {
         method: 'POST',
@@ -269,11 +274,14 @@ export const CreateWizardView: React.FC = () => {
           asset_type: category === 'Ambient & Decoration' && prompt.toLowerCase().includes('escena') ? 'Scene3D' : 'Model3D',
           category,
           generation_mode: inputMethod === 'image' && referenceImage ? 'image_to_3d' : generationMode,
-          seed: seed.trim() || 'forge-seed-2026',
+          seed: effectiveSeed,
+          manually_edited_fields: treeParamsManuallyEdited
+            ? ['height', 'width', 'trunkThickness', 'trunkLean', 'trunkCurvature', 'rootFlareScale', 'branchCount', 'branchLength', 'canopyShape', 'leafColor', 'trunkColor']
+            : [],
           tree_params:
             category === 'Trees & Vegetation'
               ? {
-                  seed: seed.trim() || 'forge-tree-2026',
+                  seed: effectiveSeed,
                   height: treeHeight,
                   width: treeWidth,
                   trunkThickness,

@@ -218,3 +218,76 @@ export function getExternal3DAdapterStatus(): External3DAdapterStatus {
     reasonIfUnavailable: '',
   };
 }
+
+export async function executeExternal3DGeneration(params: {
+  prompt: string;
+  referenceImageBase64?: string;
+  targetPolyBudget?: number;
+  model?: string;
+}): Promise<{
+  success: boolean;
+  parts?: any[];
+  errorReason?: string;
+  modelUsed: string;
+}> {
+  const status = getExternal3DAdapterStatus();
+  if (!status.configured || !status.endpointUrl) {
+    return {
+      success: false,
+      errorReason: status.reasonIfUnavailable,
+      modelUsed: status.preferredModel,
+    };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+
+    const res = await fetch(status.endpointUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(process.env.FORGE_EXTERNAL_3D_TOKEN ? { Authorization: `Bearer ${process.env.FORGE_EXTERNAL_3D_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({
+        prompt: params.prompt,
+        image_base64: params.referenceImageBase64,
+        target_poly_budget: params.targetPolyBudget || 3000,
+        model: params.model || status.preferredModel,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      return {
+        success: false,
+        errorReason: `Endpoint externo HTTP ${res.status}: ${errText.slice(0, 120)}`,
+        modelUsed: status.preferredModel,
+      };
+    }
+
+    const json = await res.json().catch(() => null);
+    if (json && Array.isArray(json.parts) && json.parts.length > 0) {
+      return {
+        success: true,
+        parts: json.parts,
+        modelUsed: status.preferredModel,
+      };
+    }
+
+    return {
+      success: false,
+      errorReason: 'Respuesta del servicio 3D externo no devolvió piezas válidas.',
+      modelUsed: status.preferredModel,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      errorReason: err.message || 'Error de red al conectar con el servidor 3D externo.',
+      modelUsed: status.preferredModel,
+    };
+  }
+}
+

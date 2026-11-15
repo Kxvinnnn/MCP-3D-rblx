@@ -116,6 +116,7 @@ export interface Procedural3DGenerationRequest {
   detail_level?: TreeDetailLevel;
   seed?: string | number;
   tree_params?: TreeProceduralParams & Record<string, any>;
+  manually_edited_fields?: string[];
   reference_image_base64?: string;
   ai_director_blueprint?: Partial<AiDirectorBlueprint>;
   director_blueprint?: Partial<AiDirectorBlueprint>;
@@ -1674,7 +1675,11 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     'ProceduralAsset3D';
 
   const safeModelName = rawName.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32) || 'ProceduralAsset3D';
-  const seed = req.seed ?? req.tree_params?.seed ?? `${safeModelName}-seed-2026`;
+  const rawSeed = req.seed ?? req.tree_params?.seed;
+  const isDefaultSeed = !rawSeed || rawSeed === 'forge-tree-2026' || rawSeed === 'forge-seed-2026';
+  const seed = isDefaultSeed
+    ? `forge-${safeModelName.toLowerCase()}-${Date.now().toString(36).slice(-6)}`
+    : rawSeed;
   const collisionFidelity = req.collision_fidelity || 'Hull';
   const assetType = req.asset_type || 'Model3D';
 
@@ -1687,20 +1692,44 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     canonicalCategory === 'Trees & Vegetation' && req.prompt
       ? parseNaturalLanguageToTreeParams(req.prompt).params
       : undefined;
+
+  const manFields = Array.isArray(req.manually_edited_fields) ? req.manually_edited_fields : [];
+  const mergedTreeParams: Record<string, any> = {
+    seed,
+    ...(req.tree_params || {}),
+  };
+
+  if (promptTreeParsed) {
+    for (const [key, val] of Object.entries(promptTreeParsed)) {
+      if (val !== undefined) {
+        const isDefaultUiValue =
+          (key === 'leafColor' && mergedTreeParams.leafColor === '#34843d') ||
+          (key === 'trunkColor' && mergedTreeParams.trunkColor === '#6e482b') ||
+          (key === 'height' && mergedTreeParams.height === 14) ||
+          (key === 'width' && mergedTreeParams.width === 10) ||
+          (key === 'trunkThickness' && mergedTreeParams.trunkThickness === 1.6) ||
+          (key === 'branchCount' && mergedTreeParams.branchCount === 4);
+
+        if (!manFields.includes(key) && (isDefaultUiValue || mergedTreeParams[key] === undefined)) {
+          mergedTreeParams[key] = val;
+        }
+      }
+    }
+  }
+
   const effectiveDetailLevel: TreeDetailLevel =
     req.detail_level ||
-    req.tree_params?.detailLevel ||
-    promptTreeParsed?.detailLevel ||
+    mergedTreeParams.detailLevel ||
     'medium';
+
   const effectiveTreeParams: TreeProceduralParams | undefined =
     canonicalCategory === 'Trees & Vegetation'
       ? {
           seed,
-          ...(promptTreeParsed || {}),
-          ...(req.tree_params || {}),
+          ...mergedTreeParams,
           detailLevel: effectiveDetailLevel,
-          ...(req.target_poly_budget !== undefined || req.tree_params?.targetPolyBudget !== undefined
-            ? { targetPolyBudget: req.target_poly_budget ?? req.tree_params?.targetPolyBudget }
+          ...(req.target_poly_budget !== undefined || mergedTreeParams.targetPolyBudget !== undefined
+            ? { targetPolyBudget: req.target_poly_budget ?? mergedTreeParams.targetPolyBudget }
             : {}),
         }
       : req.tree_params
