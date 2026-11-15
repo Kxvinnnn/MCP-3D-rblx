@@ -114,17 +114,32 @@ export function generateProceduralPBRTextures(
       mCtx.fillStyle = i % 5 === 0 ? 'rgb(110, 110, 110)' : 'rgb(28, 28, 28)';
       mCtx.fillRect(rx, ry, rw, rw);
     }
+  } else if (pattern === 'Natural' || pattern === 'Fabric' || pattern === 'OrganicFur' || pattern === 'OrganicBark' || pattern === 'Sand' || pattern === 'Grass') {
+    // Organic coat/bark/fabric micro-grain instead of a debug cyan box
+    for (let i = 0; i < 420; i++) {
+      const rx = (i * 73) % size;
+      const ry = (i * 137) % size;
+      const rw = 2 + (i % 5);
+      const rh = pattern === 'OrganicBark' ? 14 + (i % 18) : 6 + (i % 10);
+      aCtx.fillStyle = i % 2 === 0 ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.06)';
+      aCtx.fillRect(rx, ry, rw, rh);
+      nCtx.fillStyle = i % 2 === 0 ? 'rgb(116, 124, 248)' : 'rgb(140, 132, 248)';
+      nCtx.fillRect(rx, ry, rw, rh);
+      rCtx.fillStyle = 'rgb(198, 198, 198)';
+      rCtx.fillRect(rx, ry, rw, rh);
+      mCtx.fillStyle = 'rgb(14, 14, 14)';
+      mCtx.fillRect(rx, ry, rw, rh);
+    }
   } else {
-    aCtx.strokeStyle = accentHex || '#38bdf8';
-    aCtx.lineWidth = 2;
-    aCtx.strokeRect(12, 12, size - 24, size - 24);
-    aCtx.beginPath();
-    aCtx.moveTo(0, size / 2);
-    aCtx.lineTo(size, size / 2);
-    aCtx.stroke();
-    mCtx.strokeStyle = 'rgb(245, 245, 245)';
-    mCtx.lineWidth = 3;
-    mCtx.strokeRect(12, 12, size - 24, size - 24);
+    // Subtle anodized micro-weave fallback
+    for (let i = 0; i < 260; i++) {
+      const rx = (i * 61) % size;
+      const ry = (i * 109) % size;
+      aCtx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)';
+      aCtx.fillRect(rx, ry, 8, 8);
+      nCtx.fillStyle = i % 2 === 0 ? 'rgb(122, 128, 250)' : 'rgb(134, 128, 250)';
+      nCtx.fillRect(rx, ry, 8, 8);
+    }
   }
 
   // 5. Packed glTF 2.0 MetallicRoughness Canvas (R = Occlusion 255, G = Roughness, B = Metalness)

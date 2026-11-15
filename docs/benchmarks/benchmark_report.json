@@ -1,6 +1,6 @@
 {
   "suiteVersion": "forge-visual-benchmark-v3",
-  "generatedAt": "2026-11-15T03:52:11.127Z",
+  "generatedAt": "2026-11-15T04:52:33.962Z",
   "canonical": {
     "totalCases": 8,
     "passedCases": 8,
@@ -40,18 +40,18 @@
           "SmoothPlastic"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 73,
-          "componentCompletenessScore": 82,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 80,
-          "colorHarmonyScore": 92,
+          "visualIdentityScore": 89,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 67,
+          "componentCompletenessScore": 81,
+          "geometryQualityScore": 78,
+          "materialPbrScore": 45,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 91.2
+          "overallScore": 84.6
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -176,7 +176,7 @@
             "Explicit request value preserved for 'foliageDensity' (8) over prompt value (1.45).",
             "Explicit request value preserved for 'detailLevel' (high) over prompt value (low)."
           ],
-          "latency_ms": 16
+          "latency_ms": 20
         }
       },
       {
@@ -215,18 +215,18 @@
           "Neon"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 73,
-          "componentCompletenessScore": 82,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "visualIdentityScore": 95,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 69,
+          "componentCompletenessScore": 81,
+          "geometryQualityScore": 80,
+          "materialPbrScore": 100,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 92.6
+          "overallScore": 90.5
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -401,18 +401,18 @@
           "Rock"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 83,
-          "componentCompletenessScore": 88,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "visualIdentityScore": 94,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 73,
+          "componentCompletenessScore": 93,
+          "geometryQualityScore": 83,
+          "materialPbrScore": 85,
+          "colorHarmonyScore": 72,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 94.1
+          "overallScore": 88.8
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -530,7 +530,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 11
+          "latency_ms": 12
         }
       },
       {
@@ -575,18 +575,18 @@
           "Slate"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 94,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 71,
           "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "geometryQualityScore": 82,
+          "materialPbrScore": 85,
+          "colorHarmonyScore": 72,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 96.3
+          "overallScore": 89.2
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -704,7 +704,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 15
+          "latency_ms": 9
         }
       },
       {
@@ -745,18 +745,18 @@
           "Fabric"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 93,
-          "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 94,
-          "colorHarmonyScore": 92,
+          "visualIdentityScore": 93,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 73,
+          "componentCompletenessScore": 99,
+          "geometryQualityScore": 83,
+          "materialPbrScore": 80,
+          "colorHarmonyScore": 72,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 95.9
+          "overallScore": 88.8
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -917,17 +917,17 @@
         ],
         "qualityMetrics": {
           "visualIdentityScore": 85,
-          "promptFidelityScore": 78,
-          "proportionScore": 94,
-          "silhouetteScore": 84,
-          "componentCompletenessScore": 83,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "promptFidelityScore": 73,
+          "proportionScore": 95,
+          "silhouetteScore": 75,
+          "componentCompletenessScore": 99,
+          "geometryQualityScore": 85,
+          "materialPbrScore": 85,
+          "colorHarmonyScore": 72,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 90.4
+          "overallScore": 86.9
         },
         "semanticPassed": false,
         "semanticScore": 85,
@@ -1045,7 +1045,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 8
+          "latency_ms": 4
         }
       },
       {
@@ -1088,17 +1088,17 @@
         ],
         "qualityMetrics": {
           "visualIdentityScore": 85,
-          "promptFidelityScore": 78,
-          "proportionScore": 94,
-          "silhouetteScore": 86,
-          "componentCompletenessScore": 87,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "promptFidelityScore": 73,
+          "proportionScore": 95,
+          "silhouetteScore": 72,
+          "componentCompletenessScore": 99,
+          "geometryQualityScore": 82,
+          "materialPbrScore": 85,
+          "colorHarmonyScore": 72,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 90.9
+          "overallScore": 86.4
         },
         "semanticPassed": false,
         "semanticScore": 85,
@@ -1216,7 +1216,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 11
+          "latency_ms": 7
         }
       },
       {
@@ -1263,18 +1263,18 @@
           "Neon"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 90,
-          "componentCompletenessScore": 98,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "visualIdentityScore": 95,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 78,
+          "componentCompletenessScore": 100,
+          "geometryQualityScore": 87,
+          "materialPbrScore": 85,
+          "colorHarmonyScore": 72,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 95.6
+          "overallScore": 90.4
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -1392,7 +1392,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 19
+          "latency_ms": 14
         }
       }
     ]
@@ -1421,11 +1421,11 @@
           "monotonicReduction": true
         },
         "boundingBoxStuds": {
-          "widthX": 3.99,
-          "heightY": 6.56,
+          "widthX": 4.39,
+          "heightY": 6.14,
           "depthZ": 9.92,
           "minY": 0,
-          "maxY": 6.56
+          "maxY": 6.14
         },
         "groundedAtZero": true,
         "editableMeshCompliant": true,
@@ -1443,24 +1443,25 @@
           "Tail"
         ],
         "materialsUsed": [
-          "SmoothPlastic",
+          "Fabric",
+          "Sand",
+          "Glass",
           "Marble",
-          "Slate",
-          "Fabric"
+          "Slate"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 96,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 78,
           "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "geometryQualityScore": 87,
+          "materialPbrScore": 100,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 96.3
+          "overallScore": 93.8
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -1578,7 +1579,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 40
+          "latency_ms": 32
         }
       },
       {
@@ -1587,19 +1588,19 @@
         "category": "Props",
         "subCategory": "equine_horse",
         "objectFamily": "quadruped_animal",
-        "partCount": 26,
-        "vertexCount": 2112,
-        "triangleCount": 3904,
+        "partCount": 27,
+        "vertexCount": 2184,
+        "triangleCount": 4044,
         "lodMetrics": {
-          "lod0Triangles": 3904,
-          "lod1Triangles": 1614,
-          "lod2Triangles": 1416,
-          "lod1ReductionRatio": 0.413,
-          "lod2ReductionRatio": 0.363,
+          "lod0Triangles": 4044,
+          "lod1Triangles": 1674,
+          "lod2Triangles": 1476,
+          "lod1ReductionRatio": 0.414,
+          "lod2ReductionRatio": 0.365,
           "monotonicReduction": true
         },
         "boundingBoxStuds": {
-          "widthX": 2.92,
+          "widthX": 3.27,
           "heightY": 7.81,
           "depthZ": 10.14,
           "minY": 0,
@@ -1619,23 +1620,24 @@
           "Tail"
         ],
         "materialsUsed": [
-          "SmoothPlastic",
           "Fabric",
+          "Sand",
+          "Glass",
           "Slate"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 97,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 83,
           "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "geometryQualityScore": 91,
+          "materialPbrScore": 100,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 96.3
+          "overallScore": 94.7
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -1656,7 +1658,7 @@
           "seed": 90202,
           "seed_preserved": true,
           "poly_budget_requested": 3200,
-          "poly_budget_achieved": 3904,
+          "poly_budget_achieved": 4044,
           "detail_level": "medium",
           "parameter_provenance": {
             "seed": {
@@ -1753,7 +1755,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 39
+          "latency_ms": 34
         }
       },
       {
@@ -1794,22 +1796,24 @@
           "Tail"
         ],
         "materialsUsed": [
-          "SmoothPlastic",
+          "Fabric",
+          "Sand",
+          "Glass",
           "Slate"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 96,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 78,
           "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 94,
-          "colorHarmonyScore": 92,
+          "geometryQualityScore": 87,
+          "materialPbrScore": 100,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 96.1
+          "overallScore": 93.8
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -1927,7 +1931,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 31
+          "latency_ms": 23
         }
       },
       {
@@ -1974,18 +1978,18 @@
           "Fabric"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 98,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 87,
           "componentCompletenessScore": 100,
           "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "materialPbrScore": 100,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 96.3
+          "overallScore": 95.5
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -2103,7 +2107,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 77
+          "latency_ms": 41
         }
       },
       {
@@ -2149,18 +2153,18 @@
           "Neon"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 96,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 77,
           "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "geometryQualityScore": 86,
+          "materialPbrScore": 97,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 96.3
+          "overallScore": 93.4
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -2278,7 +2282,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 21
+          "latency_ms": 13
         }
       },
       {
@@ -2322,18 +2326,18 @@
           "Marble"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 95,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 79,
           "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 94,
-          "colorHarmonyScore": 78,
+          "geometryQualityScore": 88,
+          "materialPbrScore": 88,
+          "colorHarmonyScore": 82,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 94.8
+          "overallScore": 91.7
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -2451,7 +2455,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 17
+          "latency_ms": 19
         }
       },
       {
@@ -2490,18 +2494,18 @@
           "Neon"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 87,
+          "visualIdentityScore": 86,
           "promptFidelityScore": 87,
-          "proportionScore": 94,
-          "silhouetteScore": 73,
-          "componentCompletenessScore": 82,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "proportionScore": 95,
+          "silhouetteScore": 65,
+          "componentCompletenessScore": 81,
+          "geometryQualityScore": 77,
+          "materialPbrScore": 100,
+          "colorHarmonyScore": 94,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 90.3
+          "overallScore": 88.4
         },
         "semanticPassed": true,
         "semanticScore": 87,
@@ -2635,7 +2639,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 9
+          "latency_ms": 13
         }
       },
       {
@@ -2682,18 +2686,18 @@
           "Neon"
         ],
         "qualityMetrics": {
-          "visualIdentityScore": 100,
-          "promptFidelityScore": 100,
-          "proportionScore": 94,
-          "silhouetteScore": 95,
+          "visualIdentityScore": 95,
+          "promptFidelityScore": 95,
+          "proportionScore": 95,
+          "silhouetteScore": 79,
           "componentCompletenessScore": 100,
-          "geometryQualityScore": 95,
-          "materialPbrScore": 96,
-          "colorHarmonyScore": 92,
+          "geometryQualityScore": 88,
+          "materialPbrScore": 85,
+          "colorHarmonyScore": 72,
           "textureUvScore": 95,
           "meshManifoldScore": 96,
           "robloxCompatibilityScore": 96,
-          "overallScore": 96.3
+          "overallScore": 90.5
         },
         "semanticPassed": true,
         "semanticScore": 100,
@@ -2811,7 +2815,7 @@
             }
           },
           "warnings": [],
-          "latency_ms": 21
+          "latency_ms": 17
         }
       }
     ]
@@ -2867,10 +2871,10 @@
       "structuralHashDifferent": true,
       "distinctPartCountDelta": 7,
       "bboxDeltaStuds": {
-        "widthXDelta": 2.72,
-        "heightYDelta": 5.27,
+        "widthXDelta": 2.98,
+        "heightYDelta": 5.56,
         "depthZDelta": 6.95,
-        "volumeRatio": 9.158
+        "volumeRatio": 9.781
       },
       "distinctColorsA": [
         "248,250,252",

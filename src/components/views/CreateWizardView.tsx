@@ -81,6 +81,8 @@ export const CreateWizardView: React.FC = () => {
   const [category, setCategory] = useState<ObjectCategory>('Trees & Vegetation');
   const [inputMethod, setInputMethod] = useState<InputMethod>('text');
   const [generationMode, setGenerationMode] = useState<'procedural' | 'hybrid' | 'ai' | 'image_to_3d'>('hybrid');
+  const [visualStyle, setVisualStyle] = useState<string>('stylized');
+  const [textureResolution, setTextureResolution] = useState<256 | 512 | 1024>(512);
   const [seed, setSeed] = useState<string>('forge-tree-2026');
   const [seedLocked, setSeedLocked] = useState<boolean>(false);
   const [selectedPresetId, setSelectedPresetId] = useState<string>('ancient-oak');
@@ -376,6 +378,8 @@ export const CreateWizardView: React.FC = () => {
           prompt: inputMethod === 'text' ? prompt : `Asset de tipo ${category} generado con referencia/relieve`,
           asset_type: category === 'Ambient & Decoration' && prompt.toLowerCase().includes('escena') ? 'Scene3D' : 'Model3D',
           category,
+          visual_style: visualStyle,
+          texture_resolution: textureResolution,
           generation_mode: inputMethod === 'image' && referenceImage ? 'image_to_3d' : generationMode,
           seed: effectiveSeed,
           manually_edited_fields: manuallyEditedFields,
@@ -1088,6 +1092,42 @@ export const CreateWizardView: React.FC = () => {
           />
         )}
 
+        {currentStep === 3 && (
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950/70 border border-slate-800 rounded-2xl p-4">
+            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-300">
+              Estilo Visual 3D
+              <select
+                value={visualStyle}
+                onChange={(e) => setVisualStyle(e.target.value)}
+                className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
+              >
+                <option value="realistic">Realistic (PBR Detallado)</option>
+                <option value="semi_realistic">Semi-Realistic</option>
+                <option value="stylized">Stylized (Estilizado Roblox)</option>
+                <option value="cartoon">Cartoon</option>
+                <option value="low_poly">Low Poly</option>
+                <option value="anime">Anime</option>
+                <option value="fantasy">Fantasy</option>
+                <option value="sci_fi">Sci-Fi</option>
+                <option value="medieval">Medieval</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-300">
+              Resolución Mapas PBR (Albedo / Normal / Roughness / AO)
+              <select
+                value={textureResolution}
+                onChange={(e) => setTextureResolution(Number(e.target.value) as 256 | 512 | 1024)}
+                className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
+              >
+                <option value={256}>256×256 px (Rápido)</option>
+                <option value={512}>512×512 px (Estudio)</option>
+                <option value={1024}>1024×1024 px (Alta Definición)</option>
+              </select>
+            </label>
+          </div>
+        )}
+
         {/* STEP 4: Live Generation & Progress */}
         {currentStep === 4 && (
           <div className="space-y-6 pt-6">
@@ -1291,6 +1331,16 @@ export const CreateWizardView: React.FC = () => {
                     {(generatedAsset as any).director_blueprint?.objectFamily && (
                       <span className="px-2.5 py-1 rounded-lg bg-fuchsia-950/80 border border-fuchsia-500/40 text-[11px] font-bold text-fuchsia-300 font-mono">
                         Motor geométrico: {(generatedAsset as any).director_blueprint.objectFamily}
+                      </span>
+                    )}
+                    {(generatedAsset as any).texture_source && (
+                      <span className="px-2.5 py-1 rounded-lg bg-amber-950/80 border border-amber-500/40 text-[11px] font-bold text-amber-300 font-mono">
+                        Texturas PBR: {(generatedAsset as any).texture_source} ({(generatedAsset as any).texture_resolution || 256}px)
+                      </span>
+                    )}
+                    {(generatedAsset as any).anatomical_validation && (
+                      <span className="px-2.5 py-1 rounded-lg bg-teal-950/80 border border-teal-500/40 text-[11px] font-bold text-teal-300 font-mono">
+                        Calidad 3D real: {(generatedAsset as any).anatomical_validation.overallScore}/100 ({(generatedAsset as any).anatomical_validation.passed ? 'APROBADO' : 'REVISAR'})
                       </span>
                     )}
                   </div>

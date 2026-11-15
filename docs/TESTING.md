@@ -9,8 +9,8 @@ Este documento describe todas las suites de verificación automatizada, el flujo
 | Capa | Comando | Propósito | Resultado Observado Reciente |
 | :--- | :--- | :--- | :--- |
 | **TypeScript / Tipos** | `node node_modules/typescript/bin/tsc --noEmit` | Verificación estática estricta del proyecto | `0` errores (`exit 0`). |
-| **Bundle Frontend** | `node node_modules/vite/bin/vite.js build` | Empaquetado Vite React/Tailwind producción | `1712` módulos transformados en `2.17s` (`exit 0`). |
-| **Suite TS + Bridge** | `npm.cmd test` (`tests/*.test.ts forge-bridge/tests/*.test.ts`) | Integración total, hashing, seguridad, RGB, motores 3D y puente | **`92 / 92` pruebas aprobadas**, `0` fallos, `0` saltadas (`~39.9s`). |
+| **Bundle Frontend** | `node node_modules/vite/bin/vite.js build` | Empaquetado Vite React/Tailwind producción | `1712` módulos transformados en `1.39s` (`exit 0`). |
+| **Suite TS + Bridge** | `npm.cmd test` (`tests/*.test.ts forge-bridge/tests/*.test.ts`) | Integración total, hashing, seguridad, RGB, motores 3D y puente | **`96 / 96` pruebas aprobadas**, `0` fallos, `0` saltadas (`~54.8s`). |
 | **Puente Local Independiente** | `cd forge-bridge && node --import ./node_modules/tsx/dist/loader.mjs --test tests/bridge.test.ts` | Validación aislada de `forge-bridge` | **`8 / 8` pruebas aprobadas**, `0` fallos (`~6.9s`). |
 | **Compilación Python** | `python -m py_compile <archivos_py>` | Validación sintáctica de FastAPI y motores Python | `exit 0` sobre `backend/main.py`, `backend/engines/*.py` y `tests/test_e2e_bidirectional_sync.py`. |
 | **Paridad E2E Python ↔ TS** | `python tests/test_e2e_bidirectional_sync.py` | Validación cruzada de hashes, RGB y sincronización | *Observación Windows:* Falla al invocar `["npx", "tsx", ...]` en línea `343` (`WinError 2`, ya que Windows requiere `npx.cmd`/shell; en CI corre sobre `ubuntu-latest`). |
@@ -23,6 +23,7 @@ Este documento describe todas las suites de verificación automatizada, el flujo
 2. **`tests/canonicalHash.test.ts`:** Vectores NIST SHA-256, Unicode multi-byte, normalización de `Date`/`Map`/`Set`/`TypedArray`, exclusión en raíz (`ROOT_EXCLUDED_CANONICAL_KEYS`, incluyendo `latency_ms` y `execution_report`) vs preservación anidada, sub-hashes y diff incremental.
 3. **`tests/forgeContext.test.ts`:** Estado React `ForgeContext`, recuperación de borradores, resolución de conflictos local/remoto, verificación de contenido persistido y recibos estructurados de Studio.
 4. **`tests/hybrid3DEngineReconstruction.test.ts`:** Enrutamiento de modos `procedural`, `ai`, `hybrid` e `image_to_3d`, rechazo `503 AI_PROVIDER_UNAVAILABLE` cuando `strict_ai=true` sin proveedor, y fallback visible en modo no estricto.
+5. **`tests/studio3DTransformation.test.ts`:** 6 casos obligatorios (`Horse`, `Cow`, `Fantasy Tree`, `Futuristic Sports Car`, `Medieval House`, `Arbitrary Telescope`), rechazo no manipulable del falso caballo primitivo, 7 variaciones y generación de SVGs de 5 ángulos en `docs/benchmarks/`.
 5. **`tests/mainServerSecurity.test.ts`:** CORS restringido, sesión efímera dev solo same-origin, rate limiting y protección de rutas `/api/v1/*`.
 6. **`tests/missionEndToEndTreeFlow.test.ts` & `tests/proceduralTreeAndE2EMission.test.ts`:** Generación parametrizable de árboles, validación de geometría cerradas y paquete completo de exportación.
 7. **`tests/nightmareForgeE2EAndSecurity.test.ts`:** Validación integral E2E del servidor principal y seguridad de puente.

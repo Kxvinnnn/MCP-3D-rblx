@@ -7,6 +7,7 @@ import {
   type Procedural3DSynthesisResult,
 } from './procedural3DGenerator.ts';
 import { renderMultiAngleSvgSnapshots } from './universalFreeform3DEngine.ts';
+import { validateAssetAnatomyAndQuality } from './anatomicalQualityValidator.ts';
 
 export interface AssetQualityMetrics {
   visualIdentityScore: number;
@@ -335,40 +336,38 @@ export function evaluateAssetQualityMetrics(
   const partCount = parts.length;
   const hasBbox = bbox.widthX > 0.1 && bbox.heightY > 0.1 && bbox.depthZ > 0.1;
 
+  const anatomyReport = validateAssetAnatomyAndQuality(synthesis as any);
+
   const visualIdentityScore = clampScore(
     typeof evalObj?.overallScore === 'number'
-      ? evalObj.overallScore
-      : partCount >= 10
-      ? 88
-      : partCount >= 6
-      ? 80
-      : 62
+      ? evalObj.overallScore * 0.6 + anatomyReport.overallScore * 0.4
+      : anatomyReport.overallScore
   );
   const promptFidelityScore = clampScore(
     evalObj?.passed
-      ? Math.max(84, Number(evalObj.overallScore || 86))
-      : partCount >= 6 && hasBbox
-      ? 78
-      : 60
+      ? Math.max(75, Number(evalObj.overallScore || 84) * 0.65 + anatomyReport.silhouetteProportionScore * 0.35)
+      : anatomyReport.silhouetteProportionScore * 0.85
   );
   const proportionScore = clampScore(
-    (hasBbox ? 55 : 15) + (grounded ? 25 : 0) + (bbox.heightY >= 1.5 ? 14 : 6)
+    (hasBbox ? 35 : 10) + anatomyReport.groundingScore * 0.3 + anatomyReport.silhouetteProportionScore * 0.35
   );
   const silhouetteScore = clampScore(
-    45 + Math.min(30, hierarchySet.size * 8) + Math.min(20, partCount * 1.5)
+    anatomyReport.sculptingScore * 0.55 + anatomyReport.silhouetteProportionScore * 0.45
   );
   const componentCompletenessScore = clampScore(
-    36 + Math.min(40, partCount * 3.8) + Math.min(24, hierarchySet.size * 6)
+    anatomyReport.continuityScore * 0.55 +
+      Math.min(25, hierarchySet.size * 6) +
+      (anatomyReport.floatingPartCount === 0 ? 20 : 0)
   );
   const geometryQualityScore = clampScore(
-    (partsWithMesh === partCount && partCount > 0 ? 50 : 25) +
-      (monotonicLod ? 25 : 10) +
-      (validation.totalTriangles >= 120 ? 20 : 10)
+    (partsWithMesh === partCount && partCount > 0 ? 35 : 12) +
+      (monotonicLod ? 20 : 6) +
+      anatomyReport.sculptingScore * 0.45
   );
-  const materialPbrScore = clampScore(
-    50 + Math.min(30, materialsSet.size * 14) + (parts.some((p: any) => typeof p.roughness === 'number') ? 16 : 6)
+  const materialPbrScore = clampScore(anatomyReport.surfaceQualityScore);
+  const colorHarmonyScore = clampScore(
+    36 + Math.min(36, colorsSet.size * 12) + (anatomyReport.hasVertexColorShading ? 22 : 0)
   );
-  const colorHarmonyScore = clampScore(48 + Math.min(44, colorsSet.size * 15));
   const textureUvScore = clampScore(
     partCount > 0 ? 40 + (partsWithUvs / partCount) * 55 : 30
   );

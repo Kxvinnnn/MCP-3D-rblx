@@ -53,7 +53,9 @@ Este inventario enumera los archivos fuente, motores, puentes, configuraciones, 
 | `src/server/engines/specializedGeometryGenerators.ts` | Generadores geométricos especializados por familia (`tree` 7 especies, `building` con 4 subtipos, `rock`, `chair`, `lamp`, `mechanical`, `table`, torno image-to-3D). |
 | `src/server/engines/aiGenerationDirector.ts` | Cliente y esquema estructurado para Gemini (`gemini-2.5-pro` / `gemini-2.5-flash`), clasificación de familias, `EngineExecutionReport` y fallback determinista. |
 | `src/server/engines/imageReferenceProcessor.ts` | Decodificación PNG/JPG/WebP/SVG, extracción de silueta, perfil volumétrico `depthProfile16`, simetría y puntuación Image-to-3D. |
-| `src/server/engines/visualBenchmarkSuite.ts` | Suite de 11 dimensiones de calidad, comparación de pares paramétricos y persistencia de artefactos SVG/JSON/Markdown en `docs/benchmarks/`. |
+| `src/server/engines/visualBenchmarkSuite.ts` | Suite de 11 dimensiones de calidad (conectada a `anatomicalQualityValidator.ts`), comparación de pares paramétricos y persistencia de artefactos SVG/JSON/Markdown en `docs/benchmarks/`. |
+| `src/server/engines/pbrTextureEngine.ts` | Generador determinista RGBA PNG en Node (`256`/`512`/`1024` px) para mapas `Albedo`, `Normal`, `Roughness`, `Metallic`, `AO`, `Emissive` y `SurfaceAppearance`. |
+| `src/server/engines/anatomicalQualityValidator.ts` | Validador real anti-primitivas y anti-flotantes (mide esculpido no-circular, continuidad 3D, apoyo `Y=0`, uso de `SmoothPlastic` y proporciones). |
 | `src/server/engines/external3DModelAdapter.ts` | Adaptador HTTP para modelos GPU externos open-source (TRELLIS, Hunyuan3D-2, TripoSR, InstantMesh, Wonder3D), parseo `.obj` y grounding `Y=0`. |
 | `src/server/engines/generation3DEngine.ts` | Motor de alto nivel para generación de escenas y assets 3D. |
 | `src/server/engines/assetEngine.ts` | Normalización de assets, colores RGB canónicos, materiales Roblox y empaquetado. |
@@ -103,6 +105,6 @@ Este inventario enumera los archivos fuente, motores, puentes, configuraciones, 
 
 ## 7. Pruebas (`tests/`) y Activos Públicos (`public/`)
 
-- **Tests TypeScript (`tests/`):** `canonicalHash.test.ts`, `forgeContext.test.ts`, `hybrid3DEngineReconstruction.test.ts`, `mainServerSecurity.test.ts`, `missionEndToEndTreeFlow.test.ts`, `nightmareForgeE2EAndSecurity.test.ts`, `proceduralTreeAndE2EMission.test.ts`, `rgbColorParity.test.ts`, `robloxGeometryValidator.test.ts`, `sseParser.test.ts`, `universalFreeformAndCowGeneralization.test.ts`.
+- **Tests TypeScript (`tests/`):** `canonicalHash.test.ts`, `forgeContext.test.ts`, `hybrid3DEngineReconstruction.test.ts`, `mainServerSecurity.test.ts`, `missionEndToEndTreeFlow.test.ts`, `nightmareForgeE2EAndSecurity.test.ts`, `proceduralTreeAndE2EMission.test.ts`, `rgbColorParity.test.ts`, `robloxGeometryValidator.test.ts`, `sseParser.test.ts`, `studio3DTransformation.test.ts`, `universalFreeformAndCowGeneralization.test.ts`.
 - **Tests Python (`tests/`):** `test_e2e_bidirectional_sync.py`.
 - **Benchmarks públicos heredados (`public/assets/benchmarks/`):** SVGs estáticos previos de vaca y generalización de 7 prompts; **Artefactos actuales (`docs/benchmarks/`):** `benchmark_report.json`, `benchmark_summary.md` y 100 SVGs de 5 vistas en `docs/benchmarks/views/`.

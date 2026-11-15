@@ -124,6 +124,16 @@ export type OrganKernelType =
   | 'sculpted_icosphere_organ'
   | 'beveled_structural_frame';
 
+export type SculptProfileShape =
+  | 'cylindrical'
+  | 'equine_torso'
+  | 'equine_neck'
+  | 'equine_head'
+  | 'organic_ribcage'
+  | 'mane_crest'
+  | 'aerodynamic_hull'
+  | 'blade_keel';
+
 export interface SpineControlPoint {
   /** Posición relativa o absoluta [x, y, z] a lo largo de la espina del órgano */
   point: [number, number, number];
@@ -133,6 +143,8 @@ export interface SpineControlPoint {
   radiusY: number;
   /** Factor de abombamiento dorsal (>1 ensancha arriba, <1 ensancha abajo como panza) */
   dorsalVentralBias?: number;
+  /** Perfil anatómico esculpido no-circular en la sección transversal */
+  profileShape?: SculptProfileShape;
 }
 
 export interface PlannedOrganComponent {
@@ -938,29 +950,29 @@ function planQuadrupedAnimalAnatomy(
   // 1. Espina dorsal y Torso Volumétrico (Catmull-Rom de 7 cortes desde la grupa Z- hasta el pecho Z+)
   const torsoSpine: SpineControlPoint[] = isCow
     ? [
-        { point: [0, torsoCenterY + 0.12, -3.45], radiusX: 0.65, radiusY: 0.68, dorsalVentralBias: 1.08 }, // Grupa caudal / isquion
-        { point: [0, torsoCenterY + 0.16, -2.55], radiusX: 1.48, radiusY: 1.38, dorsalVentralBias: 1.12 }, // Pelvis / cadera ancha bovina
-        { point: [0, torsoCenterY - 0.08, -0.85], radiusX: 1.82, radiusY: 1.68, dorsalVentralBias: 0.84 }, // Barriga / rumen profundo
-        { point: [0, torsoCenterY - 0.02, 0.95], radiusX: 1.66, radiusY: 1.58, dorsalVentralBias: 0.92 }, // Caja torácica / costillar
-        { point: [0, torsoCenterY + 0.22, 2.35], radiusX: 1.44, radiusY: 1.52, dorsalVentralBias: 1.15 }, // Cruz / hombros (withers)
-        { point: [0, torsoCenterY - 0.18, 3.18], radiusX: 1.05, radiusY: 1.12, dorsalVentralBias: 0.85 }, // Pecho / brisket anterior
+        { point: [0, torsoCenterY + 0.12, -3.45], radiusX: 0.65, radiusY: 0.68, dorsalVentralBias: 1.08, profileShape: 'organic_ribcage' }, // Grupa caudal / isquion
+        { point: [0, torsoCenterY + 0.16, -2.55], radiusX: 1.48, radiusY: 1.38, dorsalVentralBias: 1.12, profileShape: 'organic_ribcage' }, // Pelvis / cadera ancha bovina
+        { point: [0, torsoCenterY - 0.08, -0.85], radiusX: 1.82, radiusY: 1.68, dorsalVentralBias: 0.84, profileShape: 'organic_ribcage' }, // Barriga / rumen profundo
+        { point: [0, torsoCenterY - 0.02, 0.95], radiusX: 1.66, radiusY: 1.58, dorsalVentralBias: 0.92, profileShape: 'organic_ribcage' }, // Caja torácica / costillar
+        { point: [0, torsoCenterY + 0.22, 2.35], radiusX: 1.44, radiusY: 1.52, dorsalVentralBias: 1.15, profileShape: 'organic_ribcage' }, // Cruz / hombros (withers)
+        { point: [0, torsoCenterY - 0.18, 3.18], radiusX: 1.05, radiusY: 1.12, dorsalVentralBias: 0.85, profileShape: 'organic_ribcage' }, // Pecho / brisket anterior
       ]
     : isHorse
       ? [
-          { point: [0, torsoCenterY + 0.18, -3.35], radiusX: 0.62, radiusY: 0.65, dorsalVentralBias: 1.05 },
-          { point: [0, torsoCenterY + 0.22, -2.45], radiusX: 1.32, radiusY: 1.28, dorsalVentralBias: 1.1 },
-          { point: [0, torsoCenterY + 0.04, -0.55], radiusX: 1.38, radiusY: 1.34, dorsalVentralBias: 0.96 },
-          { point: [0, torsoCenterY + 0.1, 1.25], radiusX: 1.42, radiusY: 1.48, dorsalVentralBias: 0.94 },
-          { point: [0, torsoCenterY + 0.34, 2.45], radiusX: 1.26, radiusY: 1.42, dorsalVentralBias: 1.16 },
-          { point: [0, torsoCenterY + 0.05, 3.15], radiusX: 0.88, radiusY: 0.96, dorsalVentralBias: 0.95 },
+          { point: [0, torsoCenterY + 0.18, -3.35], radiusX: 0.62, radiusY: 0.65, dorsalVentralBias: 1.05, profileShape: 'equine_torso' },
+          { point: [0, torsoCenterY + 0.22, -2.45], radiusX: 1.32, radiusY: 1.28, dorsalVentralBias: 1.1, profileShape: 'equine_torso' },
+          { point: [0, torsoCenterY + 0.04, -0.55], radiusX: 1.38, radiusY: 1.34, dorsalVentralBias: 0.96, profileShape: 'equine_torso' },
+          { point: [0, torsoCenterY + 0.1, 1.25], radiusX: 1.42, radiusY: 1.48, dorsalVentralBias: 0.94, profileShape: 'equine_torso' },
+          { point: [0, torsoCenterY + 0.34, 2.45], radiusX: 1.26, radiusY: 1.42, dorsalVentralBias: 1.16, profileShape: 'equine_torso' },
+          { point: [0, torsoCenterY + 0.05, 3.15], radiusX: 0.88, radiusY: 0.96, dorsalVentralBias: 0.95, profileShape: 'equine_torso' },
         ]
       : [
-          { point: [0, torsoCenterY + 0.08, -2.45], radiusX: 0.45, radiusY: 0.48, dorsalVentralBias: 1.05 },
-          { point: [0, torsoCenterY + 0.12, -1.75], radiusX: 0.88, radiusY: 0.86, dorsalVentralBias: 1.08 },
-          { point: [0, torsoCenterY + 0.16, -0.45], radiusX: 0.78, radiusY: 0.74, dorsalVentralBias: 1.15 }, // Abdomen recogido canino
-          { point: [0, torsoCenterY + 0.02, 0.95], radiusX: 1.02, radiusY: 1.12, dorsalVentralBias: 0.88 }, // Tórax profundo
-          { point: [0, torsoCenterY + 0.18, 1.85], radiusX: 0.94, radiusY: 1.04, dorsalVentralBias: 1.1 },
-          { point: [0, torsoCenterY + 0.04, 2.35], radiusX: 0.65, radiusY: 0.72, dorsalVentralBias: 0.95 },
+          { point: [0, torsoCenterY + 0.08, -2.45], radiusX: 0.45, radiusY: 0.48, dorsalVentralBias: 1.05, profileShape: 'organic_ribcage' },
+          { point: [0, torsoCenterY + 0.12, -1.75], radiusX: 0.88, radiusY: 0.86, dorsalVentralBias: 1.08, profileShape: 'organic_ribcage' },
+          { point: [0, torsoCenterY + 0.16, -0.45], radiusX: 0.78, radiusY: 0.74, dorsalVentralBias: 1.15, profileShape: 'organic_ribcage' }, // Abdomen recogido canino
+          { point: [0, torsoCenterY + 0.02, 0.95], radiusX: 1.02, radiusY: 1.12, dorsalVentralBias: 0.88, profileShape: 'organic_ribcage' }, // Tórax profundo
+          { point: [0, torsoCenterY + 0.18, 1.85], radiusX: 0.94, radiusY: 1.04, dorsalVentralBias: 1.1, profileShape: 'organic_ribcage' },
+          { point: [0, torsoCenterY + 0.04, 2.35], radiusX: 0.65, radiusY: 0.72, dorsalVentralBias: 0.95, profileShape: 'organic_ribcage' },
         ];
 
   components.push({
@@ -972,10 +984,10 @@ function planQuadrupedAnimalAnatomy(
     position: [0, torsoCenterY, -0.15],
     rotation: [0, 0, 0],
     size: [isCow ? 3.65 : isHorse ? 2.85 : 2.05, isCow ? 3.35 : isHorse ? 2.95 : 2.25, isCow ? 6.65 : isHorse ? 6.5 : 4.8],
-    material: 'SmoothPlastic',
+    material: 'Fabric',
     colorHex: pal.primaryHex,
-    roughness: 0.78,
-    metalness: 0.03,
+    roughness: 0.82,
+    metalness: 0.02,
     canCollide: true,
     spineControlPoints: torsoSpine,
   });
@@ -1007,9 +1019,9 @@ function planQuadrupedAnimalAnatomy(
         position: [0, torsoCenterY, -0.15],
         rotation: [0, 0, 0],
         size: [1.4, 1.4, 1.8],
-        material: 'SmoothPlastic',
+        material: 'Fabric',
         colorHex: pal.secondaryHex, // Negro carbón #18181b sobre blanco #f8fafc
-        roughness: 0.8,
+        roughness: 0.84,
         metalness: 0.02,
         canCollide: false,
         spineControlPoints: torsoSpine,
@@ -1030,18 +1042,18 @@ function planQuadrupedAnimalAnatomy(
       semanticRole: 'udder',
       hierarchyPath: 'Root/Spine_Torso/Ventral',
       kernel: 'spline_lofted_organ',
-      position: [0, torsoCenterY - 1.45, -1.75],
+      position: [0, torsoCenterY - 1.38, -1.75],
       rotation: [0, 0, 0],
       size: [1.15, 0.82, 1.35],
-      material: 'SmoothPlastic',
+      material: 'Sand',
       colorHex: pal.accentHex,
       roughness: 0.72,
       metalness: 0.02,
       canCollide: false,
       spineControlPoints: [
-        { point: [0, 0.05, -0.62], radiusX: 0.38, radiusY: 0.28, dorsalVentralBias: 0.8 },
-        { point: [0, -0.08, 0.0], radiusX: 0.58, radiusY: 0.44, dorsalVentralBias: 0.72 },
-        { point: [0, 0.04, 0.62], radiusX: 0.42, radiusY: 0.3, dorsalVentralBias: 0.8 },
+        { point: [0, torsoCenterY - 1.33, -2.37], radiusX: 0.38, radiusY: 0.28, dorsalVentralBias: 0.8 },
+        { point: [0, torsoCenterY - 1.46, -1.75], radiusX: 0.58, radiusY: 0.44, dorsalVentralBias: 0.72 },
+        { point: [0, torsoCenterY - 1.34, -1.13], radiusX: 0.42, radiusY: 0.3, dorsalVentralBias: 0.8 },
       ],
     });
   }
@@ -1055,14 +1067,14 @@ function planQuadrupedAnimalAnatomy(
       ]
     : isHorse
       ? [
-          { point: [0, torsoCenterY + 0.25, 2.45], radiusX: 0.82, radiusY: 1.05, dorsalVentralBias: 1.05 },
-          { point: [0, torsoCenterY + 1.35, 3.15], radiusX: 0.66, radiusY: 0.86, dorsalVentralBias: 1.12 },
-          { point: [0, torsoCenterY + 2.35, 3.68], radiusX: 0.52, radiusY: 0.65, dorsalVentralBias: 1.05 },
+          { point: [0, torsoCenterY + 0.25, 2.45], radiusX: 0.82, radiusY: 1.05, dorsalVentralBias: 1.05, profileShape: 'equine_neck' },
+          { point: [0, torsoCenterY + 1.35, 3.15], radiusX: 0.66, radiusY: 0.86, dorsalVentralBias: 1.12, profileShape: 'equine_neck' },
+          { point: [0, torsoCenterY + 2.35, 3.68], radiusX: 0.52, radiusY: 0.65, dorsalVentralBias: 1.05, profileShape: 'equine_neck' },
         ]
       : [
-          { point: [0, torsoCenterY + 0.22, 1.85], radiusX: 0.64, radiusY: 0.72, dorsalVentralBias: 1.0 },
-          { point: [0, torsoCenterY + 0.82, 2.35], radiusX: 0.54, radiusY: 0.58, dorsalVentralBias: 1.02 },
-          { point: [0, torsoCenterY + 1.35, 2.75], radiusX: 0.46, radiusY: 0.48, dorsalVentralBias: 1.0 },
+          { point: [0, torsoCenterY + 0.22, 1.85], radiusX: 0.64, radiusY: 0.72, dorsalVentralBias: 1.0, profileShape: 'organic_ribcage' },
+          { point: [0, torsoCenterY + 0.82, 2.35], radiusX: 0.54, radiusY: 0.58, dorsalVentralBias: 1.02, profileShape: 'organic_ribcage' },
+          { point: [0, torsoCenterY + 1.35, 2.75], radiusX: 0.46, radiusY: 0.48, dorsalVentralBias: 1.0, profileShape: 'organic_ribcage' },
         ];
 
   components.push({
@@ -1074,15 +1086,15 @@ function planQuadrupedAnimalAnatomy(
     position: [0, torsoCenterY + (isHorse ? 1.3 : 0.52), isDog ? 2.3 : 3.3],
     rotation: [0, 0, 0],
     size: [1.8, isHorse ? 2.6 : 1.9, 2.1],
-    material: 'SmoothPlastic',
+    material: 'Fabric',
     colorHex: isCow ? pal.secondaryHex : pal.primaryHex, // Cuello oscuro contrastante en vaca Holstein
-    roughness: 0.78,
-    metalness: 0.03,
+    roughness: 0.82,
+    metalness: 0.02,
     canCollide: true,
     spineControlPoints: neckSpine,
   });
 
-  // Crin dorsal para el caballo (`Mane_Crest`)
+  // Crin dorsal esculpida en mechones y flequillo frontal para el caballo (`Mane_DorsalCrest`, `Mane_Forelock`)
   if (isHorse) {
     components.push({
       id: 'organ_horse_mane',
@@ -1092,16 +1104,38 @@ function planQuadrupedAnimalAnatomy(
       kernel: 'spline_lofted_organ',
       position: [0, torsoCenterY + 1.65, 2.95],
       rotation: [0, 0, 0],
-      size: [0.36, 2.3, 1.4],
+      size: [0.48, 2.5, 1.6],
       material: 'Fabric',
       colorHex: pal.secondaryHex,
-      roughness: 0.88,
+      roughness: 0.9,
       metalness: 0.01,
       canCollide: false,
       spineControlPoints: [
-        { point: [0, torsoCenterY + 0.75, 2.15], radiusX: 0.16, radiusY: 0.28 },
-        { point: [0, torsoCenterY + 1.65, 2.85], radiusX: 0.18, radiusY: 0.34 },
-        { point: [0, torsoCenterY + 2.55, 3.55], radiusX: 0.15, radiusY: 0.26 },
+        { point: [0, torsoCenterY + 0.55, 2.05], radiusX: 0.14, radiusY: 0.24, profileShape: 'mane_crest' },
+        { point: [0.06, torsoCenterY + 1.05, 2.48], radiusX: 0.2, radiusY: 0.36, profileShape: 'mane_crest' },
+        { point: [0.08, torsoCenterY + 1.65, 2.86], radiusX: 0.22, radiusY: 0.42, profileShape: 'mane_crest' },
+        { point: [0.06, torsoCenterY + 2.22, 3.25], radiusX: 0.2, radiusY: 0.38, profileShape: 'mane_crest' },
+        { point: [0.03, torsoCenterY + 2.68, 3.62], radiusX: 0.16, radiusY: 0.28, profileShape: 'mane_crest' },
+      ],
+    });
+    components.push({
+      id: 'organ_horse_forelock',
+      name: 'Mane_Forelock',
+      semanticRole: 'mane_or_crest',
+      hierarchyPath: 'Root/Neck_Head/Cranium',
+      kernel: 'spline_lofted_organ',
+      position: [0, torsoCenterY + 2.55, 4.18],
+      rotation: [0, 0, 0],
+      size: [0.34, 0.55, 0.55],
+      material: 'Fabric',
+      colorHex: pal.secondaryHex,
+      roughness: 0.9,
+      metalness: 0.01,
+      canCollide: false,
+      spineControlPoints: [
+        { point: [0, torsoCenterY + 2.75, 3.88], radiusX: 0.16, radiusY: 0.18, profileShape: 'mane_crest' },
+        { point: [0, torsoCenterY + 2.52, 4.22], radiusX: 0.14, radiusY: 0.22, profileShape: 'mane_crest' },
+        { point: [0, torsoCenterY + 2.18, 4.46], radiusX: 0.06, radiusY: 0.12, profileShape: 'mane_crest' },
       ],
     });
   }
@@ -1118,14 +1152,14 @@ function planQuadrupedAnimalAnatomy(
       ]
     : isHorse
       ? [
-          { point: [0, headY + 0.28, headZ - 0.45], radiusX: 0.58, radiusY: 0.64, dorsalVentralBias: 1.1 },
-          { point: [0, headY - 0.05, headZ + 0.22], radiusX: 0.52, radiusY: 0.56, dorsalVentralBias: 1.0 },
-          { point: [0, headY - 0.42, headZ + 0.92], radiusX: 0.38, radiusY: 0.42, dorsalVentralBias: 0.95 },
+          { point: [0, headY + 0.28, headZ - 0.45], radiusX: 0.58, radiusY: 0.64, dorsalVentralBias: 1.1, profileShape: 'equine_head' },
+          { point: [0, headY - 0.05, headZ + 0.22], radiusX: 0.52, radiusY: 0.56, dorsalVentralBias: 1.0, profileShape: 'equine_head' },
+          { point: [0, headY - 0.42, headZ + 0.92], radiusX: 0.38, radiusY: 0.42, dorsalVentralBias: 0.95, profileShape: 'equine_head' },
         ]
       : [
-          { point: [0, headY + 0.18, headZ - 0.38], radiusX: 0.56, radiusY: 0.54, dorsalVentralBias: 1.08 },
-          { point: [0, headY + 0.04, headZ + 0.12], radiusX: 0.52, radiusY: 0.48, dorsalVentralBias: 1.02 },
-          { point: [0, headY - 0.12, headZ + 0.52], radiusX: 0.34, radiusY: 0.32, dorsalVentralBias: 0.95 },
+          { point: [0, headY + 0.18, headZ - 0.38], radiusX: 0.56, radiusY: 0.54, dorsalVentralBias: 1.08, profileShape: 'organic_ribcage' },
+          { point: [0, headY + 0.04, headZ + 0.12], radiusX: 0.52, radiusY: 0.48, dorsalVentralBias: 1.02, profileShape: 'organic_ribcage' },
+          { point: [0, headY - 0.12, headZ + 0.52], radiusX: 0.34, radiusY: 0.32, dorsalVentralBias: 0.95, profileShape: 'organic_ribcage' },
         ];
 
   components.push({
@@ -1137,10 +1171,10 @@ function planQuadrupedAnimalAnatomy(
     position: [0, headY, headZ + 0.1],
     rotation: [0, 0, 0],
     size: [1.6, 1.5, 1.6],
-    material: 'SmoothPlastic',
+    material: 'Fabric',
     colorHex: pal.primaryHex,
-    roughness: 0.75,
-    metalness: 0.03,
+    roughness: 0.78,
+    metalness: 0.02,
     canCollide: true,
     spineControlPoints: headSpine,
   });
@@ -1157,10 +1191,10 @@ function planQuadrupedAnimalAnatomy(
     position: [0, snoutY, snoutZ],
     rotation: [0, 0, 0],
     size: isCow ? [1.22, 0.86, 0.92] : isHorse ? [0.76, 0.72, 0.95] : [0.58, 0.52, 0.88],
-    material: 'SmoothPlastic',
+    material: 'Sand',
     colorHex: isCow ? pal.accentHex : pal.muzzleOrTrimHex, // Morro ancho rosado en la vaca
     roughness: 0.68,
-    metalness: 0.04,
+    metalness: 0.02,
     canCollide: true,
     spineControlPoints: isCow
       ? [
@@ -1190,9 +1224,9 @@ function planQuadrupedAnimalAnatomy(
       position: [round4(eyeX), round4(eyeY), round4(eyeZ)],
       rotation: [0, 0, 0],
       size: [0.26, 0.26, 0.26],
-      material: 'SmoothPlastic',
+      material: 'Glass',
       colorHex: pal.eyeHex,
-      roughness: 0.18,
+      roughness: 0.08,
       metalness: 0.1,
       reflectance: 0.25,
       canCollide: false,
@@ -1225,7 +1259,7 @@ function planQuadrupedAnimalAnatomy(
       position: [side * (isCow ? 1.02 : 0.46), headY + (isCow ? 0.2 : 0.7), headZ - 0.2],
       rotation: [0, 0, 0],
       size: isCow ? [0.85, 0.45, 0.42] : [0.38, 0.75, 0.38],
-      material: 'SmoothPlastic',
+      material: 'Fabric',
       colorHex: isCow ? pal.secondaryHex : pal.primaryHex,
       roughness: 0.76,
       metalness: 0.02,
@@ -1303,10 +1337,10 @@ function planQuadrupedAnimalAnatomy(
       position: [limb.sideX, round4((hipOrShoulderY + kneeY) * 0.5), round4((limb.baseZ + jointZ) * 0.5)],
       rotation: [0, 0, 0],
       size: [upperTopR * 2, round4(hipOrShoulderY - kneeY + 0.35), upperTopR * 2.2],
-      material: 'SmoothPlastic',
+      material: 'Fabric',
       colorHex: pal.primaryHex,
-      roughness: 0.78,
-      metalness: 0.03,
+      roughness: 0.82,
+      metalness: 0.02,
       canCollide: true,
       spineControlPoints: [
         { point: [limb.sideX, hipOrShoulderY + 0.18, limb.baseZ], radiusX: upperTopR, radiusY: upperTopR * 1.15 },
@@ -1329,10 +1363,10 @@ function planQuadrupedAnimalAnatomy(
       position: [limb.sideX, kneeY, jointZ],
       rotation: [0, 0, 0],
       size: [upperBotR * 2.15, upperBotR * 1.9, upperBotR * 2.15],
-      material: 'SmoothPlastic',
+      material: 'Fabric',
       colorHex: pal.primaryHex,
-      roughness: 0.76,
-      metalness: 0.03,
+      roughness: 0.8,
+      metalness: 0.02,
       canCollide: false,
     });
 
@@ -1347,10 +1381,10 @@ function planQuadrupedAnimalAnatomy(
       position: [limb.sideX, round4((kneeY + hoofHeight) * 0.5), round4((jointZ + footZ) * 0.5)],
       rotation: [0, 0, 0],
       size: [upperBotR * 1.8, round4(kneeY - hoofHeight + 0.2), upperBotR * 1.8],
-      material: 'SmoothPlastic',
+      material: 'Fabric',
       colorHex: pal.primaryHex,
-      roughness: 0.78,
-      metalness: 0.03,
+      roughness: 0.82,
+      metalness: 0.02,
       canCollide: true,
       spineControlPoints: [
         { point: [limb.sideX, kneeY, jointZ], radiusX: upperBotR * 0.92, radiusY: upperBotR * 0.92 },
@@ -1419,7 +1453,7 @@ function planQuadrupedAnimalAnatomy(
     position: [0, torsoCenterY - (isDog ? -0.45 : 0.95), isDog ? -3.0 : -3.72],
     rotation: [0, 0, 0],
     size: [0.55, isDog ? 1.2 : 2.4, 0.95],
-    material: isHorse ? 'Fabric' : 'SmoothPlastic',
+    material: 'Fabric',
     colorHex: isHorse ? pal.secondaryHex : pal.primaryHex,
     roughness: 0.82,
     metalness: 0.02,
@@ -1890,7 +1924,7 @@ function planWheeledVehicleStructure(
       canCollide: true,
     });
 
-    // Carrocería esculpida + capó
+    // Carrocería esculpida + capó aerodinámico
     components.push({
       id: 'car_body_hood',
       name: 'CarBody_SculptedShell',
@@ -1900,21 +1934,21 @@ function planWheeledVehicleStructure(
       position: [0, 2.15, 0],
       rotation: [0, 0, 0],
       size: [5.4, 1.55, 11.4],
-      material: 'SmoothPlastic',
+      material: 'Metal',
       colorHex: pal.primaryHex,
-      roughness: 0.18,
-      metalness: 0.38,
-      reflectance: 0.28,
+      roughness: 0.16,
+      metalness: 0.62,
+      reflectance: 0.35,
       canCollide: true,
       spineControlPoints: [
-        { point: [0, 1.95, -5.6], radiusX: 2.35, radiusY: 0.68, dorsalVentralBias: 1.05 },
-        { point: [0, 2.25, -1.8], radiusX: 2.68, radiusY: 0.85, dorsalVentralBias: 1.15 },
-        { point: [0, 2.2, 2.4], radiusX: 2.65, radiusY: 0.82, dorsalVentralBias: 1.12 },
-        { point: [0, 1.82, 5.65], radiusX: 2.28, radiusY: 0.56, dorsalVentralBias: 0.95 },
+        { point: [0, 1.98, -5.6], radiusX: 2.35, radiusY: 0.68, dorsalVentralBias: 1.05, profileShape: 'aerodynamic_hull' },
+        { point: [0, 2.25, -1.8], radiusX: 2.68, radiusY: 0.85, dorsalVentralBias: 1.15, profileShape: 'aerodynamic_hull' },
+        { point: [0, 2.18, 2.4], radiusX: 2.65, radiusY: 0.8, dorsalVentralBias: 1.12, profileShape: 'aerodynamic_hull' },
+        { point: [0, 1.78, 5.65], radiusX: 2.24, radiusY: 0.52, dorsalVentralBias: 0.95, profileShape: 'aerodynamic_hull' },
       ],
     });
 
-    // Cabina superior + Parabrisas de cristal
+    // Cabina superior aerodinámica + Alerón trasero + Barra LED
     components.push({
       id: 'car_cabin_roof',
       name: 'CabinRoof_Shell',
@@ -1924,16 +1958,48 @@ function planWheeledVehicleStructure(
       position: [0, 3.45, -0.65],
       rotation: [0, 0, 0],
       size: [4.25, 1.35, 5.2],
-      material: 'SmoothPlastic',
+      material: 'Metal',
       colorHex: pal.primaryHex,
-      roughness: 0.2,
-      metalness: 0.35,
+      roughness: 0.18,
+      metalness: 0.58,
       canCollide: true,
       spineControlPoints: [
-        { point: [0, 2.95, -3.2], radiusX: 1.95, radiusY: 0.52 },
-        { point: [0, 3.65, -0.65], radiusX: 2.08, radiusY: 0.68 },
-        { point: [0, 2.95, 1.85], radiusX: 1.92, radiusY: 0.52 },
+        { point: [0, 2.95, -3.2], radiusX: 1.95, radiusY: 0.52, profileShape: 'aerodynamic_hull' },
+        { point: [0, 3.65, -0.65], radiusX: 2.08, radiusY: 0.68, profileShape: 'aerodynamic_hull' },
+        { point: [0, 2.95, 1.85], radiusX: 1.92, radiusY: 0.52, profileShape: 'aerodynamic_hull' },
       ],
+    });
+
+    components.push({
+      id: 'car_rear_spoiler',
+      name: 'RearSpoiler_AerodynamicWing',
+      semanticRole: 'structural_module',
+      hierarchyPath: 'Root/Chassis_Body/Aero',
+      kernel: 'beveled_structural_frame',
+      position: [0, 3.15, -5.25],
+      rotation: [-8, 0, 0],
+      size: [4.85, 0.24, 0.92],
+      material: 'Metal',
+      colorHex: pal.secondaryHex,
+      roughness: 0.25,
+      metalness: 0.72,
+      canCollide: false,
+    });
+
+    components.push({
+      id: 'car_rear_led_bar',
+      name: 'RearLedLightBar_Emissive',
+      semanticRole: 'headlight_or_lamp',
+      hierarchyPath: 'Root/Chassis_Body/Lighting',
+      kernel: 'beveled_structural_frame',
+      position: [0, 2.12, -5.68],
+      rotation: [0, 0, 0],
+      size: [4.35, 0.18, 0.22],
+      material: 'Neon',
+      colorHex: '#ef4444',
+      roughness: 0.12,
+      metalness: 0.05,
+      canCollide: false,
     });
 
     components.push({
@@ -3547,7 +3613,8 @@ function computeFrenetFrame(tangent: [number, number, number]): {
 function finalizeCenteredManifoldBuffer(
   rawVertices: [number, number, number][],
   rawUvs: [number, number][],
-  rawFaces: [number, number, number][]
+  rawFaces: [number, number, number][],
+  rawVertexColors?: [number, number, number][]
 ): {
   buffer: LodMeshBuffer;
   worldCenter: [number, number, number];
@@ -3656,6 +3723,15 @@ function finalizeCenteredManifoldBuffer(
     indices.push(f0, f1, f2);
   }
 
+  const vertexColors =
+    rawVertexColors && rawVertexColors.length === vertices.length
+      ? rawVertexColors.map(([r, g, b]) => [
+          round4(clamp(r, 0, 1)),
+          round4(clamp(g, 0, 1)),
+          round4(clamp(b, 0, 1)),
+        ] as [number, number, number])
+      : undefined;
+
   return {
     buffer: {
       vertices,
@@ -3663,6 +3739,7 @@ function finalizeCenteredManifoldBuffer(
       uvs,
       faces: validFaces,
       indices,
+      ...(vertexColors ? { vertexColors } : {}),
     },
     worldCenter: [round4(cx), round4(cy), round4(cz)],
     spanSize: [spanX, spanY, spanZ],
@@ -3719,6 +3796,7 @@ function wrapMultiLodResult(
       uvs: chosen.uvs,
       faces: chosen.faces,
       indices: chosen.indices,
+      ...(chosen.vertexColors ? { vertexColors: chosen.vertexColors } : {}),
       objFileName: `${modelName}.obj`,
       meshId: null,
       assetId: null,
@@ -3735,19 +3813,102 @@ function wrapMultiLodResult(
  * Kernel 1: Generador de Órganos Anatómicos por Lofting de Splines 3D (`buildSplineLoftedOrganMesh`).
  * Construye una malla cerrada barriendo secciones transversales moduladas a lo largo de una curva 3D.
  */
+function computeSculptedCrossSectionScale(
+  profileShape: SculptProfileShape,
+  cosT: number,
+  sinT: number,
+  u: number
+): { sx: number; sy: number; shade: number } {
+  switch (profileShape) {
+    case 'equine_torso': {
+      // Sculpted equine barrel: slightly narrower dorsal spine crest, broad upper ribcage, tapered keel sternum, defined flank tuck
+      const dorsalCrest = sinT > 0.35 ? 0.86 - 0.1 * (sinT - 0.35) : 1.0;
+      const ribBulge = Math.abs(cosT) > 0.45 && sinT > -0.35 && sinT < 0.55 ? 1.12 : 1.0;
+      const sternumKeel = sinT < -0.45 ? 0.78 + 0.14 * (1 + sinT) : 1.0;
+      const spineRidge = Math.abs(cosT) < 0.22 && sinT > 0.75 ? 1.08 : 1.0;
+      const shade = 0.84 + 0.22 * clamp(sinT * 0.5 + 0.5, 0, 1) - (sinT < -0.5 ? 0.08 : 0);
+      return { sx: dorsalCrest * ribBulge * sternumKeel, sy: spineRidge, shade };
+    }
+    case 'equine_neck': {
+      // Arched crest on top of the neck, muscular lateral taper, narrower windpipe underside
+      const crest = sinT > 0.5 ? 0.72 + 0.16 * (1 - Math.abs(cosT)) : 1.0;
+      const windpipe = sinT < -0.45 ? 0.76 : 1.0;
+      const crestHeight = sinT > 0.65 && Math.abs(cosT) < 0.35 ? 1.14 : 1.0;
+      const shade = 0.86 + 0.2 * clamp(sinT * 0.5 + 0.5, 0, 1);
+      return { sx: crest * windpipe, sy: crestHeight, shade };
+    }
+    case 'equine_head': {
+      // Flat forehead bridge, sculpted cheekbone flare, tapered nasal bridge
+      const cheekFlare = Math.abs(cosT) > 0.5 && sinT > -0.25 && sinT < 0.4 ? 1.14 : 1.0;
+      const foreheadFlat = sinT > 0.55 && Math.abs(cosT) < 0.45 ? 0.9 : 1.0;
+      const jawTaper = sinT < -0.45 ? 0.82 : 1.0;
+      const shade = 0.88 + 0.18 * clamp(sinT * 0.5 + 0.5, 0, 1) - u * 0.06;
+      return { sx: cheekFlare * jawTaper, sy: foreheadFlat, shade };
+    }
+    case 'organic_ribcage': {
+      // Broad bovine/canine ribcage with dorsal spine ridge and ventral belly fullness
+      const spinePinch = sinT > 0.68 ? 0.88 : 1.0;
+      const barrel = Math.abs(cosT) > 0.4 && sinT < 0.3 ? 1.1 : 1.0;
+      const shade = 0.85 + 0.2 * clamp(sinT * 0.5 + 0.5, 0, 1);
+      return { sx: spinePinch * barrel, sy: sinT > 0.75 ? 1.07 : 1.0, shade };
+    }
+    case 'mane_crest': {
+      // Multi-lock wavy sculpted mane blade instead of a circular tube
+      const wave = 1 + 0.26 * Math.sin(u * Math.PI * 7) * (sinT > 0 ? 1 : 0.4);
+      const bladeNarrow = Math.abs(cosT) > 0.3 ? 0.58 : 1.0;
+      const shade = 0.78 + 0.28 * clamp(Math.sin(u * Math.PI * 7) * 0.5 + 0.5, 0, 1);
+      return { sx: bladeNarrow, sy: wave * (sinT > 0 ? 1.18 : 0.75), shade };
+    }
+    case 'aerodynamic_hull': {
+      // Low-drag wedge supercar hull: flat underbody, wide fenders, sloped canopy deck
+      const flatUnder = sinT < -0.35 ? 0.48 : 1.0;
+      const wideFender = Math.abs(cosT) > 0.5 && sinT > -0.2 && sinT < 0.35 ? 1.18 : 1.0;
+      const deckSlope = sinT > 0.45 ? 0.88 : 1.0;
+      const shade = 0.88 + 0.18 * clamp(sinT * 0.5 + 0.5, 0, 1);
+      return { sx: wideFender, sy: flatUnder * deckSlope, shade };
+    }
+    case 'blade_keel': {
+      const diamondX = 1 - 0.38 * Math.abs(sinT);
+      const diamondY = 1 - 0.22 * Math.abs(cosT);
+      return { sx: diamondX, sy: diamondY, shade: 0.92 + 0.14 * Math.abs(cosT) };
+    }
+    default:
+      return {
+        sx: 1.0,
+        sy: 1.0,
+        shade: 0.9 + 0.14 * clamp(sinT * 0.5 + 0.5, 0, 1),
+      };
+  }
+}
+
 export function buildSplineLoftedOrganMesh(options: {
   modelName: string;
   controlPoints: SpineControlPoint[];
   radialSegments: number;
   lengthSegments: number;
   isClovenHoof?: boolean;
+  profileShape?: SculptProfileShape;
+  baseColorHex?: string;
   activeLod?: 0 | 1 | 2;
 }): {
   meshData: SpecializedMeshData;
   worldCenter: [number, number, number];
   spanSize: [number, number, number];
 } {
-  const { modelName, controlPoints, radialSegments, lengthSegments, isClovenHoof = false, activeLod = 0 } = options;
+  const {
+    modelName,
+    controlPoints,
+    radialSegments,
+    lengthSegments,
+    isClovenHoof = false,
+    profileShape,
+    baseColorHex,
+    activeLod = 0,
+  } = options;
+  const inferredProfile: SculptProfileShape =
+    profileShape || controlPoints.find((cp) => cp.profileShape)?.profileShape || 'cylindrical';
+  const [br, bg, bb] = baseColorHex ? hexToRgb255Tuple(baseColorHex) : [255, 255, 255];
+  const baseNorm: [number, number, number] = [br / 255, bg / 255, bb / 255];
 
   return wrapMultiLodResult(
     modelName,
@@ -3756,6 +3917,7 @@ export function buildSplineLoftedOrganMesh(options: {
       const lSegs = Math.max(4, Math.round(lengthSegments * lodFactor));
       const vertices: [number, number, number][] = [];
       const uvs: [number, number][] = [];
+      const vertexColors: [number, number, number][] = [];
       const faces: [number, number, number][] = [];
 
       for (let i = 0; i <= lSegs; i++) {
@@ -3772,16 +3934,17 @@ export function buildSplineLoftedOrganMesh(options: {
           const cosT = Math.cos(theta);
           const sinT = Math.sin(theta);
 
-          // Modulación dorsoventral anatómica (por ejemplo, barriga más ancha abajo o lomo muscular arriba)
+          // Modulación dorsoventral anatómica + perfil transversal esculpido no-circular
           const dvMod = sinT >= 0 ? evalPt.dorsalVentralBias : 2.0 - evalPt.dorsalVentralBias;
+          const sculpt = computeSculptedCrossSectionScale(inferredProfile, cosT, sinT, u);
           // Hendidura anterior para pezuñas hendidas bovinas (`isClovenHoof`)
           const cleftIndent =
             isClovenHoof && u < 0.65 && Math.abs(cosT) < 0.28 && sinT > 0
               ? 0.74
               : 1.0;
 
-          const localX = cosT * evalPt.radiusX * endCapFactor * clamp(dvMod, 0.72, 1.32) * cleftIndent;
-          const localY = sinT * evalPt.radiusY * endCapFactor;
+          const localX = cosT * evalPt.radiusX * endCapFactor * clamp(dvMod, 0.72, 1.32) * sculpt.sx * cleftIndent;
+          const localY = sinT * evalPt.radiusY * endCapFactor * sculpt.sy;
 
           const wx = evalPt.pos[0] + right[0] * localX + up[0] * localY;
           const wy = evalPt.pos[1] + right[1] * localX + up[1] * localY;
@@ -3789,6 +3952,11 @@ export function buildSplineLoftedOrganMesh(options: {
 
           vertices.push([wx, wy, wz]);
           uvs.push([u, v]);
+          vertexColors.push([
+            clamp(baseNorm[0] * sculpt.shade, 0, 1),
+            clamp(baseNorm[1] * sculpt.shade, 0, 1),
+            clamp(baseNorm[2] * sculpt.shade, 0, 1),
+          ]);
         }
       }
 
@@ -3812,6 +3980,7 @@ export function buildSplineLoftedOrganMesh(options: {
         startEval.pos[2] - startEval.tangent[2] * startEval.radiusX * 0.18,
       ]);
       uvs.push([0, 0.5]);
+      vertexColors.push([clamp(baseNorm[0] * 0.88, 0, 1), clamp(baseNorm[1] * 0.88, 0, 1), clamp(baseNorm[2] * 0.88, 0, 1)]);
 
       const endCenterIdx = vertices.length;
       vertices.push([
@@ -3820,6 +3989,7 @@ export function buildSplineLoftedOrganMesh(options: {
         endEval.pos[2] + endEval.tangent[2] * endEval.radiusX * 0.18,
       ]);
       uvs.push([1, 0.5]);
+      vertexColors.push([clamp(baseNorm[0] * 0.92, 0, 1), clamp(baseNorm[1] * 0.92, 0, 1), clamp(baseNorm[2] * 0.92, 0, 1)]);
 
       const lastRow = lSegs * rSegs;
       for (let r = 0; r < rSegs; r++) {
@@ -3828,7 +3998,7 @@ export function buildSplineLoftedOrganMesh(options: {
         faces.push([endCenterIdx, lastRow + r, lastRow + next]);
       }
 
-      return finalizeCenteredManifoldBuffer(vertices, uvs, faces);
+      return finalizeCenteredManifoldBuffer(vertices, uvs, faces, vertexColors);
     },
     activeLod
   );
@@ -4197,6 +4367,7 @@ export function generateReal3DMeshesFromPlan(params: {
         lengthSegments: isMajor ? primaryLen : secondaryLen,
         isClovenHoof:
           comp.semanticRole === 'hoof_or_paw' && plan.interpretation.archetype === 'bovine_cow',
+        baseColorHex: comp.colorHex,
         activeLod,
       });
     } else if (

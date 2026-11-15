@@ -1,6 +1,6 @@
 # Pipeline Image-to-3D — NIGHTMARE FORGE
 
-Este documento explica el alcance real, los algoritmos implementados en local y las capacidades externas opcionales del sistema **Image-to-3D** en **NIGHTMARE FORGE**.
+Este documento explica el alcance real, los algoritmos implementados en local y las capacidades externas opcionales del sistema **Image-to-3D** en **NIGHTMARE FORGE**, incluyendo soporte multi-vista (`reference_images_multi` / `analyzeMultiViewReferenceImages`) y reporte explícito de incertidumbre por oclusión (`uncertaintyReport`).
 
 ---
 

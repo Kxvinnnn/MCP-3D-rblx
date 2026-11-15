@@ -89,3 +89,11 @@ Para evitar que cualquier objeto no contemplado caiga en `chest_or_prop`, el sis
 - **Límites por sub-malla**: `validateProcedural3DGeometry` verifica `vertices <= 9,000` y `faces <= 9,500` por partición segura (límite duro de Roblox Engine: `20,000` vértices / `20,000` caras) y exige **0 triángulos degenerados**.
 - **Monotonicidad LOD**: Cada `MeshData` empaqueta 3 niveles de detalle (`lodLevels[0] > lodLevels[1] >= lodLevels[2]`).
 - **Colores canónicos**: Soportan `#RRGGBB`, tuplas `[r, g, b]` 8-bit y normalizado float, con paridad verificada TypeScript ↔ Luau (`rgbColorParity.test.ts`).
+
+---
+
+## 7. Esculpido Anatómico, PBR Multi-Canal y Validación Real (`feat/3d-studio-transformation`)
+
+- **Esculpido No-Circular (`universalFreeform3DEngine.ts`):** `buildSplineLoftedOrganMesh` modula secciones transversales anatómicas (`equine_torso`, `equine_neck`, `equine_head`, `organic_ribcage`, `mane_crest`, `aerodynamic_hull`, `blade_keel`) y emite `vertexColors` orgánicos por vértice.
+- **Texturas PBR Nativo de Servidor (`pbrTextureEngine.ts`):** Codificador RGBA PNG determinista (`256`/`512`/`1024` px) que genera mapas `Albedo`, `Normal`, `Roughness`, `Metallic`, `AO` y `Emissive` en Base64 PNG + metadatos `SurfaceAppearance` para 12 patrones de superficie.
+- **Validación No Manipulable (`anatomicalQualityValidator.ts`, `visualBenchmarkSuite.ts`):** Evalúa no-circularidad geométrica real, continuidad 3D entre partes, apoyo en `Y=0` y riqueza de materiales/PBR (penalizando abuso de `SmoothPlastic` y geometrías primitivas).

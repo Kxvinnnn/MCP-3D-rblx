@@ -48,6 +48,7 @@ export interface LodMeshBuffer {
   uvs: [number, number][];
   faces: [number, number, number][];
   indices: number[];
+  vertexColors?: [number, number, number][];
 }
 
 export interface LodLevelDescriptor extends LodMeshBuffer {

@@ -39,11 +39,18 @@ import {
   validateAndSanitizeDirectorBlueprint,
 } from './aiGenerationDirector.ts';
 import {
+  analyzeMultiViewReferenceImages,
   analyzeReferenceImageBase64,
   evaluateReferenceVsModelMetrics,
   type ReferenceImageAnalysis,
   type ReferenceImageComparisonMetrics,
 } from './imageReferenceProcessor.ts';
+import {
+  buildAssetPbrTextureCatalog,
+  type TextureResolution,
+  type VisualStyleId,
+} from './pbrTextureEngine.ts';
+import { validateAssetAnatomyAndQuality } from './anatomicalQualityValidator.ts';
 import {
   buildPartsFromSpecializedEngine,
   computeBudgetAllocationProfile,
@@ -116,6 +123,8 @@ export interface Procedural3DGenerationRequest {
   category?: string;
   sub_category?: string;
   style?: string;
+  visual_style?: VisualStyleId;
+  texture_resolution?: TextureResolution;
   asset_type?: 'Model3D' | 'Scene3D';
   generation_mode?: GenerationExecutionMode;
   collision_fidelity?: 'Hull' | 'Box' | 'PreciseConvexDecomposition' | 'Default';
@@ -126,6 +135,7 @@ export interface Procedural3DGenerationRequest {
   preset_params?: TreeProceduralParams & Record<string, any>;
   manually_edited_fields?: string[];
   reference_image_base64?: string;
+  reference_images_multi?: string[];
   ai_director_blueprint?: Partial<AiDirectorBlueprint>;
   director_blueprint?: Partial<AiDirectorBlueprint>;
   execution_report?: Partial<EngineExecutionReport>;
@@ -2118,10 +2128,15 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   const collisionFidelity = req.collision_fidelity || 'Hull';
   const assetType = req.asset_type || 'Model3D';
 
+  const multiViews = Array.isArray(req.reference_images_multi)
+    ? req.reference_images_multi.filter((img) => typeof img === 'string' && img.trim().length > 16)
+    : [];
   const referenceAnalysis: ReferenceImageAnalysis | null =
-    typeof req.reference_image_base64 === 'string' && req.reference_image_base64.trim().length > 16
-      ? analyzeReferenceImageBase64(req.reference_image_base64)
-      : null;
+    multiViews.length >= 2
+      ? analyzeMultiViewReferenceImages(multiViews)
+      : typeof req.reference_image_base64 === 'string' && req.reference_image_base64.trim().length > 16
+        ? analyzeReferenceImageBase64(req.reference_image_base64)
+        : null;
 
   const promptTreeParsed =
     canonicalCategory === 'Trees & Vegetation' && req.prompt
@@ -2447,6 +2462,37 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
       ? `universal_freeform_3d_engine:${semanticInterpretation.archetype}`
       : `specialized_geometry_engine:${objFam}`;
 
+  const resolvedVisualStyle: VisualStyleId =
+    req.visual_style ||
+    (typeof req.style === 'string' &&
+    [
+      'realistic',
+      'semi_realistic',
+      'stylized',
+      'cartoon',
+      'low_poly',
+      'anime',
+      'fantasy',
+      'sci_fi',
+      'medieval',
+      'custom',
+    ].includes(req.style.toLowerCase())
+      ? (req.style.toLowerCase() as VisualStyleId)
+      : 'stylized');
+  const resolvedTextureRes: TextureResolution =
+    req.texture_resolution === 512 || req.texture_resolution === 1024 ? req.texture_resolution : 256;
+  const pbrTextures = buildAssetPbrTextureCatalog(normalizedParts, {
+    resolution: resolvedTextureRes,
+    style: resolvedVisualStyle,
+    seed: String(seed),
+  });
+  const anatomicalValidation = validateAssetAnatomyAndQuality({
+    prompt: req.prompt,
+    objectType: generated.blueprint.identity.object_family,
+    parts: normalizedParts,
+    pbr_textures: pbrTextures,
+  });
+
   const baseAsset: Record<string, any> = {
     id: deterministicId,
     forgeAssetId: deterministicId,
@@ -2458,6 +2504,11 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     name: safeModelName,
     model_name: safeModelName,
     category: canonicalCategory,
+    visual_style: resolvedVisualStyle,
+    texture_resolution: resolvedTextureRes,
+    texture_source: pbrTextures.textureSource,
+    pbr_textures: pbrTextures,
+    anatomical_validation: anatomicalValidation,
     asset_type: isSceneRequest ? 'Scene3D' : generated.blueprint.identity.asset_type || effectiveAssetType,
     generation_mode: resolvedMode,
     engine_used: engineUsed,

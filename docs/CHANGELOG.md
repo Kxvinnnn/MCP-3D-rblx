@@ -4,6 +4,25 @@ Todos los hitos verificados del sistema, incluyendo la evolución reciente de **
 
 ---
 
+## [Transformación Estudio 3D — Rama `feat/3d-studio-transformation`]
+
+### Agregado y Evolucionado
+- **Motor PBR Nativo de Servidor (`src/server/engines/pbrTextureEngine.ts`):**
+  - Codificador RGBA PNG determinista en Node (`zlib.deflateSync` + CRC32) que genera mapas reales `Albedo`, `Normal`, `Roughness`, `Metallic`, `AO` y `Emissive` en resoluciones `256×256`, `512×512` y `1024×1024` px para 12 patrones de superficie (`organic_fur_coat`, `organic_bark`, `organic_foliage`, `weathered_stone`, `carved_wood`, `brushed_metal`, `carbon_fiber`, `ceramic_hoof_horn`, `glass_visor`, `fabric_cloth`, `fantasy_crystal`, `automotive_clearcoat`) junto con metadatos `SurfaceAppearance`.
+- **Esculpido Anatómico No-Circular y `vertexColors` (`src/server/engines/universalFreeform3DEngine.ts`):**
+  - Nuevos perfiles transversales esculpidos (`equine_torso`, `equine_neck`, `equine_head`, `organic_ribcage`, `mane_crest`, `aerodynamic_hull`, `blade_keel`) en `buildSplineLoftedOrganMesh` con sombreado orgánico por vértice (`vertexColors`).
+  - Eliminación de `SmoothPlastic` en cuadrúpedos (reemplazado por `Fabric`, `Sand`, `Marble`, `Glass`), adición de `Mane_Forelock` en caballos, alerón/barra LED y carrocería `Metal` aerodinámica en deportivos futuristas, y corrección de las coordenadas globales de `Udder_Ventral` en la vaca.
+- **Validador Anatómico Real y Benchmark No Manipulable (`src/server/engines/anatomicalQualityValidator.ts`, `src/server/engines/visualBenchmarkSuite.ts`):**
+  - `validateAssetAnatomyAndQuality` mide no-circularidad geométrica, continuidad 3D entre piezas (detectando piezas flotantes), apoyo `Y=0`, diversidad material/PBR y proporciones de categoría; `evaluateAssetQualityMetrics` ya no premia conteos inflados de partes ni `SmoothPlastic`.
+- **Image-to-3D Multi-Vista con Incertidumbre Honesta (`src/server/engines/imageReferenceProcessor.ts`):**
+  - Soporte `reference_images_multi` mediante `analyzeMultiViewReferenceImages` y reporte explícito `uncertaintyReport` (`viewCount`, `hiddenSidesInferred`, `confidence`, `limitationNote`).
+- **Visor 3D y Wizard UI (`src/utils/3d/pbrTextures.ts`, `src/components/RobloxWorldViewport3D.tsx`, `src/components/views/CreateWizardView.tsx`):**
+  - Eliminado el fallback de caja cian en `pbrTextures.ts` y activado PBR en `Natural`; nuevos selectores `visualStyle` (10 estilos) y `textureResolution` (`256`/`512`/`1024`) más telemetría `texture_source` y `anatomical_validation`.
+- **Suite de Verificación (`tests/studio3DTransformation.test.ts`):**
+  - Validación de los 6 casos obligatorios (`Horse`, `Cow`, `Fantasy Tree`, `Futuristic Sports Car`, `Medieval House`, `Arbitrary Telescope`), rechazo del falso caballo primitivo, 7 variaciones y capturas SVG de 5 ángulos en `docs/benchmarks/`.
+
+---
+
 ## [Misión Integral — Rama `feat/mision-integral-3d-engine-docs`]
 
 ### Agregado y Evolucionado

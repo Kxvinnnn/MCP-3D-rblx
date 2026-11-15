@@ -413,15 +413,12 @@ export const RobloxWorldViewport3D: React.FC<RobloxWorldViewport3DProps> = ({
     }
 
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
-    const pbrTextures =
-      pbrPattern && pbrPattern !== 'Natural'
-        ? generateProceduralPBRTextures(
-            pbrPattern,
-            asset.pbr_profile?.albedo_hex || '#64748b',
-            asset.pbr_profile?.emissive_hex || '#06b6d4',
-            maxAniso
-          )
-        : null;
+    const pbrTextures = generateProceduralPBRTextures(
+      pbrPattern || 'Natural',
+      asset.pbr_profile?.albedo_hex || '#d8d4cc',
+      asset.pbr_profile?.emissive_hex || '#06b6d4',
+      maxAniso
+    );
 
     const { group, triangleCount, partCount } = buildThreeGroupFromAsset(asset, {
       lodRatio,
