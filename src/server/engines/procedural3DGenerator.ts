@@ -47,6 +47,11 @@ import {
   buildPartsFromSpecializedEngine,
   computeBudgetAllocationProfile,
 } from './specializedGeometryGenerators.ts';
+import {
+  evaluateSemanticVisualIdentity,
+  interpretPromptSemantics,
+  renderMultiAngleSvgSnapshots,
+} from './universalFreeform3DEngine.ts';
 
 export const FORGE_ASSET_CATEGORIES = [
   'Props',
@@ -1813,6 +1818,33 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     detail_level: effectiveDetailLevel,
   };
 
+  const semanticInterpretation = interpretPromptSemantics({
+    prompt: `${req.prompt || ''} ${req.sub_category || ''}`.trim() || safeModelName,
+    category: canonicalCategory,
+    name: safeModelName,
+    blueprint: generated.blueprint,
+  });
+  const visualIdentityEvaluation = evaluateSemanticVisualIdentity({
+    prompt: `${req.prompt || ''} ${req.sub_category || ''}`.trim() || safeModelName,
+    parts: normalizedParts,
+    interpretation: semanticInterpretation,
+  });
+  const multiAngleSnapshots = renderMultiAngleSvgSnapshots({
+    modelName: safeModelName,
+    subjectLabel: semanticInterpretation.subjectLabel,
+    parts: normalizedParts,
+  });
+
+  const objFam = generated.blueprint.identity.object_family;
+  const engineUsed =
+    objFam === 'quadruped_animal' ||
+    objFam === 'winged_creature' ||
+    objFam === 'biped_humanoid_or_statue' ||
+    objFam === 'wheeled_vehicle' ||
+    objFam === 'freeform_composite'
+      ? `universal_freeform_3d_engine:${semanticInterpretation.archetype}`
+      : `specialized_geometry_engine:${objFam}`;
+
   const baseAsset: Record<string, any> = {
     id: deterministicId,
     forgeAssetId: deterministicId,
@@ -1826,6 +1858,7 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     category: canonicalCategory,
     asset_type: isSceneRequest ? 'Scene3D' : generated.blueprint.identity.asset_type || effectiveAssetType,
     generation_mode: resolvedMode,
+    engine_used: engineUsed,
     seed: String(seed),
     ...(canonicalCategory === 'Trees & Vegetation'
       ? { tree_params: { seed, ...req.tree_params } }
@@ -1842,6 +1875,9 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     ai_director_blueprint: generated.blueprint,
     director_blueprint: generated.blueprint,
     execution_report: executionReport,
+    semantic_interpretation: semanticInterpretation,
+    visual_identity_evaluation: visualIdentityEvaluation,
+    multi_angle_snapshots: multiAngleSnapshots,
     ...(referenceAnalysis
       ? {
           reference_image_analysis: referenceAnalysis,

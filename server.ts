@@ -32,9 +32,15 @@ import {
 } from './src/server/engines/imageReferenceProcessor.ts';
 import {
   runVisualBenchmarkSuite,
+  runFreeformGeneralizationBenchmarkSuite,
   getBenchmarkCaseById,
   CANONICAL_VISUAL_BENCHMARK_CASES,
+  FREEFORM_GENERALIZATION_BENCHMARK_CASES,
 } from './src/server/engines/visualBenchmarkSuite.ts';
+import {
+  EXTERNAL_3D_MODELS_COMPARISON_MATRIX,
+  getExternal3DAdapterStatus,
+} from './src/server/engines/external3DModelAdapter.ts';
 import {
   AI_MODULE_CONTRACTS,
   buildAiSelfUnderstandingManifest,
@@ -3824,7 +3830,40 @@ app.get('/api/v1/benchmarks/visual-suite', (req, res) => {
 });
 
 app.get('/api/v1/benchmarks/cases', (_req, res) => {
-  res.json({ cases: CANONICAL_VISUAL_BENCHMARK_CASES });
+  res.json({
+    cases: CANONICAL_VISUAL_BENCHMARK_CASES,
+    generalization_cases: FREEFORM_GENERALIZATION_BENCHMARK_CASES,
+  });
+});
+
+app.get('/api/v1/benchmarks/generalization-suite', (req, res) => {
+  try {
+    const includeGeometry = String(req.query.include_geometry || 'false').toLowerCase() === 'true';
+    const report = runFreeformGeneralizationBenchmarkSuite();
+    if (!includeGeometry) {
+      const compactCases = report.cases.map((c) => ({
+        ...c,
+        semanticEvaluation: c.synthesis?.visual_identity_evaluation,
+        engineUsed: c.synthesis?.engine_used,
+        multiAngleSnapshots: c.synthesis?.multi_angle_snapshots,
+        synthesis: undefined,
+      }));
+      return res.json({
+        ...report,
+        cases: compactCases,
+      });
+    }
+    res.json(report);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/v1/3d-models/open-source-evaluation', (_req, res) => {
+  res.json({
+    models: EXTERNAL_3D_MODELS_COMPARISON_MATRIX,
+    adapter_status: getExternal3DAdapterStatus(),
+  });
 });
 
 app.post('/api/v1/benchmarks/generate-case', (req, res) => {
@@ -3834,7 +3873,10 @@ app.post('/api/v1/benchmarks/generate-case', (req, res) => {
     if (!benchmarkCase) {
       return res.status(404).json({
         error: `Caso de benchmark '${case_id}' no encontrado.`,
-        available_cases: CANONICAL_VISUAL_BENCHMARK_CASES.map((c) => c.id),
+        available_cases: [
+          ...CANONICAL_VISUAL_BENCHMARK_CASES.map((c) => c.id),
+          ...FREEFORM_GENERALIZATION_BENCHMARK_CASES.map((c) => c.id),
+        ],
       });
     }
     const asset = { ...benchmarkCase.synthesis };

@@ -16,12 +16,29 @@
  *    jamás simular que la IA se ejecutó cuando no lo hizo.
  */
 
-import { Type, type GoogleGenAI } from '@google/genai';
+import type { GoogleGenAI } from '@google/genai';
 import type { ReferenceImageAnalysis } from './imageReferenceProcessor.ts';
+import {
+  interpretPromptSemantics,
+  planGeometryAndComponents,
+} from './universalFreeform3DEngine.ts';
+
+const SchemaType = {
+  OBJECT: 'OBJECT',
+  STRING: 'STRING',
+  NUMBER: 'NUMBER',
+  INTEGER: 'INTEGER',
+  BOOLEAN: 'BOOLEAN',
+  ARRAY: 'ARRAY',
+} as const;
 
 export type GenerationExecutionMode = 'procedural' | 'ai' | 'hybrid' | 'image_to_3d';
 
 export type SpecializedObjectFamily =
+  | 'quadruped_animal'
+  | 'winged_creature'
+  | 'biped_humanoid_or_statue'
+  | 'wheeled_vehicle'
   | 'tree'
   | 'rock'
   | 'building'
@@ -31,7 +48,8 @@ export type SpecializedObjectFamily =
   | 'mechanical'
   | 'chest_or_prop'
   | 'scene'
-  | 'image_lathe';
+  | 'image_lathe'
+  | 'freeform_composite';
 
 export type TreeSpeciesArchetype = 'oak' | 'pine' | 'willow' | 'dead' | 'fantasy' | 'bonsai';
 
@@ -73,6 +91,11 @@ export interface AiDirectorBlueprint {
   };
   visual_style: 'stylized_realism' | 'low_poly' | 'fantasy' | 'medieval' | 'sci_fi' | 'industrial' | 'organic';
   primary_silhouette:
+    | 'quadruped_articulated_anatomy'
+    | 'winged_reptilian_anatomy'
+    | 'biped_sculpted_anatomy'
+    | 'tandem_wheeled_chassis'
+    | 'freeform_synthesized_graph'
     | 'spherical_crown'
     | 'conical_tiered'
     | 'weeping_canopy'
@@ -249,6 +272,7 @@ export function inferSpecializedObjectFamily(params: {
 }): {
   family: SpecializedObjectFamily;
   treeSpecies: TreeSpeciesArchetype;
+  subtype?: string;
 } {
   const text = `${params.prompt || ''} ${params.category || ''}`.toLowerCase();
   const cat = String(params.category || '').toLowerCase();
@@ -258,28 +282,63 @@ export function inferSpecializedObjectFamily(params: {
     params.asset_type === 'Scene3D' ||
     /\b(escenario|escena|scene|diorama|santuario\s+completo|aldea|plaza|campamento|ruinas\s+con)\b/i.test(text)
   ) {
-    return { family: 'scene', treeSpecies: 'oak' };
+    return { family: 'scene', treeSpecies: 'oak', subtype: 'scene' };
   }
 
-  // Check specific furniture/prop/mechanical families in prompt before generic category fallback
+  // 1. Winged Mythic Creatures (Dragons, Wyverns, Griffins)
+  if (/\b(drag[oó]n|dragon|wyvern|drake|guiverno|criatura\s+alada|winged\s+beast|grifo|griffin)\b/i.test(text)) {
+    return { family: 'winged_creature', treeSpecies: 'oak', subtype: 'winged_dragon' };
+  }
+
+  // 2. Quadruped Animals (Cows, Horses, Dogs, Wolves, Cats, Deer, Bears, Sheep, Goats, etc.)
+  if (
+    /\b(vaca|vacas|cow|cows|bovino|bovina|bovine|toro|bull|becerro|calf|holstein|caballo|caballos|horse|stallion|mare|yegua|potro|pony|equino|corcel|perro|perros|dog|hound|lobo|wolf|cachorro|puppy|canino|canine|husky|pastor\s+alem[aá]n|zorro|fox|gato|cat|le[oó]n|lion|tigre|tiger|pantera|panther|ciervo|venado|deer|stag|oso|bear|cerdo|pig|oveja|sheep|cabra|goat|animal|cuadr[uú]pedo|quadruped)\b/i.test(
+      text
+    )
+  ) {
+    const sem = interpretPromptSemantics({ prompt: text, category: params.category });
+    return { family: 'quadruped_animal', treeSpecies: 'oak', subtype: sem.archetype };
+  }
+
+  // 3. Wheeled Vehicles & Motorcycles (Motorcycles, Bikes, Cars, Trucks)
+  if (
+    /\b(motocicleta|moto|motorcycle|motorbike|chopper|scooter|bicicleta|bike|coche|auto|car|veh[ií]culo|vehicle|camioneta|truck)\b/i.test(
+      text
+    )
+  ) {
+    const sem = interpretPromptSemantics({ prompt: text, category: params.category });
+    return { family: 'wheeled_vehicle', treeSpecies: 'oak', subtype: sem.archetype };
+  }
+
+  // 4. Biped Humanoids & Human Statues
+  if (
+    /\b(estatua|statue|escultura|sculpture|humano|humana|human|persona|person|guerrero|warrior|caballero|knight|mago|mage|personaje|character|avatar|monumento)\b/i.test(
+      text
+    )
+  ) {
+    const sem = interpretPromptSemantics({ prompt: text, category: params.category });
+    return { family: 'biped_humanoid_or_statue', treeSpecies: 'oak', subtype: sem.archetype };
+  }
+
+  // 5. Check specific furniture/prop/mechanical families in prompt before generic category fallback
   if (/\b(silla|chair|trono|throne|butaca|asiento|stool|taburete|banco)\b/i.test(text)) {
-    return { family: 'chair', treeSpecies: 'oak' };
+    return { family: 'chair', treeSpecies: 'oak', subtype: 'chair' };
   }
   if (/\b(l[aá]mpara|lamp|farol|lantern|linterna|antorcha|candil|street\s*light|luminaria|baliza)\b/i.test(text)) {
-    return { family: 'lamp', treeSpecies: 'oak' };
+    return { family: 'lamp', treeSpecies: 'oak', subtype: 'lamp' };
   }
   if (
     /\b(mec[aá]nic[oa]|mechanical|engranaje|gear|gearbox|m[aá]quina|machine|turbina|turbine|generador|generator|motor|pist[oó]n|robot|aut[oó]mata|torreta|turret)\b/i.test(
       text
     )
   ) {
-    return { family: 'mechanical', treeSpecies: 'oak' };
+    return { family: 'mechanical', treeSpecies: 'oak', subtype: 'mechanical' };
   }
   if (/\b(mesa|table|escritorio|desk|mostrador|workbench|banquete)\b/i.test(text)) {
-    return { family: 'table', treeSpecies: 'oak' };
+    return { family: 'table', treeSpecies: 'oak', subtype: 'table' };
   }
 
-  // Trees & Vegetation
+  // 6. Trees & Vegetation
   if (
     cat.includes('tree') ||
     cat.includes('vegeta') ||
@@ -303,10 +362,21 @@ export function inferSpecializedObjectFamily(params: {
     } else if (/\b(bons[aá]i|pagoda|capas|escalonado)\b/i.test(text)) {
       species = 'bonsai';
     }
-    return { family: 'tree', treeSpecies: species };
+    return { family: 'tree', treeSpecies: species, subtype: species };
   }
 
-  // Rocks & Nature
+  // 7. Buildings & Structures (checked before Rocks so "casa con cimiento de piedra" resolves to building)
+  if (
+    cat.includes('building') ||
+    cat.includes('structure') ||
+    /\b(edificio|building|torre|tower|casa|house|castillo|castle|templo|temple|fortaleza|caba[ñn]a|fachada|muralla|arco|pabell[oó]n|keep|bunker)\b/i.test(
+      text
+    )
+  ) {
+    return { family: 'building', treeSpecies: 'oak', subtype: 'building' };
+  }
+
+  // 8. Rocks & Nature
   if (
     cat.includes('rock') ||
     cat.includes('nature') ||
@@ -314,36 +384,34 @@ export function inferSpecializedObjectFamily(params: {
       text
     )
   ) {
-    return { family: 'rock', treeSpecies: 'oak' };
+    return { family: 'rock', treeSpecies: 'oak', subtype: 'rock' };
   }
 
-  // Buildings & Structures
-  if (
-    cat.includes('building') ||
-    cat.includes('structure') ||
-    /\b(edificio|building|torre|tower|casa|house|castillo|castle|templo|temple|fortaleza|caba[ñn]a| fachada|muralla|arco|pabell[oó]n|keep|bunker)\b/i.test(
-      text
-    )
-  ) {
-    return { family: 'building', treeSpecies: 'oak' };
+  // 9. Explicit Chest / Crate / Coffer
+  if (/\b(cofre|chest|ba[uú]l|crate|caja|relicario|tesoro)\b/i.test(text)) {
+    return { family: 'chest_or_prop', treeSpecies: 'oak', subtype: 'chest' };
   }
 
-  // Category-level fallbacks for Furniture, Ambient, Scene Elements, Props
+  // Category-level fallbacks for Furniture, Ambient, Scene Elements
   if (cat.includes('furniture') || cat.includes('interior')) {
-    return { family: 'chair', treeSpecies: 'oak' };
+    return { family: 'chair', treeSpecies: 'oak', subtype: 'chair' };
   }
   if (cat.includes('ambient') || cat.includes('decoration')) {
-    return { family: 'lamp', treeSpecies: 'oak' };
+    return { family: 'lamp', treeSpecies: 'oak', subtype: 'lamp' };
   }
   if (cat.includes('scene')) {
-    return { family: 'scene', treeSpecies: 'oak' };
+    return { family: 'scene', treeSpecies: 'oak', subtype: 'scene' };
   }
 
   if (params.referenceAnalysis) {
-    return { family: 'image_lathe', treeSpecies: 'oak' };
+    return { family: 'image_lathe', treeSpecies: 'oak', subtype: 'image_lathe' };
   }
 
-  return { family: 'chest_or_prop', treeSpecies: 'oak' };
+  if (params.prompt && params.prompt.trim().length > 0 && !/\b(props|prop)\b/i.test(params.prompt.trim())) {
+    return { family: 'freeform_composite', treeSpecies: 'oak', subtype: 'freeform_synthesized_object' };
+  }
+
+  return { family: 'chest_or_prop', treeSpecies: 'oak', subtype: 'chest' };
 }
 
 /**
@@ -860,6 +928,76 @@ export function buildBaselineDirectorBlueprint(params: {
         lod_priority: 'secondary_structure',
       }
     );
+  } else if (
+    family === 'quadruped_animal' ||
+    family === 'winged_creature' ||
+    family === 'wheeled_vehicle' ||
+    family === 'biped_humanoid_or_statue' ||
+    family === 'freeform_composite'
+  ) {
+    const sem = interpretPromptSemantics({
+      prompt: rawPrompt,
+      category: params.category,
+      name: params.name,
+    });
+    const freeformPlan = planGeometryAndComponents(sem, cleanName);
+    width = sem.proportionsStuds.widthX;
+    height = sem.proportionsStuds.heightY;
+    depth = sem.proportionsStuds.lengthZ;
+    primaryHex = sem.palette.primaryHex;
+    secondaryHex = sem.palette.secondaryHex;
+    accentHex = sem.palette.accentHex;
+    primaryMat =
+      family === 'wheeled_vehicle'
+        ? 'Metal'
+        : family === 'biped_humanoid_or_statue' && sem.archetype === 'human_statue'
+          ? 'Marble'
+          : family === 'winged_creature'
+            ? 'Slate'
+            : 'SmoothPlastic';
+    secondaryMat =
+      family === 'wheeled_vehicle'
+        ? 'Slate'
+        : family === 'biped_humanoid_or_statue'
+          ? 'Cobblestone'
+          : 'SmoothPlastic';
+    accentMat = family === 'wheeled_vehicle' || family === 'winged_creature' ? 'Neon' : 'SmoothPlastic';
+    silhouette =
+      family === 'quadruped_animal'
+        ? 'quadruped_articulated_anatomy'
+        : family === 'winged_creature'
+          ? 'winged_reptilian_anatomy'
+          : family === 'biped_humanoid_or_statue'
+            ? 'biped_sculpted_anatomy'
+            : family === 'wheeled_vehicle'
+              ? 'tandem_wheeled_chassis'
+              : 'freeform_synthesized_graph';
+    hierarchyPlan = freeformPlan.skeletonHierarchy;
+    for (const c of freeformPlan.components) {
+      components.push({
+        id: c.id,
+        name: c.name,
+        role:
+          c.semanticRole === 'torso' || c.semanticRole === 'fuel_tank_or_body'
+            ? 'trunk_or_core'
+            : c.semanticRole === 'hoof_or_paw' || c.semanticRole === 'wheel_tire' || c.semanticRole === 'pedestal_plinth'
+              ? 'foundation'
+              : c.semanticRole === 'head_cranium' || c.semanticRole === 'wing_membrane'
+                ? 'crown_or_roof'
+                : c.semanticRole === 'headlight_or_lamp' || c.semanticRole === 'eye'
+                  ? 'lighting'
+                  : 'branch_or_frame',
+        parent_path: c.hierarchyPath,
+        relative_height_range: [0, 1],
+        width_ratio: Number((c.size[0] / Math.max(1, width)).toFixed(2)),
+        material: c.material,
+        color_hex: c.colorHex,
+        lod_priority:
+          c.semanticRole === 'coat_spot_patch' || c.semanticRole === 'eye'
+            ? 'fine_detail'
+            : 'critical_silhouette',
+      });
+    }
   } else {
     height = 4.8;
     width = 6.2;
@@ -891,6 +1029,16 @@ export function buildBaselineDirectorBlueprint(params: {
   const finalW = Number(width.toFixed(2));
   const finalH = Number(height.toFixed(2));
   const finalD = Number(depth.toFixed(2));
+  const inferredSubtype =
+    family === 'tree'
+      ? treeSpecies
+      : family === 'quadruped_animal' ||
+          family === 'winged_creature' ||
+          family === 'wheeled_vehicle' ||
+          family === 'biped_humanoid_or_statue' ||
+          family === 'freeform_composite'
+        ? interpretPromptSemantics({ prompt: rawPrompt, category: params.category, name: params.name }).archetype
+        : family;
 
   return {
     schema_version: 'forge-director-v3',
@@ -914,7 +1062,7 @@ export function buildBaselineDirectorBlueprint(params: {
       object_family: family,
       category: params.category || 'Props',
       asset_type: family === 'scene' ? 'Scene3D' : params.asset_type || 'Model3D',
-      species_or_subtype: family === 'tree' ? treeSpecies : family,
+      species_or_subtype: inferredSubtype,
     },
     visual_style: treeSpecies === 'fantasy' ? 'fantasy' : detailLevel === 'low' ? 'low_poly' : 'stylized_realism',
     primary_silhouette: silhouette,
@@ -932,9 +1080,14 @@ export function buildBaselineDirectorBlueprint(params: {
       primary_hex: primaryHex,
       secondary_hex: secondaryHex,
       accent_hex: accentHex,
-      roughness: family === 'mechanical' || family === 'lamp' ? 0.35 : 0.78,
-      metalness: family === 'mechanical' || family === 'lamp' ? 0.72 : 0.08,
-      pbr_pattern: family === 'mechanical' ? 'BrushedTitanium' : 'OrganicGrain',
+      roughness: family === 'mechanical' || family === 'lamp' || family === 'wheeled_vehicle' ? 0.35 : 0.78,
+      metalness: family === 'mechanical' || family === 'lamp' || family === 'wheeled_vehicle' ? 0.72 : 0.08,
+      pbr_pattern:
+        family === 'mechanical' || family === 'wheeled_vehicle'
+          ? 'BrushedTitanium'
+          : family === 'quadruped_animal' && inferredSubtype === 'bovine_cow'
+            ? 'PiebaldBovineCoat'
+            : 'OrganicGrain',
     },
     detail_level: detailLevel,
     target_poly_budget: targetPolyBudget,
@@ -1167,28 +1320,30 @@ export async function requestGeminiDirectorBlueprint(params: {
   const modelToUse = params.modelName || 'gemini-4-hydrogen';
 
   const schema = {
-    type: Type.OBJECT,
+    type: SchemaType.OBJECT,
     properties: {
-      name: { type: Type.STRING },
+      name: { type: SchemaType.STRING },
       object_family: {
-        type: Type.STRING,
-        description: 'tree | rock | building | chair | table | lamp | mechanical | chest_or_prop | scene | image_lathe',
+        type: SchemaType.STRING,
+        description:
+          'quadruped_animal | winged_creature | biped_humanoid_or_statue | wheeled_vehicle | tree | rock | building | chair | table | lamp | mechanical | chest_or_prop | scene | image_lathe | freeform_composite',
       },
       species_or_subtype: {
-        type: Type.STRING,
-        description: 'oak | pine | willow | dead | fantasy | bonsai | tower | lantern | gearbox | throne',
+        type: SchemaType.STRING,
+        description:
+          'bovine_cow | equine_horse | canine_dog | winged_dragon | motorcycle | human_statue | oak | pine | willow | dead | fantasy | bonsai | tower | lantern | gearbox | throne',
       },
-      width_studs: { type: Type.NUMBER },
-      height_studs: { type: Type.NUMBER },
-      depth_studs: { type: Type.NUMBER },
-      primary_material: { type: Type.STRING },
-      secondary_material: { type: Type.STRING },
-      accent_material: { type: Type.STRING },
-      primary_hex: { type: Type.STRING },
-      secondary_hex: { type: Type.STRING },
-      accent_hex: { type: Type.STRING },
-      roughness: { type: Type.NUMBER },
-      metalness: { type: Type.NUMBER },
+      width_studs: { type: SchemaType.NUMBER },
+      height_studs: { type: SchemaType.NUMBER },
+      depth_studs: { type: SchemaType.NUMBER },
+      primary_material: { type: SchemaType.STRING },
+      secondary_material: { type: SchemaType.STRING },
+      accent_material: { type: SchemaType.STRING },
+      primary_hex: { type: SchemaType.STRING },
+      secondary_hex: { type: SchemaType.STRING },
+      accent_hex: { type: SchemaType.STRING },
+      roughness: { type: SchemaType.NUMBER },
+      metalness: { type: SchemaType.NUMBER },
     },
     required: [
       'name',
@@ -1218,7 +1373,7 @@ export async function requestGeminiDirectorBlueprint(params: {
     }
     contents.push({
       text: `Actúa como el Director de Generación 3D de Nightmare Forge para Roblox Studio.
-Analiza la solicitud y devuelve el plan estructurado JSON (proporciones en Studs, familia geométrica, materiales Roblox y paleta hexadecimal #RRGGBB):
+Analiza la solicitud y devuelve el plan estructurado JSON (proporciones en Studs, familia geométrica, subtipo anatómico/estructural, materiales Roblox y paleta hexadecimal #RRGGBB):
 Prompt: ${params.prompt}
 Categoría: ${params.category || 'Props'}
 Tipo: ${params.asset_type || 'Model3D'}
@@ -1230,7 +1385,7 @@ Presupuesto poligonal objetivo: ${baseline.target_poly_budget} triángulos.`,
       contents: contents.length === 1 ? contents[0].text : { parts: contents },
       config: {
         responseMimeType: 'application/json',
-        responseSchema: schema,
+        responseSchema: schema as any,
       },
     });
 

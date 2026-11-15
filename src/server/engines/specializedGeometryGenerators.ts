@@ -36,6 +36,11 @@
 
 import type { AiDirectorBlueprint, SpecializedObjectFamily, TreeSpeciesArchetype } from './aiGenerationDirector.ts';
 import type { ReferenceImageAnalysis } from './imageReferenceProcessor.ts';
+import {
+  generateReal3DMeshesFromPlan,
+  interpretPromptSemantics,
+  planGeometryAndComponents,
+} from './universalFreeform3DEngine.ts';
 
 export interface LodMeshBuffer {
   vertices: [number, number, number][];
@@ -3202,7 +3207,50 @@ export function buildPartsFromSpecializedEngine(params: {
         seed,
       });
       break;
-    default:
+    case 'quadruped_animal':
+    case 'winged_creature':
+    case 'biped_humanoid_or_statue':
+    case 'wheeled_vehicle':
+    case 'freeform_composite': {
+      const interpretation = interpretPromptSemantics({
+        prompt: prompt || blueprint.identity.species_or_subtype || modelName,
+        category: blueprint.identity.category,
+        name: modelName,
+        blueprint,
+      });
+      const plan = planGeometryAndComponents(interpretation, seed);
+      rawParts = generateReal3DMeshesFromPlan({
+        modelName,
+        plan,
+        budget,
+        collisionFidelity: blueprint.roblox_constraints?.collision_fidelity || 'Hull',
+        activeLod,
+      });
+      return rawParts;
+    }
+    default: {
+      // Only use chest_or_prop if the prompt explicitly requests a chest/crate or generic prop without freeform identity
+      const promptText = String(prompt || '').toLowerCase();
+      if (
+        promptText.length > 0 &&
+        !/\b(cofre|chest|ba[uú]l|crate|caja|relicario|props|prop)\b/i.test(promptText)
+      ) {
+        const interpretation = interpretPromptSemantics({
+          prompt: promptText,
+          category: blueprint.identity.category,
+          name: modelName,
+          blueprint,
+        });
+        const plan = planGeometryAndComponents(interpretation, seed);
+        rawParts = generateReal3DMeshesFromPlan({
+          modelName,
+          plan,
+          budget,
+          collisionFidelity: blueprint.roblox_constraints?.collision_fidelity || 'Hull',
+          activeLod,
+        });
+        return rawParts;
+      }
       rawParts = generateSpecializedTableOrPropParts({
         modelName,
         family: 'chest_or_prop',
@@ -3210,6 +3258,7 @@ export function buildPartsFromSpecializedEngine(params: {
         budget,
       });
       break;
+    }
   }
 
   return applyActiveLodSelection(rawParts, activeLod);

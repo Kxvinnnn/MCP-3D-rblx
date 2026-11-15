@@ -583,6 +583,45 @@ export const CreateWizardView: React.FC = () => {
               </div>
             </div>
 
+            {/* MISIÓN CRÍTICA: Universal Freeform Generalization Suite (Vaca + 7 Objetos Libres) */}
+            <div className="bg-slate-950/90 border border-emerald-500/35 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <span className="text-xs font-extrabold text-emerald-300 uppercase tracking-wider block">
+                    Generación Libre de Objetos Arbitrarios (Vaca Anatómica + 7 Pruebas de Generalización)
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    Genera e inspecciona en 3D real animales cuadrúpedos, criaturas aladas, vehículos y estatuas sin plantillas rígidas:
+                  </span>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { id: 'bovine_cow_acceptance', label: 'Vaca Adulta (Obligatorio)', sub: '4 Patas + Manchas B/N + Cuernos' },
+                  { id: 'generalization_horse', label: '1. Caballo Adulto', sub: 'Cuello Arqueado + Crin + Cascos' },
+                  { id: 'generalization_dog', label: '2. Perro Anatómico', sub: 'Tórax + Hocico + 4 Patas' },
+                  { id: 'generalization_dragon', label: '3. Dragón Alado', sub: '2 Alas + Cuernos + 4 Patas' },
+                  { id: 'generalization_motorcycle', label: '4. Motocicleta 3D', sub: '2 Ruedas Toroidales + Motor' },
+                  { id: 'generalization_human_statue', label: '5. Estatua Humana', sub: 'Pedestal + 2 Brazos + 2 Piernas' },
+                  { id: 'generalization_fantasy_tree', label: '6. Árbol Fantástico', sub: 'Raíces + Cristales + Copa' },
+                  { id: 'generalization_medieval_house', label: '7. Casa Medieval', sub: 'Fachada + Arco + Tejado' },
+                ].map((bm) => (
+                  <button
+                    key={bm.id}
+                    type="button"
+                    disabled={loadingBenchmarkId !== null}
+                    onClick={() => handleLoadBenchmarkCase(bm.id)}
+                    className="p-2.5 rounded-xl bg-slate-900 hover:bg-emerald-950/50 border border-slate-800 hover:border-emerald-500/50 text-left transition cursor-pointer disabled:opacity-50"
+                  >
+                    <div className="text-xs font-bold text-white truncate">
+                      {loadingBenchmarkId === bm.id ? 'Generando...' : bm.label}
+                    </div>
+                    <div className="text-[10px] text-emerald-400 font-mono truncate">{bm.sub}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
               <button
                 type="button"
@@ -1177,6 +1216,55 @@ export const CreateWizardView: React.FC = () => {
             <div className="w-full h-96 rounded-2xl overflow-hidden border border-slate-800 bg-black/60 relative">
               <RobloxWorldViewport3D asset={generatedAsset} />
             </div>
+
+            {/* SECCIÓN 7: Evaluación Visual Multi-Ángulo y Fidelidad Semántica 3D */}
+            {(generatedAsset as any).visual_identity_evaluation && (generatedAsset as any).multi_angle_snapshots && (
+              <div className="bg-slate-950/90 border border-emerald-500/35 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <span className="text-xs font-extrabold text-emerald-300 uppercase tracking-wider block">
+                      Evaluación Visual Multi-Ángulo y Fidelidad Semántica 3D
+                    </span>
+                    <span className="text-[11px] text-slate-300">
+                      {(generatedAsset as any).visual_identity_evaluation.diagnosticSummary}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-950 border border-emerald-500/40 text-xs font-mono font-bold text-emerald-300">
+                      Score Semántico: {(generatedAsset as any).visual_identity_evaluation.overallScore}/100
+                    </span>
+                    {(generatedAsset as any).engine_used && (
+                      <span className="px-2.5 py-1 rounded-lg bg-cyan-950 border border-cyan-500/40 text-[11px] font-mono font-bold text-cyan-300">
+                        {(generatedAsset as any).engine_used}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { key: 'frontSvgDataUri', label: '1. Vista Frontal (+Z)' },
+                    { key: 'sideSvgDataUri', label: '2. Perfil Lateral (+X)' },
+                    { key: 'isometricSvgDataUri', label: '3. Vista 3/4 Isométrica' },
+                    { key: 'topSvgDataUri', label: '4. Vista Superior (+Y)' },
+                  ].map((view) => (
+                    <div
+                      key={view.key}
+                      className="bg-slate-900 border border-slate-800 rounded-xl p-2 space-y-1.5"
+                    >
+                      <img
+                        src={(generatedAsset as any).multi_angle_snapshots[view.key]}
+                        alt={view.label}
+                        className="w-full h-36 object-contain rounded-lg bg-slate-950"
+                      />
+                      <div className="text-[11px] font-bold text-slate-300 text-center font-mono">
+                        {view.label}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* 3 Colorful Next-Step Buttons */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">

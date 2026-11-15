@@ -321,8 +321,127 @@ export function evaluateBenchmarkCase(spec: BenchmarkCaseSpec): BenchmarkCaseRes
   };
 }
 
+export const MANDATORY_COW_ACCEPTANCE_PROMPT =
+  'Genera una vaca adulta de cuerpo completo, con anatomía bovina reconocible, cuatro patas proporcionadas, torso volumétrico, cuello, cabeza, hocico, dos orejas, dos cuernos, ojos, pezuñas y cola. Tiene manchas negras y blancas, pelaje estilizado y proporciones naturales. Modelo 3D completo, apoyado sobre el suelo, preparado para Roblox.';
+
+export const FREEFORM_GENERALIZATION_BENCHMARK_CASES: BenchmarkCaseSpec[] = [
+  {
+    id: 'bovine_cow_acceptance',
+    order: 1,
+    title: 'Caso Obligatorio — Vaca Adulta Completa (Anatomía Bovina, 4 Patas, Manchas Negras y Blancas)',
+    category: 'Props',
+    subCategory: 'bovine_cow',
+    objectFamily: 'quadruped_animal',
+    style: 'Stylized',
+    seed: 90101,
+    targetPolyBudget: 3400,
+    prompt: MANDATORY_COW_ACCEPTANCE_PROMPT,
+    generationMode: 'hybrid',
+  },
+  {
+    id: 'generalization_horse',
+    order: 2,
+    title: 'Generalización 1 — Caballo Adulto (Cuello Arqueado, Crin, 4 Patas con Cascos y Cola)',
+    category: 'Props',
+    subCategory: 'equine_horse',
+    objectFamily: 'quadruped_animal',
+    style: 'Stylized',
+    seed: 90202,
+    targetPolyBudget: 3200,
+    prompt:
+      'Genera un caballo adulto estilizado de cuerpo completo con cuatro patas proporcionadas, cascos, torso equino, cuello arqueado con crin dorsal, cabeza alargada, hocico, dos orejas erguidas, dos ojos y cola poblada, apoyado sobre el suelo para Roblox.',
+    generationMode: 'hybrid',
+  },
+  {
+    id: 'generalization_dog',
+    order: 3,
+    title: 'Generalización 2 — Perro / Cánido Anatómico (Tórax Profundo, Hocico con Trufa, 4 Patas y Cola)',
+    category: 'Props',
+    subCategory: 'canine_dog',
+    objectFamily: 'quadruped_animal',
+    style: 'Stylized',
+    seed: 90303,
+    targetPolyBudget: 2800,
+    prompt:
+      'Genera un perro pastor estilizado de cuerpo completo con cuatro patas articuladas, tórax profundo, cuello, cabeza canina, hocico alargado con trufa negra, dos orejas erguidas, dos ojos y cola elevada, apoyado en el suelo.',
+    generationMode: 'hybrid',
+  },
+  {
+    id: 'generalization_dragon',
+    order: 4,
+    title: 'Generalización 3 — Dragón Mítico Alado (2 Alas Membranosas, Cuernos, Crestas, 4 Patas y Cola)',
+    category: 'Props',
+    subCategory: 'winged_dragon',
+    objectFamily: 'winged_creature',
+    style: 'Medieval / Fantasy',
+    seed: 90404,
+    targetPolyBudget: 3800,
+    prompt:
+      'Genera un dragón mítico de cuerpo completo con torso reptiliano, cuello serpentino, cabeza con dos cuernos y mandíbula, dos ojos brillantes, dos grandes alas membranosas extendidas, cuatro patas con garras, crestas dorsales y cola larga.',
+    generationMode: 'hybrid',
+  },
+  {
+    id: 'generalization_motorcycle',
+    order: 5,
+    title: 'Generalización 4 — Motocicleta Deportiva (2 Ruedas Toroidales, Horquilla, Motor V-Twin y Escapes)',
+    category: 'Props',
+    subCategory: 'motorcycle',
+    objectFamily: 'wheeled_vehicle',
+    style: 'Realistic PBR',
+    seed: 90505,
+    targetPolyBudget: 3200,
+    prompt:
+      'Genera una motocicleta completa con dos ruedas toroidales y llantas metálicas, horquilla telescópica delantera, manillar, tanque de combustible en gota, bloque motor V-Twin, dos tubos de escape cromados, asiento ergonómico y faro delantero.',
+    generationMode: 'hybrid',
+  },
+  {
+    id: 'generalization_human_statue',
+    order: 6,
+    title: 'Generalización 5 — Estatua Humana Esculpida (Pedestal, Torso, Cabeza, 2 Brazos y 2 Piernas)',
+    category: 'Ambient & Decoration',
+    subCategory: 'human_statue',
+    objectFamily: 'biped_humanoid_or_statue',
+    style: 'Realistic PBR',
+    seed: 90606,
+    targetPolyBudget: 3200,
+    prompt:
+      'Genera una estatua humana clásica en mármol sobre pedestal escalonado de piedra, con pelvis, torso anatómico esculpido, cuello, cabeza humana, dos brazos articulados con manos y dos piernas articuladas con pies.',
+    generationMode: 'hybrid',
+  },
+  {
+    id: 'generalization_fantasy_tree',
+    order: 7,
+    title: 'Generalización 6 — Árbol Fantástico Bioluminiscente (Raíces, Tronco Orgánico y Ramificación)',
+    category: 'Trees & Vegetation',
+    subCategory: 'fantasy',
+    objectFamily: 'tree',
+    style: 'Sci-Fi / Neon',
+    seed: 90707,
+    targetPolyBudget: 2800,
+    prompt:
+      'Genera un árbol fantástico bioluminiscente con raíces superficiales orgánicas, tronco irregular con cristales arcanos, ramificación jerárquica recursiva y copa de follaje luminoso.',
+    generationMode: 'hybrid',
+  },
+  {
+    id: 'generalization_medieval_house',
+    order: 8,
+    title: 'Generalización 7 — Casa Medieval Modular (Cimiento de Piedra, Fachada, Puerta, Ventanas y Tejado)',
+    category: 'Buildings & Structures',
+    subCategory: 'medieval_house',
+    objectFamily: 'building',
+    style: 'Medieval / Fantasy',
+    seed: 90808,
+    targetPolyBudget: 2800,
+    prompt:
+      'Genera una casa medieval completa con cimiento de piedra escalonado, muros de fachada, puerta con arco de madera, ventanas enmarcadas con cristal, columnas esquineras y tejado inclinado a cuatro aguas.',
+    generationMode: 'hybrid',
+  },
+];
+
 export function getBenchmarkCaseById(caseId: string): BenchmarkCaseResult | null {
-  const spec = CANONICAL_VISUAL_BENCHMARK_CASES.find((c) => c.id === caseId);
+  const spec =
+    CANONICAL_VISUAL_BENCHMARK_CASES.find((c) => c.id === caseId) ||
+    FREEFORM_GENERALIZATION_BENCHMARK_CASES.find((c) => c.id === caseId);
   if (!spec) return null;
   return evaluateBenchmarkCase(spec);
 }
@@ -348,3 +467,34 @@ export function runVisualBenchmarkSuite(): VisualBenchmarkSuiteReport {
     cases,
   };
 }
+
+export function runFreeformGeneralizationBenchmarkSuite(): VisualBenchmarkSuiteReport & {
+  semanticPassCount: number;
+  allSemanticIdentityPassed: boolean;
+} {
+  const cases = FREEFORM_GENERALIZATION_BENCHMARK_CASES.map((spec) => evaluateBenchmarkCase(spec));
+  const passedCases = cases.filter(
+    (c) =>
+      c.validation.valid &&
+      c.editableMeshCompliant &&
+      c.degenerateTriangles === 0 &&
+      c.groundedAtZero &&
+      c.lodMetrics.monotonicReduction &&
+      c.partCount >= 6
+  ).length;
+  const semanticPassCount = cases.filter(
+    (c) => Boolean(c.synthesis?.visual_identity_evaluation?.passed)
+  ).length;
+
+  return {
+    suiteVersion: 'forge-visual-benchmark-v3',
+    generatedAt: new Date().toISOString(),
+    totalCases: cases.length,
+    passedCases,
+    allCasesPassed: passedCases === cases.length && semanticPassCount === cases.length,
+    semanticPassCount,
+    allSemanticIdentityPassed: semanticPassCount === cases.length,
+    cases,
+  };
+}
+
