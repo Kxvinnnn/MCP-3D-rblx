@@ -362,6 +362,57 @@ console.log(JSON.stringify({ orig, mut, lfHash, crlfHash }));
     assert ts_out["lfHash"] == compute_fnv1a_32_hex(luau_lf)
     assert ts_out["crlfHash"] == ts_out["lfHash"]
 
+    # Cross-engine RGB convention parity (`forge-color-v1`)
+    from engines.asset_engine import _normalize_color_rgb_255
+    rgb_vectors = [
+        {"color": [0, 0, 0], "colorSpace": None, "expected": [0, 0, 0]},
+        {"color": [0.5, 0.25, 0.75], "colorSpace": None, "expected": [128, 64, 191]},
+        {"color": [0.5, 1, 0], "colorSpace": None, "expected": [128, 255, 0]},
+        {"color": [1, 0, 0], "colorSpace": None, "expected": [255, 0, 0]},
+        {"color": [0, 1, 0], "colorSpace": None, "expected": [0, 255, 0]},
+        {"color": [0, 0, 1], "colorSpace": None, "expected": [0, 0, 255]},
+        {"color": [1, 1, 1], "colorSpace": None, "expected": [255, 255, 255]},
+        {"color": [255, 255, 255], "colorSpace": None, "expected": [255, 255, 255]},
+        {"color": [1, 0, 0], "colorSpace": "rgb8", "expected": [1, 0, 0]},
+        {"color": [1, 1, 1], "colorSpace": "rgb8", "expected": [1, 1, 1]},
+        {"color": [2, 1, 0], "colorSpace": None, "expected": [2, 1, 0]},
+        {"color": "#ef4444", "colorSpace": None, "expected": [239, 68, 68]},
+        {"color": "#f0a", "colorSpace": None, "expected": [255, 0, 170]},
+    ]
+    ts_rgb_script = """
+import { normalizeColorRgb255, computePartSyncHashes } from './src/server/engines/assetEngine.ts';
+const payload = JSON.parse(process.argv[1]);
+const out = payload.vectors.map((v) => {
+  const part = { ...payload.basePart, color: v.color, ...(v.colorSpace ? { colorSpace: v.colorSpace } : {}) };
+  const hashes = computePartSyncHashes(part, 0, 'CyberHoverTank');
+  return {
+    rgb: normalizeColorRgb255(v.color, [148, 163, 184], v.colorSpace),
+    materialHash: hashes.materialHash,
+    combinedHash: hashes.combinedHash,
+  };
+});
+console.log(JSON.stringify(out));
+"""
+    rgb_res = subprocess.run(
+        ["npx", "tsx", "-e", ts_rgb_script, json.dumps({"vectors": rgb_vectors, "basePart": sample_part})],
+        cwd=str(ROOT_DIR),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ts_rgb_out = json.loads(rgb_res.stdout.strip().splitlines()[-1])
+    for idx_vec, vec in enumerate(rgb_vectors):
+        py_rgb = list(_normalize_color_rgb_255(vec["color"], (148, 163, 184), vec["colorSpace"]))
+        assert py_rgb == vec["expected"], f"Python RGB mismatch on {vec}: {py_rgb}"
+        assert ts_rgb_out[idx_vec]["rgb"] == py_rgb, f"TS vs PY RGB mismatch on {vec}: {ts_rgb_out[idx_vec]['rgb']} != {py_rgb}"
+        part_variant = dict(sample_part)
+        part_variant["color"] = vec["color"]
+        if vec["colorSpace"] is not None:
+            part_variant["colorSpace"] = vec["colorSpace"]
+        py_h = compute_part_sync_hashes(part_variant, 0, "CyberHoverTank")
+        assert ts_rgb_out[idx_vec]["materialHash"] == py_h["materialHash"], f"materialHash mismatch on {vec}"
+        assert ts_rgb_out[idx_vec]["combinedHash"] == py_h["combinedHash"], f"combinedHash mismatch on {vec}"
+
 
 def test_2_eight_step_roundtrip_with_camera_offset_and_nested_hierarchy():
     """

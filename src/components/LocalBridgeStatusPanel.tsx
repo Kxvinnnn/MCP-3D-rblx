@@ -13,6 +13,7 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import {
+  FORGE_AUTH_REQUIRED_EVENT,
   forgeFetch,
   getStoredForgeToken,
   setStoredForgeToken,
@@ -119,7 +120,17 @@ export const LocalBridgeStatusPanel: React.FC = () => {
   useEffect(() => {
     checkBridgeAndServer();
     const interval = setInterval(checkBridgeAndServer, 8000);
-    return () => clearInterval(interval);
+    const onAuthRequired = () => {
+      setAuthRequiredWarning(
+        'El servidor principal requiere un token X-Forge-Token válido. Ingrésalo abajo.'
+      );
+      setShowAuthConfig(true);
+    };
+    window.addEventListener(FORGE_AUTH_REQUIRED_EVENT, onAuthRequired);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener(FORGE_AUTH_REQUIRED_EVENT, onAuthRequired);
+    };
   }, [checkBridgeAndServer]);
 
   const handleDownloadPlugin = async () => {

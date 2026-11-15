@@ -19,6 +19,10 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import {
+  normalizeColorRgb255,
+} from '../../utils/colorUtils.ts';
+export { normalizeColorRgb255 };
+import {
   buildStrictLuauFromEditedParts,
   extractGeometryFromProcessedMesh,
   MeshPartInput,
@@ -168,44 +172,6 @@ export function extractCanonicalRotationMatrix9(part: any): number[] {
     }
   }
   return canonicalEulerToMatrix9(rx, ry, rz);
-}
-
-export function normalizeColorRgb255(colorRaw: any): [number, number, number] {
-  if (typeof colorRaw === 'string') {
-    const clean = colorRaw.replace('#', '').trim();
-    if (/^[0-9a-fA-F]{6}$/.test(clean)) {
-      return [
-        parseInt(clean.slice(0, 2), 16),
-        parseInt(clean.slice(2, 4), 16),
-        parseInt(clean.slice(4, 6), 16),
-      ];
-    }
-  }
-  if (!Array.isArray(colorRaw) || colorRaw.length < 3) {
-    return [148, 163, 184];
-  }
-  let v0 = Number(colorRaw[0] ?? 148);
-  let v1 = Number(colorRaw[1] ?? 163);
-  let v2 = Number(colorRaw[2] ?? 184);
-  if (!Number.isFinite(v0)) v0 = 148;
-  if (!Number.isFinite(v1)) v1 = 163;
-  if (!Number.isFinite(v2)) v2 = 184;
-  const isFloat01 =
-    [v0, v1, v2].every((x) => x >= 0 && x <= 1) &&
-    ([colorRaw[0], colorRaw[1], colorRaw[2]].some((x) => typeof x === 'number' && !Number.isInteger(x)) ||
-      Math.max(v0, v1, v2) <= 1.0);
-  if (isFloat01 && Math.max(v0, v1, v2) <= 1.0 && (v0 < 1.0 || v1 < 1.0 || v2 < 1.0)) {
-    return [
-      Math.max(0, Math.min(255, Math.floor(v0 * 255 + 0.5))),
-      Math.max(0, Math.min(255, Math.floor(v1 * 255 + 0.5))),
-      Math.max(0, Math.min(255, Math.floor(v2 * 255 + 0.5))),
-    ];
-  }
-  return [
-    Math.max(0, Math.min(255, Math.floor(v0 + 0.5))),
-    Math.max(0, Math.min(255, Math.floor(v1 + 0.5))),
-    Math.max(0, Math.min(255, Math.floor(v2 + 0.5))),
-  ];
 }
 
 export function normalizeHierarchyMetadata(
@@ -536,7 +502,11 @@ export function computePartSyncHashes(
   }
   const geometryHash = computeFnv1a32Hex(geomTokens.join('|'));
 
-  const rgb = normalizeColorRgb255(part?.color);
+  const rgb = normalizeColorRgb255(
+    part?.color,
+    [148, 163, 184],
+    part?.colorSpace || part?.colorFormat
+  );
   const matName = String(part?.material || 'Metal').trim() || 'Metal';
   const pbr = part?.pbrMaterial && typeof part.pbrMaterial === 'object' ? part.pbrMaterial : {};
   const roughVal =
@@ -672,7 +642,8 @@ export function normalizePartsWithSyncMetadata(parts: any[], modelName: string =
       rotationMatrix: syncMeta.rotationMatrix,
       rotation: existingRot,
       reflectance: syncMeta.reflectance,
-      color: normalizeColorRgb255(p?.color),
+      color: normalizeColorRgb255(p?.color, [148, 163, 184], p?.colorSpace || p?.colorFormat),
+      colorSpace: 'rgb8',
       schemaVersion: syncMeta.schemaVersion,
       hashSchemaVersion: syncMeta.hashSchemaVersion,
       geometryHash: syncMeta.geometryHash,
@@ -1968,7 +1939,11 @@ export function buildRbxmxFromPartsServer(
     const refId = `RBX_PART_${idx + 1}`;
     const [sx = 2, sy = 2, sz = 2] = p.size || [2, 2, 2];
     const [px = 0, py = 1, pz = 0] = p.position || [0, 1, 0];
-    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(p.color);
+    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(
+      p.color,
+      [148, 163, 184],
+      (p as any).colorSpace || (p as any).colorFormat
+    );
     const syncMeta = computePartSyncHashes(p, idx);
     const rotMat = syncMeta.rotationMatrix;
     const derivedRot = canonicalMatrix9ToEulerDeg(rotMat);
@@ -2018,6 +1993,7 @@ export function buildRbxmxFromPartsServer(
       rotation: [rx, ry, rz],
       rotationMatrix: rotMat,
       color: [cr, cg, cb],
+      colorSpace: 'rgb8',
       material: p.material,
       roughness: p.roughness,
       metalness: p.metalness,
@@ -2588,6 +2564,7 @@ export function parseRbxmxFromPartsServer(
       rotation,
       rotationMatrix,
       color,
+      colorSpace: 'rgb8',
       material,
       roughness,
       metalness,
@@ -2666,7 +2643,11 @@ export function buildObjAndMtlFromPartsServer(
   expandedParts.forEach((p, idx) => {
     const partLabel = (p.name || `MeshPart_${idx + 1}`).replace(/[^a-zA-Z0-9_]/g, '_');
     const matName = `Mat_${partLabel}_${idx + 1}`;
-    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(p.color);
+    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(
+      p.color,
+      [148, 163, 184],
+      (p as any).colorSpace || (p as any).colorFormat
+    );
     const [px = 0, py = 1, pz = 0] = p.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = p.rotation || [0, 0, 0];
     const rotMat = eulerDegToRotationMatrixServer(rx, ry, rz);
@@ -2889,7 +2870,11 @@ export function buildGltfFromPartsServer(
       type: 'SCALAR',
     });
 
-    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(p.color);
+    const [cr = 148, cg = 163, cb = 184] = normalizeColorRgb255(
+      p.color,
+      [148, 163, 184],
+      (p as any).colorSpace || (p as any).colorFormat
+    );
     const pbrSpec: any = {
       baseColorFactor: [
         Number((cr / 255).toFixed(4)),

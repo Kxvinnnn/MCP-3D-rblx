@@ -269,7 +269,7 @@ export function buildThreeGroupFromAsset(
     const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
     const [px = 0, py = 1, pz = 0] = part.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
-    const [r, g, b] = resolveRgbTuple(part.color);
+    const [r, g, b] = resolveRgbTuple(part.color, undefined, (part as any).colorSpace || (part as any).colorFormat);
 
     let geom: THREE.BufferGeometry;
     const hasCustomMeshData =

@@ -479,6 +479,7 @@ test('Fase 3 & 8 — Integración Real entre CloudBridgeCoordinator (Backend) y 
   const backendPort = (backendServer.address() as any).port;
 
   const projectRoot = resolveTestRojoProjectRoot();
+  const stateFile482 = path.join(os.tmpdir(), `forge_bridge_test482_${Date.now()}.json`);
   const bridge = createForgeLocalBridgeApp({
     port: 48726,
     rojoProjectPath: projectRoot,
@@ -487,6 +488,7 @@ test('Fase 3 & 8 — Integración Real entre CloudBridgeCoordinator (Backend) y 
     pluginLocalToken: PLUGIN_TOKEN,
     heartbeatIntervalMs: 400,
     autoConnectCloud: true,
+    stateFilePath: stateFile482,
   });
 
   await bridge.start();
@@ -534,6 +536,7 @@ test('Fase 3 & 8 — Integración Real entre CloudBridgeCoordinator (Backend) y 
   } finally {
     await bridge.stop();
     await new Promise<void>((resolve) => backendServer.close(() => resolve()));
+    fs.rmSync(stateFile482, { force: true });
   }
 });
 
@@ -675,6 +678,7 @@ test('Fase 4 & 5 — Prueba Integral Motores 3D: Forge → Cloud → Bridge → 
 
   const projectRoot = resolveTestRojoProjectRoot();
   const bridgePort = 48727;
+  const stateFile678 = path.join(os.tmpdir(), `forge_bridge_test678_${Date.now()}.json`);
   const bridge = createForgeLocalBridgeApp({
     port: bridgePort,
     rojoProjectPath: projectRoot,
@@ -683,6 +687,7 @@ test('Fase 4 & 5 — Prueba Integral Motores 3D: Forge → Cloud → Bridge → 
     pluginLocalToken: PLUGIN_TOKEN,
     heartbeatIntervalMs: 400,
     autoConnectCloud: true,
+    stateFilePath: stateFile678,
   });
 
   await bridge.start();
@@ -963,6 +968,7 @@ test('Fase 4 & 5 — Prueba Integral Motores 3D: Forge → Cloud → Bridge → 
     bridge.rojoManager.captureBaselineSnapshot();
     await bridge.stop();
     await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
+    fs.rmSync(stateFile678, { force: true });
   }
 });
 
@@ -1023,6 +1029,7 @@ test('Fase 2 & 5 — Propagación E2E de estados awaiting_studio_confirmation, p
 
   const projectRoot = resolveTestRojoProjectRoot();
   const bridgePort = 48728;
+  const stateFile1026 = path.join(os.tmpdir(), `forge_bridge_test1026_${Date.now()}.json`);
   const bridge = createForgeLocalBridgeApp({
     port: bridgePort,
     rojoProjectPath: projectRoot,
@@ -1031,6 +1038,7 @@ test('Fase 2 & 5 — Propagación E2E de estados awaiting_studio_confirmation, p
     pluginLocalToken: PLUGIN_TOKEN,
     heartbeatIntervalMs: 400,
     autoConnectCloud: true,
+    stateFilePath: stateFile1026,
   });
 
   await bridge.start();
@@ -1140,6 +1148,7 @@ test('Fase 2 & 5 — Propagación E2E de estados awaiting_studio_confirmation, p
   } finally {
     await bridge.stop();
     await new Promise<void>((resolve) => cloudServer.close(() => resolve()));
+    fs.rmSync(stateFile1026, { force: true });
   }
 });
 

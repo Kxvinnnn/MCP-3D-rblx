@@ -666,7 +666,9 @@ class MeshPart3DSpec(BaseModel):
         default=None,
         description="Optional 9-component 3x3 rotation matrix [r00..r22]",
     )
-    color: List[int] = Field(description="[R, G, B] 0-255 color")
+    color: Any = Field(description="[R, G, B] color (0-255 or 0-1 normalized)")
+    colorSpace: Optional[str] = Field(default=None, description="Optional explicit color space ('rgb8' or 'rgb01')")
+    colorFormat: Optional[str] = Field(default=None, description="Optional alias for colorSpace")
     material: str = Field(default="Metal", description="Roblox Enum.Material name")
     roughness: float = Field(default=0.35)
     metalness: float = Field(default=0.6)
@@ -1357,8 +1359,13 @@ class Generation3DEngine:
         for idx, p in enumerate(parts):
             sx, sy, sz = (p.size + [2.0, 2.0, 2.0])[:3]
             px, py, pz = (p.position + [0.0, 1.0, 0.0])[:3]
+            from engines.asset_engine import _normalize_color_rgb_255
             rx, ry, rz = (p.rotation + [0.0, 0.0, 0.0])[:3]
-            cr, cg, cb = (p.color + [180, 180, 180])[:3]
+            cr, cg, cb = _normalize_color_rgb_255(
+                p.color,
+                (180, 180, 180),
+                getattr(p, "colorSpace", None) or getattr(p, "colorFormat", None),
+            )
             var_name = f"meshPart_{idx + 1}"
             ok_var = f"isVerified_{idx + 1}"
             cf_mode = p.collisionFidelity or collision_fidelity or "Hull"
@@ -1594,8 +1601,13 @@ class Generation3DEngine:
             part_name = part.name or f"MeshPart_{idx + 1}"
             sx, sy, sz = (part.size + [2.0, 2.0, 2.0])[:3]
             px, py, pz = (part.position + [0.0, 1.0, 0.0])[:3]
+            from engines.asset_engine import _normalize_color_rgb_255
             rx, ry, rz = (part.rotation + [0.0, 0.0, 0.0])[:3]
-            cr, cg, cb = (part.color + [160, 170, 185])[:3]
+            cr, cg, cb = _normalize_color_rgb_255(
+                part.color,
+                (160, 170, 185),
+                getattr(part, "colorSpace", None) or getattr(part, "colorFormat", None),
+            )
 
             part_dict = part.model_dump() if hasattr(part, "model_dump") else part.__dict__
             sync_meta = AssetEngine.compute_part_sync_hashes(part_dict, idx)
@@ -1657,6 +1669,7 @@ class Generation3DEngine:
                 "rotation": [round(rx, 2), round(ry, 2), round(rz, 2)],
                 "rotationMatrix": rot_mat,
                 "color": [int(cr), int(cg), int(cb)],
+                "colorSpace": "rgb8",
                 "material": part.material or "Metal",
                 "roughness": part.roughness,
                 "metalness": part.metalness,
@@ -2025,12 +2038,11 @@ class Generation3DEngine:
                 cg = (c_val >> 8) & 0xFF
                 cb = c_val & 0xFF
             elif c_float_el is not None:
+                from engines.asset_engine import _normalize_color_rgb_255
                 rf = float(c_float_el.findtext("R", "0.62") or 0.62)
                 gf = float(c_float_el.findtext("G", "0.66") or 0.66)
                 bf = float(c_float_el.findtext("B", "0.72") or 0.72)
-                cr = int(round(rf * 255)) if rf <= 1.0 else int(round(rf))
-                cg = int(round(gf * 255)) if gf <= 1.0 else int(round(gf))
-                cb = int(round(bf * 255)) if bf <= 1.0 else int(round(bf))
+                cr, cg, cb = _normalize_color_rgb_255([rf, gf, bf], (160, 170, 185))
 
             mesh_id_url = _prop_text('./Content[@name="MeshId"]/url', "")
             published_mesh_id = validate_published_roblox_mesh_id(mesh_id_url)
@@ -2222,7 +2234,12 @@ class Generation3DEngine:
         for idx, part in enumerate(parts):
             part_name = (part.name or f"MeshPart_{idx + 1}").replace(" ", "_")
             mat_name = f"{part_name}_Mat"
-            cr, cg, cb = (part.color + [160, 170, 185])[:3]
+            from engines.asset_engine import _normalize_color_rgb_255
+            cr, cg, cb = _normalize_color_rgb_255(
+                part.color,
+                (160, 170, 185),
+                getattr(part, "colorSpace", None) or getattr(part, "colorFormat", None),
+            )
             kd_r, kd_g, kd_b = cr / 255.0, cg / 255.0, cb / 255.0
             roughness = max(0.04, min(1.0, part.roughness))
             metalness = max(0.0, min(1.0, part.metalness))
@@ -2425,7 +2442,12 @@ class Generation3DEngine:
                 "type": "SCALAR",
             })
 
-            cr, cg, cb = (part.color + [160, 170, 185])[:3]
+            from engines.asset_engine import _normalize_color_rgb_255
+            cr, cg, cb = _normalize_color_rgb_255(
+                part.color,
+                (160, 170, 185),
+                getattr(part, "colorSpace", None) or getattr(part, "colorFormat", None),
+            )
             alpha = max(0.05, min(1.0, 1.0 - part.transparency))
             pbr_mr: Dict[str, Any] = {
                 "baseColorFactor": [

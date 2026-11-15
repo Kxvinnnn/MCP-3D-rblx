@@ -15,6 +15,7 @@ import {
 import { fileURLToPath } from 'url';
 import {
   CloudBridgeCoordinator,
+  KNOWN_PLACEHOLDER_SECRETS,
   validateMainServerSecurityConfig,
   verifyTokenConstantTime,
 } from './src/server/engines/bridgeCoordinatorEngine.ts';
@@ -571,6 +572,69 @@ function getBackendSourceFiles() {
 
 app.get('/api/v1/files', (_req, res) => {
   res.json({ files: getBackendSourceFiles() });
+});
+
+app.get('/api/v1/auth/session', (req, res) => {
+  const secFetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    return res.status(403).json({
+      error: 'Solicitud cross-site bloqueada para /api/v1/auth/session.',
+    });
+  }
+
+  const forwardedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+
+  const isTrustedRequestOrigin = (rawUrl: string): boolean => {
+    try {
+      const parsed = new URL(rawUrl);
+      if (ALLOWED_ORIGINS.has(parsed.origin)) return true;
+      if (forwardedHost && parsed.host.toLowerCase() === forwardedHost) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
+  const originHeader = String(req.headers.origin || '').trim();
+  if (originHeader && !isTrustedRequestOrigin(originHeader)) {
+    return res.status(403).json({
+      error: 'Origin no autorizado para /api/v1/auth/session.',
+    });
+  }
+
+  const refererHeader = String(req.headers.referer || '').trim();
+  if (!originHeader && refererHeader && !isTrustedRequestOrigin(refererHeader)) {
+    return res.status(403).json({
+      error: 'Referer no autorizado para /api/v1/auth/session.',
+    });
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+
+  const isNonProdBootstrapEligible =
+    !secValidation.isProduction &&
+    (secValidation.usedEphemeralDevToken ||
+      KNOWN_PLACEHOLDER_SECRETS.has(runtimeSecurityToken.toLowerCase()));
+
+  if (isNonProdBootstrapEligible) {
+    return res.json({
+      authenticated: true,
+      mode: secValidation.usedEphemeralDevToken ? 'ephemeral_dev' : 'placeholder_dev',
+      requiresToken: false,
+      token: runtimeSecurityToken,
+    });
+  }
+
+  const provided = extractAuthToken(req);
+  const authenticated = verifyTokenConstantTime(provided, runtimeSecurityToken);
+  return res.json({
+    authenticated,
+    mode: secValidation.isProduction ? 'production' : 'configured_token',
+    requiresToken: !authenticated,
+  });
 });
 
 app.get('/api/v1/health', async (_req, res) => {

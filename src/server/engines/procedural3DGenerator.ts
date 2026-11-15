@@ -30,6 +30,7 @@ import {
 } from './worldAndModelEditorEngine.ts';
 
 import { parseNaturalLanguageToTreeParams } from '../../utils/treePromptParser.ts';
+import { resolveColorRgb255 } from '../../utils/colorUtils.ts';
 
 export const FORGE_ASSET_CATEGORIES = [
   'Props',
@@ -122,13 +123,9 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
-function hexToRgbNormalized(hex: string): [number, number, number] {
-  const clean = String(hex || '#888888').replace('#', '').trim();
-  const num = parseInt(clean.length === 6 ? clean : '888888', 16);
-  const r = ((num >> 16) & 255) / 255;
-  const g = ((num >> 8) & 255) / 255;
-  const b = (num & 255) / 255;
-  return [round4(r), round4(g), round4(b)];
+function hexToRgbNormalized(colorInput: unknown): [number, number, number] {
+  const [rByte, gByte, bByte] = resolveColorRgb255(colorInput, [136, 136, 136]);
+  return [round4(rByte / 255), round4(gByte / 255), round4(bByte / 255)];
 }
 
 interface RawProceduralGeometry {
@@ -138,12 +135,11 @@ interface RawProceduralGeometry {
   faces: [number, number, number][];
 }
 
-function modulateHexColor(hex: string, factor: number): string {
-  const clean = String(hex || '#2d6a4f').replace('#', '').trim();
-  const num = parseInt(clean.length === 6 ? clean : '2d6a4f', 16);
-  const r = Math.round(clamp(((num >> 16) & 255) * factor, 0, 255));
-  const g = Math.round(clamp(((num >> 8) & 255) * factor, 0, 255));
-  const b = Math.round(clamp((num & 255) * factor, 0, 255));
+function modulateHexColor(colorInput: unknown, factor: number): string {
+  const [rBase, gBase, bBase] = resolveColorRgb255(colorInput, [45, 106, 79]);
+  const r = Math.round(clamp(rBase * factor, 0, 255));
+  const g = Math.round(clamp(gBase * factor, 0, 255));
+  const b = Math.round(clamp(bBase * factor, 0, 255));
   return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 

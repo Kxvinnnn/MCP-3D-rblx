@@ -15,12 +15,19 @@ import {
   ChevronUp,
   RotateCcw,
   Palette,
+  AlertCircle,
+  KeyRound,
+  RefreshCw,
 } from 'lucide-react';
 import { useForge } from '../../context/ForgeContext.tsx';
 import { Forge3DAsset } from '../../utils/roblox3DEngine.ts';
 import { SseStreamParser, SseMessage } from '../../utils/sseParser.ts';
 import { parseNaturalLanguageToTreeParams } from '../../utils/treePromptParser.ts';
-import { forgeFetch } from '../../utils/forgeApiClient.ts';
+import {
+  forgeFetch,
+  getStoredForgeToken,
+  verifyAndSaveForgeToken,
+} from '../../utils/forgeApiClient.ts';
 import { RobloxWorldViewport3D } from '../RobloxWorldViewport3D.tsx';
 import {
   WizardStep,
@@ -98,6 +105,11 @@ export const CreateWizardView: React.FC = () => {
   const [progressStatus, setProgressStatus] = useState<string>('Iniciando...');
   const [activityLogs, setActivityLogs] = useState<string[]>([]);
   const [showTechnicalLogs, setShowTechnicalLogs] = useState<boolean>(false);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  const [authTokenRequired, setAuthTokenRequired] = useState<boolean>(false);
+  const [manualTokenInput, setManualTokenInput] = useState<string>(() => getStoredForgeToken());
+  const [tokenValidationError, setTokenValidationError] = useState<string | null>(null);
+  const [isSavingToken, setIsSavingToken] = useState<boolean>(false);
 
   // Result state
   const [generatedAsset, setGeneratedAsset] = useState<Forge3DAsset | null>(null);
@@ -193,6 +205,9 @@ export const CreateWizardView: React.FC = () => {
 
     setCurrentStep(4);
     setIsGenerating(true);
+    setGenerationError(null);
+    setAuthTokenRequired(false);
+    setTokenValidationError(null);
     setProgressPercent(15);
     setProgressStatus('Construyendo tu modelo 3D...');
     setActivityLogs([
@@ -257,6 +272,9 @@ export const CreateWizardView: React.FC = () => {
 
       if (!response.ok || !response.body) {
         const errJson = await response.json().catch(() => ({}));
+        if (response.status === 401) {
+          setAuthTokenRequired(true);
+        }
         throw new Error(errJson.detail || errJson.error || `Error del servidor HTTP ${response.status}`);
       }
 
@@ -357,15 +375,30 @@ export const CreateWizardView: React.FC = () => {
         setProgressStatus('Generación cancelada por el usuario');
         return;
       }
+      const errMsg = err.message || 'Error desconocido';
       setIsGenerating(false);
-      setProgressStatus(`Error: ${err.message || 'Error desconocido'}`);
+      setGenerationError(errMsg);
+      setProgressStatus(`Error: ${errMsg}`);
+      setActivityLogs((prev) => [...prev, `Error: ${errMsg}`]);
       setNotification({
         type: 'error',
-        message: `Error al generar modelo: ${err.message}`,
+        message: `Error al generar modelo: ${errMsg}`,
       });
     } finally {
       abortControllerRef.current = null;
     }
+  };
+
+  const handleSaveTokenAndRetry = async () => {
+    setIsSavingToken(true);
+    setTokenValidationError(null);
+    const result = await verifyAndSaveForgeToken(manualTokenInput);
+    setIsSavingToken(false);
+    if (!result.ok) {
+      setTokenValidationError(result.error || 'Token inválido.');
+      return;
+    }
+    await handleStartGeneration();
   };
 
   return (
@@ -825,24 +858,44 @@ export const CreateWizardView: React.FC = () => {
         {currentStep === 4 && (
           <div className="space-y-6 pt-6">
             <div className="text-center space-y-3 py-8">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-600 to-fuchsia-600 flex items-center justify-center text-white mx-auto animate-pulse shadow-xl shadow-fuchsia-600/30">
-                <Sparkles className="w-8 h-8" />
+              <div
+                className={`w-16 h-16 rounded-2xl flex items-center justify-center text-white mx-auto shadow-xl ${
+                  generationError && !isGenerating
+                    ? 'bg-gradient-to-br from-rose-600 to-amber-600 shadow-rose-600/30'
+                    : 'bg-gradient-to-br from-violet-600 to-fuchsia-600 animate-pulse shadow-fuchsia-600/30'
+                }`}
+              >
+                {generationError && !isGenerating ? (
+                  <AlertCircle className="w-8 h-8" />
+                ) : (
+                  <Sparkles className="w-8 h-8" />
+                )}
               </div>
               <h3 className="text-lg font-extrabold text-white">{progressStatus}</h3>
               <p className="text-slate-300 text-xs sm:text-sm max-w-md mx-auto">
-                Uniendo todas las partes 3D y preparando los colores para que funcionen perfecto en Roblox Studio.
+                {generationError && !isGenerating
+                  ? authTokenRequired
+                    ? 'Este servidor está protegido con FORGE_SECURITY_TOKEN. Ingresa el token configurado para continuar o vuelve atrás.'
+                    : 'No se pudo completar la construcción del modelo 3D. Puedes reintentar o ajustar tus opciones.'
+                  : 'Uniendo todas las partes 3D y preparando los colores para que funcionen perfecto en Roblox Studio.'}
               </p>
 
               {/* Progress Bar */}
               <div className="max-w-md mx-auto mt-4 space-y-1.5">
                 <div className="w-full bg-slate-950 rounded-full h-3 border border-slate-800 overflow-hidden">
                   <div
-                    className="bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-400 h-full transition-all duration-300 rounded-full"
+                    className={`h-full transition-all duration-300 rounded-full ${
+                      generationError && !isGenerating
+                        ? 'bg-gradient-to-r from-rose-500 to-amber-500'
+                        : 'bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-400'
+                    }`}
                     style={{ width: `${progressPercent}%` }}
                   />
                 </div>
                 <div className="flex justify-between text-[11px] text-slate-400 font-mono tabular-nums">
-                  <span>Construyendo geometría 3D</span>
+                  <span>
+                    {generationError && !isGenerating ? 'Proceso detenido' : 'Construyendo geometría 3D'}
+                  </span>
                   <span>{progressPercent}%</span>
                 </div>
               </div>
@@ -856,6 +909,65 @@ export const CreateWizardView: React.FC = () => {
                   >
                     Cancelar
                   </button>
+                </div>
+              )}
+
+              {!isGenerating && generationError && (
+                <div className="max-w-md mx-auto pt-4 space-y-3">
+                  {authTokenRequired && (
+                    <div className="bg-slate-950/90 border border-amber-500/40 rounded-2xl p-4 text-left space-y-2.5">
+                      <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+                        <KeyRound className="w-3.5 h-3.5" />
+                        <span>Token de acceso requerido (X-Forge-Token)</span>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="password"
+                          value={manualTokenInput}
+                          onChange={(e) => setManualTokenInput(e.target.value)}
+                          placeholder="Pega tu FORGE_SECURITY_TOKEN"
+                          className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+                        />
+                        <button
+                          type="button"
+                          disabled={isSavingToken}
+                          onClick={handleSaveTokenAndRetry}
+                          className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 text-xs font-extrabold cursor-pointer transition whitespace-nowrap"
+                        >
+                          {isSavingToken ? 'Verificando...' : 'Guardar y reintentar'}
+                        </button>
+                      </div>
+                      {tokenValidationError && (
+                        <p className="text-[11px] text-rose-400 font-medium">
+                          {tokenValidationError}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGenerationError(null);
+                        setAuthTokenRequired(false);
+                        setCurrentStep(2);
+                      }}
+                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>Volver al estilo</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleStartGeneration}
+                      className="px-5 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition shadow-lg"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Reintentar</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

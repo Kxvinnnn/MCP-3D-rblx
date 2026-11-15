@@ -357,7 +357,8 @@ export const EditView: React.FC = () => {
             size: [p.size[0] ?? 2, p.size[1] ?? 2, p.size[2] ?? 2],
             position: [p.position[0] ?? 0, p.position[1] ?? 1, p.position[2] ?? 0],
             rotation: [p.rotation[0] ?? 0, p.rotation[1] ?? 0, p.rotation[2] ?? 0],
-            color: resolveRgbTuple(p.color),
+            color: resolveRgbTuple(p.color, undefined, (p as any).colorSpace || (p as any).colorFormat),
+            colorSpace: 'rgb8',
             material: p.material || 'Metal',
             roughness: p.roughness ?? 0.35,
             metalness: p.metalness ?? 0.65,
@@ -598,7 +599,7 @@ export const EditView: React.FC = () => {
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 text-xs">
             {activeAsset.parts.map((part, index) => {
               const isSelected = selectedPart?.name === part.name;
-              const rgb = resolveRgbTuple(part.color);
+              const rgb = resolveRgbTuple(part.color, undefined, (part as any).colorSpace || (part as any).colorFormat);
               return (
                 <div
                   key={part.name + index}

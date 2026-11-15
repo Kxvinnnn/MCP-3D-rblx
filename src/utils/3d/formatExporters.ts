@@ -294,7 +294,7 @@ export function exportAssetToOBJWithMTL(asset: Forge3DAsset): {
     const part = asset.parts[idx];
     const partName = (part.name || `MeshPart_${idx + 1}`).replace(/\s+/g, '_');
     const matName = `${partName}_Mat`;
-    const [r, g, b] = resolveRgbTuple(part.color);
+    const [r, g, b] = resolveRgbTuple(part.color, undefined, (part as any).colorSpace || (part as any).colorFormat);
     const kdR = (r / 255).toFixed(4);
     const kdG = (g / 255).toFixed(4);
     const kdB = (b / 255).toFixed(4);
@@ -448,7 +448,7 @@ export function exportAssetToRBXMX(asset: Forge3DAsset): string {
     const [sx = 2, sy = 2, sz = 2] = part.size || [2, 2, 2];
     const [px = 0, py = 1, pz = 0] = part.position || [0, 1, 0];
     const [rx = 0, ry = 0, rz = 0] = part.rotation || [0, 0, 0];
-    const [cr, cg, cb] = resolveRgbTuple(part.color);
+    const [cr, cg, cb] = resolveRgbTuple(part.color, undefined, (part as any).colorSpace || (part as any).colorFormat);
 
     let r00: string, r01: string, r02: string;
     let r10: string, r11: string, r12: string;
@@ -885,12 +885,8 @@ export function parseRBXMXToForgeAsset(
       const cr = parseFloat(getText('Color3[name="Color"] > R') || '-1');
       const cg = parseFloat(getText('Color3[name="Color"] > G') || '-1');
       const cb = parseFloat(getText('Color3[name="Color"] > B') || '-1');
-      if (cr >= 0 && cg >= 0 && cb >= 0) {
-        color = [
-          Math.round(cr <= 1 ? cr * 255 : cr),
-          Math.round(cg <= 1 ? cg * 255 : cg),
-          Math.round(cb <= 1 ? cb * 255 : cb),
-        ];
+      if (Number.isFinite(cr) && Number.isFinite(cg) && Number.isFinite(cb) && cr >= 0 && cg >= 0 && cb >= 0) {
+        color = resolveRgbTuple([cr, cg, cb], [148, 163, 184]);
       }
     }
 
@@ -1307,7 +1303,7 @@ export function exportAssetToGLTF(
       type: 'SCALAR',
     });
 
-    const [cr, cg, cb] = resolveRgbTuple(part.color);
+    const [cr, cg, cb] = resolveRgbTuple(part.color, undefined, (part as any).colorSpace || (part as any).colorFormat);
     const alpha = Math.max(0.05, Math.min(1, 1 - (part.transparency || 0)));
     const effMetalness = part.pbrMaterial?.metalness ?? part.metalness ?? 0.65;
     const effRoughness = part.pbrMaterial?.roughness ?? part.roughness ?? 0.35;

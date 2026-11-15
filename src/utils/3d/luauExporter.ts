@@ -20,6 +20,7 @@ export function generateEditableMeshLuauCode(
     position: [number, number, number];
     rotation: [number, number, number];
     color: [number, number, number];
+    colorSpace?: string;
     material: string;
     roughness: number;
     metalness: number;
@@ -108,7 +109,7 @@ export function generateEditableMeshLuauCode(
     const [sx, sy, sz] = sub.size;
     const [px, py, pz] = sub.position;
     const [rx, ry, rz] = sub.rotation;
-    const [cr, cg, cb] = resolveRgbTuple(sub.color);
+    const [cr, cg, cb] = resolveRgbTuple(sub.color, undefined, sub.colorSpace);
     const fidelity = sub.collisionFidelity || 'Hull';
     const renderFid = sub.renderFidelity || 'Precise';
 

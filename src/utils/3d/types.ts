@@ -1,4 +1,12 @@
 import type * as THREE from 'three';
+import type { ForgeColorSpace } from '../colorUtils.ts';
+export {
+  FORGE_COLOR_CONVENTION_VERSION,
+  type ForgeColorSpace,
+  resolveColorRgb255,
+  resolveRgbTuple,
+  normalizeColorRgb255,
+} from '../colorUtils.ts';
 
 export interface SubMeshLODData {
   level: 0 | 1 | 2;
@@ -18,42 +26,6 @@ export interface SubMeshGeometryData {
   vertexColors?: number[][];
   objFileName?: string;
   lodLevels?: SubMeshLODData[];
-}
-
-export function resolveRgbTuple(
-  color: any,
-  fallback: [number, number, number] = [160, 170, 185]
-): [number, number, number] {
-  if (typeof color === 'string') {
-    const clean = color.replace('#', '').trim();
-    if (/^[0-9a-fA-F]{6}$/.test(clean)) {
-      return [
-        parseInt(clean.slice(0, 2), 16),
-        parseInt(clean.slice(2, 4), 16),
-        parseInt(clean.slice(4, 6), 16),
-      ];
-    }
-  }
-  if (Array.isArray(color) && color.length >= 3) {
-    const r = Number(color[0]);
-    const g = Number(color[1]);
-    const b = Number(color[2]);
-    if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
-      if (Math.max(r, g, b) <= 1.0 && (r < 1 || g < 1 || b < 1)) {
-        return [
-          Math.max(0, Math.min(255, Math.round(r * 255))),
-          Math.max(0, Math.min(255, Math.round(g * 255))),
-          Math.max(0, Math.min(255, Math.round(b * 255))),
-        ];
-      }
-      return [
-        Math.max(0, Math.min(255, Math.round(r))),
-        Math.max(0, Math.min(255, Math.round(g))),
-        Math.max(0, Math.min(255, Math.round(b))),
-      ];
-    }
-  }
-  return fallback;
 }
 
 export interface PartPBRMaterialSpec {
@@ -88,6 +60,7 @@ export interface MeshPart3DSpec {
   position: number[];
   rotation: number[];
   color: number[];
+  colorSpace?: ForgeColorSpace;
   material: string;
   roughness: number;
   metalness: number;

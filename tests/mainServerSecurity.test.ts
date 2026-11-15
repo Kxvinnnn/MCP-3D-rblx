@@ -214,6 +214,137 @@ test('Etapa 3 — Seguridad del Servidor Principal (server.ts): startup prod, to
       body: JSON.stringify({ bridgeVersion: '2.3.0' }),
     });
     assert.equal(expiredSessRes.status, 401);
+
+    // 12. /api/v1/auth/session en modo producción nunca filtra FORGE_SECURITY_TOKEN y bloquea cross-site
+    const prodSessionUnauthRes = await fetch(`${baseUrl}/api/v1/auth/session`);
+    assert.equal(prodSessionUnauthRes.status, 200);
+    const prodSessionUnauthJson = (await prodSessionUnauthRes.json()) as Record<string, any>;
+    assert.equal(prodSessionUnauthJson.authenticated, false);
+    assert.equal(prodSessionUnauthJson.requiresToken, true);
+    assert.equal(prodSessionUnauthJson.token, undefined);
+
+    const prodSessionValidRes = await fetch(`${baseUrl}/api/v1/auth/session`, {
+      headers: { 'X-Forge-Token': validSecret },
+    });
+    assert.equal(prodSessionValidRes.status, 200);
+    const prodSessionValidJson = (await prodSessionValidRes.json()) as Record<string, any>;
+    assert.equal(prodSessionValidJson.authenticated, true);
+    assert.equal(prodSessionValidJson.requiresToken, false);
+    assert.equal(prodSessionValidJson.token, undefined);
+
+    const prodSessionCrossOriginRes = await fetch(`${baseUrl}/api/v1/auth/session`, {
+      headers: { Origin: 'https://evil-attacker.run.app' },
+    });
+    assert.equal(prodSessionCrossOriginRes.status, 403);
+
+    const prodSessionCrossSiteRes = await fetch(`${baseUrl}/api/v1/auth/session`, {
+      headers: { 'Sec-Fetch-Site': 'cross-site' },
+    });
+    assert.equal(prodSessionCrossSiteRes.status, 403);
+  } finally {
+    if (srv) {
+      await new Promise<void>((resolve) => srv!.close(() => resolve()));
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Sesión efímera dev: /api/v1/auth/session solo responde a same-origin, mantiene 401 directo y habilita /api/v1/generate-3d-stream', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-dev-session-'));
+  let srv: http.Server | null = null;
+
+  try {
+    const devInstance = createMainServerApp({
+      nodeEnv: 'development',
+      securityToken: '',
+      bridgeSharedSecret: '',
+      rojoProjectPath: tmpDir,
+    });
+    assert.equal(devInstance.security.usedEphemeralDevToken, true);
+
+    const bound = await listenOnEphemeralPort(devInstance.app);
+    srv = bound.server;
+    const baseUrl = bound.baseUrl;
+
+    // 1. Llamadas directas sin token deben seguir devolviendo 401
+    const unauthStatus = await fetch(`${baseUrl}/api/v1/bridge/status`);
+    assert.equal(unauthStatus.status, 401);
+
+    const unauthGen = await fetch(`${baseUrl}/api/v1/generate-3d-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Árbol roble', category: 'Trees & Vegetation' }),
+    });
+    assert.equal(unauthGen.status, 401);
+
+    // 2. Solicitudes cross-site al bootstrap de sesión deben ser rechazadas con 403
+    const crossOriginSession = await fetch(`${baseUrl}/api/v1/auth/session`, {
+      headers: { Origin: 'https://evil-attacker.run.app' },
+    });
+    assert.equal(crossOriginSession.status, 403);
+
+    const crossSiteSession = await fetch(`${baseUrl}/api/v1/auth/session`, {
+      headers: { 'Sec-Fetch-Site': 'cross-site' },
+    });
+    assert.equal(crossSiteSession.status, 403);
+
+    // 3. Solicitud same-origin devuelve el token efímero dev y desbloquea generación 3D SSE
+    const devSessionRes = await fetch(`${baseUrl}/api/v1/auth/session`, {
+      headers: {
+        Origin: baseUrl,
+        'Sec-Fetch-Site': 'same-origin',
+      },
+    });
+    assert.equal(devSessionRes.status, 200);
+    const devSessionJson = (await devSessionRes.json()) as Record<string, any>;
+    assert.equal(devSessionJson.authenticated, true);
+    assert.equal(devSessionJson.mode, 'ephemeral_dev');
+    assert.equal(devSessionJson.requiresToken, false);
+    assert.equal(devSessionJson.token, devInstance.security.effectiveSecurityToken);
+
+    const streamRes = await fetch(`${baseUrl}/api/v1/generate-3d-stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forge-Token': devSessionJson.token,
+      },
+      body: JSON.stringify({
+        prompt: 'Árbol roble ancestral para Roblox',
+        asset_type: 'Model3D',
+        category: 'Trees & Vegetation',
+        generation_mode: 'procedural',
+        seed: 'forge-session-test-2026',
+        save_to_rojo: false,
+        save_to_library: false,
+      }),
+    });
+    assert.equal(streamRes.status, 200);
+    const sseText = await streamRes.text();
+    assert.ok(sseText.includes('"type":"done"'));
+    assert.ok(sseText.includes('"parts"'));
+
+    // 4. Si el usuario configura un secreto personalizado en dev, /api/v1/auth/session NO debe exponerlo
+    const customDevSecret = `custom_${crypto.randomBytes(16).toString('hex')}`;
+    const customDevInstance = createMainServerApp({
+      nodeEnv: 'development',
+      securityToken: customDevSecret,
+      bridgeSharedSecret: customDevSecret,
+      rojoProjectPath: tmpDir,
+    });
+    const customBound = await listenOnEphemeralPort(customDevInstance.app);
+    try {
+      const customSessionRes = await fetch(`${customBound.baseUrl}/api/v1/auth/session`, {
+        headers: { Origin: customBound.baseUrl, 'Sec-Fetch-Site': 'same-origin' },
+      });
+      assert.equal(customSessionRes.status, 200);
+      const customSessionJson = (await customSessionRes.json()) as Record<string, any>;
+      assert.equal(customSessionJson.authenticated, false);
+      assert.equal(customSessionJson.mode, 'configured_token');
+      assert.equal(customSessionJson.requiresToken, true);
+      assert.equal(customSessionJson.token, undefined);
+    } finally {
+      await new Promise<void>((resolve) => customBound.server.close(() => resolve()));
+    }
   } finally {
     if (srv) {
       await new Promise<void>((resolve) => srv!.close(() => resolve()));

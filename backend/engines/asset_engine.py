@@ -180,27 +180,118 @@ def _extract_canonical_rotation_matrix_9(part: Dict[str, Any]) -> List[float]:
     return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 
 
-def _normalize_color_rgb_255(raw_color: Any) -> Tuple[int, int, int]:
-    if isinstance(raw_color, list) and len(raw_color) >= 3:
+_RGB8_COLOR_HINTS = {
+    "rgb8", "srgb8", "rgb255", "255", "0-255", "0..255", "uint8", "byte", "fromrgb",
+}
+_RGB01_COLOR_HINTS = {
+    "rgb01", "normalized", "norm", "01", "0-1", "0..1", "unit", "float", "color3", "linear01",
+}
+
+
+def _parse_color_space_hint(hint: Any) -> Optional[str]:
+    if hint is True:
+        return "rgb01"
+    if hint is False:
+        return "rgb8"
+    if isinstance(hint, str):
+        clean = hint.strip().lower()
+        if clean in _RGB8_COLOR_HINTS:
+            return "rgb8"
+        if clean in _RGB01_COLOR_HINTS:
+            return "rgb01"
+    return None
+
+
+def _clamp_byte(val: float) -> int:
+    rounded = int(math.floor(val + 0.5))
+    if rounded < 0:
+        return 0
+    if rounded > 255:
+        return 255
+    return rounded
+
+
+def _parse_finite_channel(val: Any) -> Optional[float]:
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, (int, float)):
+        fval = float(val)
+        return fval if math.isfinite(fval) else None
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return None
         try:
-            r, g, b = float(raw_color[0]), float(raw_color[1]), float(raw_color[2])
-            if 0.0 <= r <= 1.0 and 0.0 <= g <= 1.0 and 0.0 <= b <= 1.0 and (r < 1.0 or g < 1.0 or b < 1.0):
-                r, g, b = r * 255.0, g * 255.0, b * 255.0
-            return (
-                max(0, min(255, int(math.floor(r + 0.5)))),
-                max(0, min(255, int(math.floor(g + 0.5)))),
-                max(0, min(255, int(math.floor(b + 0.5)))),
-            )
+            fval = float(stripped)
+            return fval if math.isfinite(fval) else None
         except Exception:
-            pass
+            return None
+    return None
+
+
+def _normalize_color_rgb_255(
+    raw_color: Any,
+    fallback: Tuple[int, int, int] = (148, 163, 184),
+    explicit_color_space: Any = None,
+) -> Tuple[int, int, int]:
+    fb = (
+        _clamp_byte(float(fallback[0])),
+        _clamp_byte(float(fallback[1])),
+        _clamp_byte(float(fallback[2])),
+    )
     if isinstance(raw_color, str):
         clean = raw_color.strip().lstrip("#")
-        if len(clean) == 6:
+        if len(clean) == 6 and all(c in "0123456789abcdefABCDEF" for c in clean):
             try:
                 return (int(clean[0:2], 16), int(clean[2:4], 16), int(clean[4:6], 16))
             except Exception:
-                pass
-    return (148, 163, 184)
+                return fb
+        if len(clean) == 3 and all(c in "0123456789abcdefABCDEF" for c in clean):
+            try:
+                return (int(clean[0], 16) * 17, int(clean[1], 16) * 17, int(clean[2], 16) * 17)
+            except Exception:
+                return fb
+        return fb
+
+    if isinstance(raw_color, dict):
+        nested_hint = (
+            explicit_color_space
+            if explicit_color_space is not None
+            else (
+                raw_color.get("colorSpace")
+                if raw_color.get("colorSpace") is not None
+                else (
+                    raw_color.get("colorFormat")
+                    if raw_color.get("colorFormat") is not None
+                    else raw_color.get("normalized")
+                )
+            )
+        )
+        if raw_color.get("color") is not None:
+            return _normalize_color_rgb_255(raw_color.get("color"), fb, nested_hint)
+        r_val = raw_color.get("r") if raw_color.get("r") is not None else raw_color.get("R")
+        g_val = raw_color.get("g") if raw_color.get("g") is not None else raw_color.get("G")
+        b_val = raw_color.get("b") if raw_color.get("b") is not None else raw_color.get("B")
+        if r_val is not None and g_val is not None and b_val is not None:
+            return _normalize_color_rgb_255([r_val, g_val, b_val], fb, nested_hint)
+        return fb
+
+    if isinstance(raw_color, (list, tuple)) and len(raw_color) >= 3:
+        r = _parse_finite_channel(raw_color[0])
+        g = _parse_finite_channel(raw_color[1])
+        b = _parse_finite_channel(raw_color[2])
+        if r is None or g is None or b is None:
+            return fb
+        mode = _parse_color_space_hint(explicit_color_space)
+        if mode == "rgb8":
+            return (_clamp_byte(r), _clamp_byte(g), _clamp_byte(b))
+        if mode == "rgb01":
+            return (_clamp_byte(r * 255.0), _clamp_byte(g * 255.0), _clamp_byte(b * 255.0))
+        if 0.0 <= r <= 1.0 and 0.0 <= g <= 1.0 and 0.0 <= b <= 1.0:
+            return (_clamp_byte(r * 255.0), _clamp_byte(g * 255.0), _clamp_byte(b * 255.0))
+        return (_clamp_byte(r), _clamp_byte(g), _clamp_byte(b))
+
+    return fb
 
 
 def normalize_hierarchy_metadata(
@@ -450,7 +541,11 @@ def compute_part_sync_hashes(
     geom_sig = "|".join(geom_tokens)
     geometry_hash = compute_fnv1a_32_hex(geom_sig)
 
-    cr, cg, cb = _normalize_color_rgb_255(part.get("color"))
+    cr, cg, cb = _normalize_color_rgb_255(
+        part.get("color"),
+        (148, 163, 184),
+        part.get("colorSpace") or part.get("colorFormat"),
+    )
     mat_name = str(part.get("material") or "Metal").strip() or "Metal"
     pbr = part.get("pbrMaterial") if isinstance(part.get("pbrMaterial"), dict) else {}
     rough_val = (
@@ -584,8 +679,13 @@ def normalize_parts_with_sync_metadata(
         p["geometrySource"] = sync_meta["geometrySource"]
         p["rotationMatrix"] = sync_meta["rotationMatrix"]
         p["rotation"] = _canonical_matrix_9_to_euler_deg(sync_meta["rotationMatrix"])
-        cr, cg, cb = _normalize_color_rgb_255(p.get("color"))
+        cr, cg, cb = _normalize_color_rgb_255(
+            p.get("color"),
+            (148, 163, 184),
+            p.get("colorSpace") or p.get("colorFormat"),
+        )
         p["color"] = [cr, cg, cb]
+        p["colorSpace"] = "rgb8"
         p["reflectance"] = float(p.get("reflectance") if p.get("reflectance") is not None else 0.0)
         p["schemaVersion"] = sync_meta["schemaVersion"]
         p["hashSchemaVersion"] = sync_meta["hashSchemaVersion"]

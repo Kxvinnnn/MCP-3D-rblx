@@ -166,42 +166,128 @@ local function isFiniteNumberLuau(val: any): boolean
     return n == n and n ~= math.huge and n ~= -math.huge
 end
 
-local function resolveRgbTupleLuau(colorRaw: any, fallback: { number }?): { number }
-    local fb = fallback or { 160, 165, 175 }
+local RGB8_COLOR_HINTS: { [string]: boolean } = {
+    rgb8 = true,
+    srgb8 = true,
+    rgb255 = true,
+    ["255"] = true,
+    ["0-255"] = true,
+    ["0..255"] = true,
+    uint8 = true,
+    byte = true,
+    fromrgb = true,
+}
+
+local RGB01_COLOR_HINTS: { [string]: boolean } = {
+    rgb01 = true,
+    normalized = true,
+    norm = true,
+    ["01"] = true,
+    ["0-1"] = true,
+    ["0..1"] = true,
+    unit = true,
+    float = true,
+    color3 = true,
+    linear01 = true,
+}
+
+local function clampColorByteLuau(val: number): number
+    return math.clamp(math.floor(val + 0.5), 0, 255)
+end
+
+local function parseColorSpaceHintLuau(hint: any): string?
+    if hint == true then
+        return "rgb01"
+    elseif hint == false then
+        return "rgb8"
+    elseif type(hint) == "string" then
+        local clean = string.lower(string.match(hint, "^%s*(.-)%s*$") or "")
+        if RGB8_COLOR_HINTS[clean] then
+            return "rgb8"
+        elseif RGB01_COLOR_HINTS[clean] then
+            return "rgb01"
+        end
+    end
+    return nil
+end
+
+local function resolveRgbTupleLuau(colorRaw: any, fallback: { number }?, explicitColorSpace: any?): { number }
+    local rawFb = fallback or { 160, 165, 175 }
+    local fb = {
+        clampColorByteLuau(tonumber(rawFb[1]) or 160),
+        clampColorByteLuau(tonumber(rawFb[2]) or 165),
+        clampColorByteLuau(tonumber(rawFb[3]) or 175),
+    }
     if type(colorRaw) == "string" then
-        local hex = string.match(colorRaw, "^%s*#?(%x%x%x%x%x%x)%s*$")
-        if hex then
-            local r = tonumber(string.sub(hex, 1, 2), 16)
-            local g = tonumber(string.sub(hex, 3, 4), 16)
-            local b = tonumber(string.sub(hex, 5, 6), 16)
+        local hex6 = string.match(colorRaw, "^%s*#?(%x%x%x%x%x%x)%s*$")
+        if hex6 then
+            local r = tonumber(string.sub(hex6, 1, 2), 16)
+            local g = tonumber(string.sub(hex6, 3, 4), 16)
+            local b = tonumber(string.sub(hex6, 5, 6), 16)
             if r and g and b then
                 return { r, g, b }
             end
         end
-        return { fb[1] or 160, fb[2] or 165, fb[3] or 175 }
+        local hex3 = string.match(colorRaw, "^%s*#?(%x%x%x)%s*$")
+        if hex3 then
+            local r = tonumber(string.sub(hex3, 1, 1), 16)
+            local g = tonumber(string.sub(hex3, 2, 2), 16)
+            local b = tonumber(string.sub(hex3, 3, 3), 16)
+            if r and g and b then
+                return { r * 17, g * 17, b * 17 }
+            end
+        end
+        return fb
+    end
+    if type(colorRaw) == "table" and colorRaw[1] == nil then
+        local nestedHint = explicitColorSpace
+        if nestedHint == nil then
+            if colorRaw.colorSpace ~= nil then
+                nestedHint = colorRaw.colorSpace
+            elseif colorRaw.colorFormat ~= nil then
+                nestedHint = colorRaw.colorFormat
+            else
+                nestedHint = colorRaw.normalized
+            end
+        end
+        if colorRaw.color ~= nil then
+            return resolveRgbTupleLuau(colorRaw.color, fb, nestedHint)
+        end
+        local rVal = if colorRaw.r ~= nil then colorRaw.r else colorRaw.R
+        local gVal = if colorRaw.g ~= nil then colorRaw.g else colorRaw.G
+        local bVal = if colorRaw.b ~= nil then colorRaw.b else colorRaw.B
+        if rVal ~= nil and gVal ~= nil and bVal ~= nil then
+            return resolveRgbTupleLuau({ rVal, gVal, bVal }, fb, nestedHint)
+        end
+        return fb
     end
     if type(colorRaw) == "table" and #colorRaw >= 3 then
         local r = tonumber(colorRaw[1])
         local g = tonumber(colorRaw[2])
         local b = tonumber(colorRaw[3])
         if r and g and b and isFiniteNumberLuau(r) and isFiniteNumberLuau(g) and isFiniteNumberLuau(b) then
-            local isNormalized = r >= 0 and g >= 0 and b >= 0 and r <= 1 and g <= 1 and b <= 1
-                and ((math.floor(r) ~= r) or (math.floor(g) ~= g) or (math.floor(b) ~= b))
-            if isNormalized then
+            local mode = parseColorSpaceHintLuau(explicitColorSpace)
+            if mode == "rgb8" then
+                return { clampColorByteLuau(r), clampColorByteLuau(g), clampColorByteLuau(b) }
+            elseif mode == "rgb01" then
+                return { clampColorByteLuau(r * 255), clampColorByteLuau(g * 255), clampColorByteLuau(b * 255) }
+            end
+            local isNormalizedUnitRange = r >= 0 and g >= 0 and b >= 0 and r <= 1 and g <= 1 and b <= 1
+            if isNormalizedUnitRange then
                 return {
-                    math.clamp(math.floor(r * 255 + 0.5), 0, 255),
-                    math.clamp(math.floor(g * 255 + 0.5), 0, 255),
-                    math.clamp(math.floor(b * 255 + 0.5), 0, 255),
+                    clampColorByteLuau(r * 255),
+                    clampColorByteLuau(g * 255),
+                    clampColorByteLuau(b * 255),
                 }
             end
             return {
-                math.clamp(math.floor(r + 0.5), 0, 255),
-                math.clamp(math.floor(g + 0.5), 0, 255),
-                math.clamp(math.floor(b + 0.5), 0, 255),
+                clampColorByteLuau(r),
+                clampColorByteLuau(g),
+                clampColorByteLuau(b),
             }
         end
     end
-    return { fb[1] or 160, fb[2] or 165, fb[3] or 175 }
+    return fb
 end
 
 -- Construct a real MeshPart from vertex, normal, UV, and triangle index buffers via EditableMesh
@@ -851,7 +937,7 @@ local function computePartSyncHashesLuau(partSpec: any, idxFallback: number): {
     end
     local geometryHash = computeLuauContentHash(table.concat(geomTokens, "|"))
 
-    local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
+    local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 }, partSpec.colorSpace or partSpec.colorFormat)
     local cr = col[1]
     local cg = col[2]
     local cb = col[3]
@@ -1090,7 +1176,7 @@ local function construct3DModelFromSpec(
         )
         part.CFrame = spawnOrigin * localCF
 
-        local col = resolveRgbTupleLuau(partSpec.color, { 160, 165, 175 })
+        local col = resolveRgbTupleLuau(partSpec.color, { 160, 165, 175 }, partSpec.colorSpace or partSpec.colorFormat)
         part.Color = Color3.fromRGB(col[1], col[2], col[3])
 
         local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
@@ -1197,6 +1283,7 @@ local function construct3DModelFromSpec(
                     rotation = canonicalMatrix9ToEulerDeg(rotMat),
                     rotationMatrix = rotMat,
                     color = { col[1], col[2], col[3] },
+                    colorSpace = "rgb8",
                     material = part.Material.Name,
                     roughness = roughnessVal,
                     metalness = metalnessVal,
@@ -1774,7 +1861,7 @@ serializeStudioPartsFromInstances = function(collectedParts: { BasePart }, rootM
         if sa then
             pbrSpec = {
                 materialName = tostring(part:GetAttribute("PBR_MaterialName") or (part.Name .. "_PBR")),
-                albedoHex = string.format("#%02x%02x%02x", math.round(part.Color.R * 255), math.round(part.Color.G * 255), math.round(part.Color.B * 255)),
+                albedoHex = string.format("#%02x%02x%02x", clampColorByteLuau(part.Color.R * 255), clampColorByteLuau(part.Color.G * 255), clampColorByteLuau(part.Color.B * 255)),
                 roughness = roughnessVal,
                 metalness = metalnessVal,
                 colorMapId = if isVerifiedRobloxAssetUri(sa.ColorMap) then sa.ColorMap else nil,
@@ -1813,10 +1900,11 @@ serializeStudioPartsFromInstances = function(collectedParts: { BasePart }, rootM
             rotation = eulerDeg,
             rotationMatrix = rotMat,
             color = {
-                math.clamp(math.floor(part.Color.R * 255 + 0.5), 0, 255),
-                math.clamp(math.floor(part.Color.G * 255 + 0.5), 0, 255),
-                math.clamp(math.floor(part.Color.B * 255 + 0.5), 0, 255),
+                clampColorByteLuau(part.Color.R * 255),
+                clampColorByteLuau(part.Color.G * 255),
+                clampColorByteLuau(part.Color.B * 255),
             },
+            colorSpace = "rgb8",
             material = part.Material.Name,
             roughness = roughnessVal,
             metalness = metalnessVal,
@@ -2070,7 +2158,7 @@ local function applyIncrementalModelUpdateInStudio(
                 rotMat[7], rotMat[8], rotMat[9]
             )
             newPart.CFrame = originCFrame * localCF
-            local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
+            local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 }, partSpec.colorSpace or partSpec.colorFormat)
             newPart.Color = Color3.fromRGB(col[1], col[2], col[3])
             local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
             if matEnum then newPart.Material = matEnum end
@@ -2153,7 +2241,7 @@ local function applyIncrementalModelUpdateInStudio(
                     activePart.CanCollide = if partSpec.canCollide ~= nil then partSpec.canCollide else true
                 end
                 if matChanged then
-                    local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
+                    local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 }, partSpec.colorSpace or partSpec.colorFormat)
                     activePart.Color = Color3.fromRGB(col[1], col[2], col[3])
                     local matEnum = (Enum.Material :: any)[partSpec.material or "Metal"]
                     if matEnum then activePart.Material = matEnum end
@@ -2180,7 +2268,7 @@ local function applyIncrementalModelUpdateInStudio(
                     end
                     local okJson, encodedGeom = pcall(function()
                         local pos = partSpec.position or { 0, 1, 0 }
-                        local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 })
+                        local col = resolveRgbTupleLuau(partSpec.color, { 148, 163, 184 }, partSpec.colorSpace or partSpec.colorFormat)
                         return HttpService:JSONEncode({
                             hashSchemaVersion = syncMeta.hashSchemaVersion,
                             partId = syncMeta.partId,
@@ -2202,6 +2290,7 @@ local function applyIncrementalModelUpdateInStudio(
                             rotation = canonicalMatrix9ToEulerDeg(syncMeta.rotationMatrix),
                             rotationMatrix = syncMeta.rotationMatrix,
                             color = { col[1], col[2], col[3] },
+                            colorSpace = "rgb8",
                             material = activePart.Material.Name,
                             roughness = tonumber(partSpec.roughness) or 0.35,
                             metalness = tonumber(partSpec.metalness) or 0.6,
@@ -2379,6 +2468,7 @@ local function runForgePluginSelfVerification(): (boolean, { string })
         position = { 0, 3, 0 },
         rotation = { 0, 45, 0 },
         color = { 148, 163, 184 },
+        colorSpace = "rgb8",
         material = "Metal",
         roughness = 0.35,
         metalness = 0.6,
@@ -2404,6 +2494,46 @@ local function runForgePluginSelfVerification(): (boolean, { string })
     local h3 = computePartSyncHashesLuau(samplePart, 1)
     if h2.geometryHash == h3.geometryHash then
         table.insert(errors, "Intermediate vertex modification did not change geometryHash")
+    end
+    local rgbFloat = resolveRgbTupleLuau({ 0.5, 0.25, 0.75 })
+    local rgbRedNorm = resolveRgbTupleLuau({ 1, 0, 0 })
+    local rgbGreenNorm = resolveRgbTupleLuau({ 0, 1, 0 })
+    local rgbBlueNorm = resolveRgbTupleLuau({ 0, 0, 1 })
+    local rgbBlack = resolveRgbTupleLuau({ 0, 0, 0 })
+    local rgbWhiteNorm = resolveRgbTupleLuau({ 1, 1, 1 })
+    local rgbWhite8 = resolveRgbTupleLuau({ 255, 255, 255 })
+    local rgbDarkRedExplicit = resolveRgbTupleLuau({ 1, 0, 0 }, { 148, 163, 184 }, "rgb8")
+    local rgbDarkExplicit = resolveRgbTupleLuau({ 1, 1, 1 }, { 148, 163, 184 }, "rgb8")
+    local rgbHex = resolveRgbTupleLuau("#ef4444")
+    if rgbFloat[1] ~= 128 or rgbFloat[2] ~= 64 or rgbFloat[3] ~= 191 then
+        table.insert(errors, "RGB normalized float parity mismatch")
+    end
+    if rgbRedNorm[1] ~= 255 or rgbRedNorm[2] ~= 0 or rgbRedNorm[3] ~= 0 then
+        table.insert(errors, "RGB normalized [1,0,0] parity mismatch")
+    end
+    if rgbGreenNorm[1] ~= 0 or rgbGreenNorm[2] ~= 255 or rgbGreenNorm[3] ~= 0 then
+        table.insert(errors, "RGB normalized [0,1,0] parity mismatch")
+    end
+    if rgbBlueNorm[1] ~= 0 or rgbBlueNorm[2] ~= 0 or rgbBlueNorm[3] ~= 255 then
+        table.insert(errors, "RGB normalized [0,0,1] parity mismatch")
+    end
+    if rgbBlack[1] ~= 0 or rgbBlack[2] ~= 0 or rgbBlack[3] ~= 0 then
+        table.insert(errors, "RGB black [0,0,0] parity mismatch")
+    end
+    if rgbWhiteNorm[1] ~= 255 or rgbWhiteNorm[2] ~= 255 or rgbWhiteNorm[3] ~= 255 then
+        table.insert(errors, "RGB normalized [1,1,1] parity mismatch")
+    end
+    if rgbWhite8[1] ~= 255 or rgbWhite8[2] ~= 255 or rgbWhite8[3] ~= 255 then
+        table.insert(errors, "RGB 8-bit [255,255,255] parity mismatch")
+    end
+    if rgbDarkRedExplicit[1] ~= 1 or rgbDarkRedExplicit[2] ~= 0 or rgbDarkRedExplicit[3] ~= 0 then
+        table.insert(errors, "RGB explicit rgb8 [1,0,0] parity mismatch")
+    end
+    if rgbDarkExplicit[1] ~= 1 or rgbDarkExplicit[2] ~= 1 or rgbDarkExplicit[3] ~= 1 then
+        table.insert(errors, "RGB explicit rgb8 [1,1,1] parity mismatch")
+    end
+    if rgbHex[1] ~= 239 or rgbHex[2] ~= 68 or rgbHex[3] ~= 68 then
+        table.insert(errors, "RGB hex #ef4444 parity mismatch")
     end
     return (#errors == 0), errors
 end
