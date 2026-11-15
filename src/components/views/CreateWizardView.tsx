@@ -42,6 +42,31 @@ import {
 } from './wizard/wizardData.ts';
 import { WizardStep3Params } from './wizard/WizardStep3Params.tsx';
 
+const UI_DEFAULT_TREE_PARAMS = {
+  height: 14,
+  width: 10,
+  trunkThickness: 1.6,
+  trunkLean: 0,
+  trunkCurvature: 0.15,
+  rootFlareScale: 1.0,
+  branchCount: 4,
+  branchLength: 4.0,
+  branchDistribution: 'tiered' as 'tiered' | 'whorled' | 'alternating' | 'canopy_top',
+  canopyShape: 'spherical' as 'spherical' | 'conical' | 'layered' | 'weeping',
+  canopySize: 1.0,
+  leafDistribution: 'balanced' as 'dense' | 'balanced' | 'sparse' | 'clustered',
+  foliageCount: 4,
+  foliageDensity: 1.0,
+  trunkMaterial: 'Wood',
+  leafMaterial: 'Grass',
+  trunkColor: '#6e482b',
+  leafColor: '#34843d',
+  variation: 0.25,
+  leafVariation: 0.25,
+  colorVariation: 0.2,
+  detailLevel: 'medium' as DetailLevel,
+};
+
 export const CreateWizardView: React.FC = () => {
   const {
     setActiveTab,
@@ -57,6 +82,7 @@ export const CreateWizardView: React.FC = () => {
   const [inputMethod, setInputMethod] = useState<InputMethod>('text');
   const [generationMode, setGenerationMode] = useState<'procedural' | 'hybrid' | 'ai' | 'image_to_3d'>('hybrid');
   const [seed, setSeed] = useState<string>('forge-tree-2026');
+  const [seedLocked, setSeedLocked] = useState<boolean>(false);
   const [selectedPresetId, setSelectedPresetId] = useState<string>('ancient-oak');
   const [showAdvancedTreeParams, setShowAdvancedTreeParams] = useState<boolean>(false);
   const [loadingBenchmarkId, setLoadingBenchmarkId] = useState<string | null>(null);
@@ -86,6 +112,7 @@ export const CreateWizardView: React.FC = () => {
   const [lodLevel] = useState<0 | 1 | 2>(0);
   const [parsedPromptBadges, setParsedPromptBadges] = useState<string[]>([]);
   const [treeParamsManuallyEdited, setTreeParamsManuallyEdited] = useState<boolean>(false);
+  const [manuallyEditedFields, setManuallyEditedFields] = useState<string[]>([]);
 
   // Input states
   const [prompt, setPrompt] = useState<string>(
@@ -138,7 +165,26 @@ export const CreateWizardView: React.FC = () => {
     setFoliageDensity(preset.foliageDensity);
     setTrunkColor(preset.trunkColor);
     setLeafColor(preset.leafColor);
+    setSeedLocked(true);
     setTreeParamsManuallyEdited(true);
+    setManuallyEditedFields([
+      'height',
+      'width',
+      'trunkThickness',
+      'trunkLean',
+      'trunkCurvature',
+      'rootFlareScale',
+      'branchCount',
+      'branchLength',
+      'branchDistribution',
+      'canopyShape',
+      'canopySize',
+      'leafDistribution',
+      'foliageCount',
+      'foliageDensity',
+      'trunkColor',
+      'leafColor',
+    ]);
     setNotification({
       type: 'info',
       message: `Estilo '${preset.label}' listo (${preset.height} studs). ¡Haz clic en Crear Modelo 3D!`,
@@ -209,39 +255,60 @@ export const CreateWizardView: React.FC = () => {
     setNotification({ type: 'info', message: 'Generación 3D cancelada.' });
   };
 
-  const applyParsedTreePromptToState = (rawPrompt: string) => {
+  const markFieldManuallyEdited = (field: string) => {
+    setTreeParamsManuallyEdited(true);
+    setManuallyEditedFields((prev) => (prev.includes(field) ? prev : [...prev, field]));
+  };
+
+  const applyParsedTreePromptToState = (rawPrompt: string, preserveFields: string[] = []) => {
     const parsed = parseNaturalLanguageToTreeParams(rawPrompt);
     const p = parsed.params;
-    if (p.height !== undefined) setTreeHeight(p.height);
-    if (p.width !== undefined) setTreeWidth(p.width);
-    if (p.trunkThickness !== undefined) setTrunkThickness(p.trunkThickness);
-    if (p.trunkLean !== undefined) setTrunkLean(p.trunkLean);
-    if (p.trunkCurvature !== undefined) setTrunkCurvature(p.trunkCurvature);
-    if (p.rootFlareScale !== undefined) setRootFlareScale(p.rootFlareScale);
-    if (p.branchCount !== undefined) setBranchCount(p.branchCount);
-    if (p.branchLength !== undefined) setBranchLength(p.branchLength);
-    if (p.branchDistribution) setBranchDistribution(p.branchDistribution);
-    if (p.canopyShape) setCanopyShape(p.canopyShape);
-    if (p.canopySize !== undefined) setCanopySize(p.canopySize);
-    if (p.leafDistribution) setLeafDistribution(p.leafDistribution);
-    if (p.foliageCount !== undefined) setFoliageCount(p.foliageCount);
-    if (p.foliageDensity !== undefined) setFoliageDensity(p.foliageDensity);
-    if (p.trunkMaterial) setTrunkMaterial(p.trunkMaterial);
-    if (p.leafMaterial) setLeafMaterial(p.leafMaterial);
-    if (p.trunkColor) setTrunkColor(p.trunkColor);
-    if (p.leafColor) setLeafColor(p.leafColor);
-    if (p.variation !== undefined) setTreeVariation(p.variation);
-    if (p.leafVariation !== undefined) setLeafVariation(p.leafVariation);
-    if (p.colorVariation !== undefined) setColorVariation(p.colorVariation);
-    if (p.detailLevel) setDetailLevel(p.detailLevel);
+    const edited = new Set(preserveFields);
+    if (!edited.has('height')) setTreeHeight(p.height ?? UI_DEFAULT_TREE_PARAMS.height);
+    if (!edited.has('width')) setTreeWidth(p.width ?? UI_DEFAULT_TREE_PARAMS.width);
+    if (!edited.has('trunkThickness')) setTrunkThickness(p.trunkThickness ?? UI_DEFAULT_TREE_PARAMS.trunkThickness);
+    if (!edited.has('trunkLean')) setTrunkLean(p.trunkLean ?? UI_DEFAULT_TREE_PARAMS.trunkLean);
+    if (!edited.has('trunkCurvature')) setTrunkCurvature(p.trunkCurvature ?? UI_DEFAULT_TREE_PARAMS.trunkCurvature);
+    if (!edited.has('rootFlareScale')) setRootFlareScale(p.rootFlareScale ?? UI_DEFAULT_TREE_PARAMS.rootFlareScale);
+    if (!edited.has('branchCount')) setBranchCount(p.branchCount ?? UI_DEFAULT_TREE_PARAMS.branchCount);
+    if (!edited.has('branchLength')) setBranchLength(p.branchLength ?? UI_DEFAULT_TREE_PARAMS.branchLength);
+    if (!edited.has('branchDistribution')) setBranchDistribution(p.branchDistribution ?? UI_DEFAULT_TREE_PARAMS.branchDistribution);
+    if (!edited.has('canopyShape')) setCanopyShape(p.canopyShape ?? UI_DEFAULT_TREE_PARAMS.canopyShape);
+    if (!edited.has('canopySize')) setCanopySize(p.canopySize ?? UI_DEFAULT_TREE_PARAMS.canopySize);
+    if (!edited.has('leafDistribution')) setLeafDistribution(p.leafDistribution ?? UI_DEFAULT_TREE_PARAMS.leafDistribution);
+    if (!edited.has('foliageCount')) setFoliageCount(p.foliageCount ?? UI_DEFAULT_TREE_PARAMS.foliageCount);
+    if (!edited.has('foliageDensity')) setFoliageDensity(p.foliageDensity ?? UI_DEFAULT_TREE_PARAMS.foliageDensity);
+    if (!edited.has('trunkMaterial')) setTrunkMaterial(p.trunkMaterial ?? UI_DEFAULT_TREE_PARAMS.trunkMaterial);
+    if (!edited.has('leafMaterial')) setLeafMaterial(p.leafMaterial ?? UI_DEFAULT_TREE_PARAMS.leafMaterial);
+    if (!edited.has('trunkColor')) setTrunkColor(p.trunkColor ?? UI_DEFAULT_TREE_PARAMS.trunkColor);
+    if (!edited.has('leafColor')) setLeafColor(p.leafColor ?? UI_DEFAULT_TREE_PARAMS.leafColor);
+    if (!edited.has('variation')) setTreeVariation(p.variation ?? UI_DEFAULT_TREE_PARAMS.variation);
+    if (!edited.has('leafVariation')) setLeafVariation(p.leafVariation ?? UI_DEFAULT_TREE_PARAMS.leafVariation);
+    if (!edited.has('colorVariation')) setColorVariation(p.colorVariation ?? UI_DEFAULT_TREE_PARAMS.colorVariation);
+    if (!edited.has('detailLevel')) setDetailLevel(p.detailLevel ?? UI_DEFAULT_TREE_PARAMS.detailLevel);
     setParsedPromptBadges(parsed.detectedKeywords);
     return parsed;
   };
 
   const handleStartGeneration = async () => {
-    if (category === 'Trees & Vegetation' && inputMethod === 'text' && !treeParamsManuallyEdited) {
-      applyParsedTreePromptToState(prompt);
-    }
+    const editedSet = new Set(manuallyEditedFields);
+    const parsedPromptResult =
+      category === 'Trees & Vegetation' && inputMethod === 'text'
+        ? applyParsedTreePromptToState(prompt, manuallyEditedFields)
+        : null;
+    const parsedTree = (parsedPromptResult?.params || {}) as Record<string, unknown>;
+
+    const resolveTreeField = <K extends keyof typeof UI_DEFAULT_TREE_PARAMS>(
+      field: K,
+      stateValue: (typeof UI_DEFAULT_TREE_PARAMS)[K]
+    ): (typeof UI_DEFAULT_TREE_PARAMS)[K] => {
+      if (editedSet.has(field)) return stateValue;
+      const parsedVal = parsedTree[field];
+      if (parsedVal !== undefined) return parsedVal as (typeof UI_DEFAULT_TREE_PARAMS)[K];
+      return UI_DEFAULT_TREE_PARAMS[field];
+    };
+
+    const resolvedDetailLevel = resolveTreeField('detailLevel', detailLevel);
 
     setCurrentStep(4);
     setIsGenerating(true);
@@ -252,17 +319,53 @@ export const CreateWizardView: React.FC = () => {
     setProgressStatus('Construyendo tu modelo 3D...');
     setActivityLogs([
       `Iniciando generación para '${category}'...`,
-      `Presupuesto: ${POLY_BUDGETS[detailLevel].tris} triángulos`,
+      `Presupuesto: ${POLY_BUDGETS[resolvedDetailLevel].tris} triángulos`,
       `Fidelidad de colisión: ${collisionFidelity}`,
     ]);
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    const trimmedSeed = seed.trim();
+    const isDefaultPlaceholder =
+      !trimmedSeed || trimmedSeed === 'forge-tree-2026' || trimmedSeed === 'forge-seed-2026';
     const effectiveSeed =
-      seed.trim() && seed.trim() !== 'forge-tree-2026' && seed.trim() !== 'forge-seed-2026'
-        ? seed.trim()
+      seedLocked && !isDefaultPlaceholder
+        ? trimmedSeed
         : `forge-${Math.floor(1000 + Math.random() * 9000)}-${Date.now().toString(36).slice(-4)}`;
+    if (effectiveSeed !== seed) {
+      setSeed(effectiveSeed);
+    }
+
+    const resolvedTreeParams =
+      category === 'Trees & Vegetation'
+        ? {
+            seed: effectiveSeed,
+            height: resolveTreeField('height', treeHeight),
+            width: resolveTreeField('width', treeWidth),
+            trunkThickness: resolveTreeField('trunkThickness', trunkThickness),
+            trunkLean: resolveTreeField('trunkLean', trunkLean),
+            trunkCurvature: resolveTreeField('trunkCurvature', trunkCurvature),
+            rootFlareScale: resolveTreeField('rootFlareScale', rootFlareScale),
+            branchCount: resolveTreeField('branchCount', branchCount),
+            branchLength: resolveTreeField('branchLength', branchLength),
+            branchDistribution: resolveTreeField('branchDistribution', branchDistribution),
+            canopyShape: resolveTreeField('canopyShape', canopyShape),
+            canopySize: resolveTreeField('canopySize', canopySize),
+            leafDistribution: resolveTreeField('leafDistribution', leafDistribution),
+            foliageCount: resolveTreeField('foliageCount', foliageCount),
+            foliageDensity: resolveTreeField('foliageDensity', foliageDensity),
+            trunkMaterial: resolveTreeField('trunkMaterial', trunkMaterial),
+            leafMaterial: resolveTreeField('leafMaterial', leafMaterial),
+            trunkColor: resolveTreeField('trunkColor', trunkColor),
+            leafColor: resolveTreeField('leafColor', leafColor),
+            variation: resolveTreeField('variation', treeVariation),
+            leafVariation: resolveTreeField('leafVariation', leafVariation),
+            colorVariation: resolveTreeField('colorVariation', colorVariation),
+            detailLevel: resolvedDetailLevel,
+            lodLevel,
+          }
+        : undefined;
 
     try {
       const response = await forgeFetch('/api/v1/generate-3d-stream', {
@@ -275,41 +378,11 @@ export const CreateWizardView: React.FC = () => {
           category,
           generation_mode: inputMethod === 'image' && referenceImage ? 'image_to_3d' : generationMode,
           seed: effectiveSeed,
-          manually_edited_fields: treeParamsManuallyEdited
-            ? ['height', 'width', 'trunkThickness', 'trunkLean', 'trunkCurvature', 'rootFlareScale', 'branchCount', 'branchLength', 'canopyShape', 'leafColor', 'trunkColor']
-            : [],
-          tree_params:
-            category === 'Trees & Vegetation'
-              ? {
-                  seed: effectiveSeed,
-                  height: treeHeight,
-                  width: treeWidth,
-                  trunkThickness,
-                  trunkLean,
-                  trunkCurvature,
-                  rootFlareScale,
-                  branchCount,
-                  branchLength,
-                  branchDistribution,
-                  canopyShape,
-                  canopySize,
-                  leafDistribution,
-                  foliageCount,
-                  foliageDensity,
-                  trunkMaterial,
-                  leafMaterial,
-                  trunkColor,
-                  leafColor,
-                  variation: treeVariation,
-                  leafVariation,
-                  colorVariation,
-                  detailLevel,
-                  lodLevel,
-                }
-              : undefined,
+          manually_edited_fields: manuallyEditedFields,
+          tree_params: resolvedTreeParams,
           lodLevel,
-          detailLevel,
-          target_poly_budget: POLY_BUDGETS[detailLevel].tris,
+          detailLevel: resolvedDetailLevel,
+          target_poly_budget: POLY_BUDGETS[resolvedDetailLevel].tris,
           collision_fidelity: collisionFidelity,
           save_to_rojo: saveToRojo,
           save_to_library: true,
@@ -743,8 +816,13 @@ export const CreateWizardView: React.FC = () => {
                     rows={3}
                     value={prompt}
                     onChange={(e) => {
-                      setPrompt(e.target.value);
+                      const nextPrompt = e.target.value;
+                      setPrompt(nextPrompt);
                       setTreeParamsManuallyEdited(false);
+                      setManuallyEditedFields([]);
+                      if (category === 'Trees & Vegetation') {
+                        setParsedPromptBadges(parseNaturalLanguageToTreeParams(nextPrompt).detectedKeywords);
+                      }
                     }}
                     placeholder="Ejemplo: Árbol de fantasía con copa rojiza frondosa, tronco curvado y raíces expuestas..."
                     className="w-full bg-slate-950 border border-slate-800 rounded-2xl p-4 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:border-fuchsia-500 resize-none leading-relaxed"
@@ -764,6 +842,10 @@ export const CreateWizardView: React.FC = () => {
                         onClick={() => {
                           setPrompt(sug);
                           setTreeParamsManuallyEdited(false);
+                          setManuallyEditedFields([]);
+                          if (category === 'Trees & Vegetation') {
+                            applyParsedTreePromptToState(sug, []);
+                          }
                         }}
                         className="text-xs text-slate-200 hover:text-white bg-slate-950 hover:bg-violet-950/60 border border-slate-800 hover:border-violet-500/50 px-3.5 py-2 rounded-xl transition text-left cursor-pointer"
                       >
@@ -904,8 +986,8 @@ export const CreateWizardView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    if (category === 'Trees & Vegetation' && inputMethod === 'text' && !treeParamsManuallyEdited) {
-                      applyParsedTreePromptToState(prompt);
+                    if (category === 'Trees & Vegetation' && inputMethod === 'text') {
+                      applyParsedTreePromptToState(prompt, manuallyEditedFields);
                     }
                     setCurrentStep(3);
                   }}
@@ -935,46 +1017,72 @@ export const CreateWizardView: React.FC = () => {
             category={category}
             treeHeight={treeHeight}
             onChangeTreeHeight={(val) => {
-              setTreeParamsManuallyEdited(true);
+              markFieldManuallyEdited('height');
               setTreeHeight(val);
             }}
             treeWidth={treeWidth}
             onChangeTreeWidth={(val) => {
-              setTreeParamsManuallyEdited(true);
+              markFieldManuallyEdited('width');
               setTreeWidth(val);
             }}
             leafColor={leafColor}
             onChangeLeafColor={(val) => {
-              setTreeParamsManuallyEdited(true);
+              markFieldManuallyEdited('leafColor');
               setLeafColor(val);
             }}
             trunkColor={trunkColor}
             onChangeTrunkColor={(val) => {
-              setTreeParamsManuallyEdited(true);
+              markFieldManuallyEdited('trunkColor');
               setTrunkColor(val);
             }}
             showAdvancedTreeParams={showAdvancedTreeParams}
             onToggleAdvancedTreeParams={() => setShowAdvancedTreeParams(!showAdvancedTreeParams)}
             trunkThickness={trunkThickness}
-            onChangeTrunkThickness={setTrunkThickness}
+            onChangeTrunkThickness={(val) => {
+              markFieldManuallyEdited('trunkThickness');
+              setTrunkThickness(val);
+            }}
             trunkCurvature={trunkCurvature}
-            onChangeTrunkCurvature={setTrunkCurvature}
+            onChangeTrunkCurvature={(val) => {
+              markFieldManuallyEdited('trunkCurvature');
+              setTrunkCurvature(val);
+            }}
             rootFlareScale={rootFlareScale}
-            onChangeRootFlareScale={setRootFlareScale}
+            onChangeRootFlareScale={(val) => {
+              markFieldManuallyEdited('rootFlareScale');
+              setRootFlareScale(val);
+            }}
             branchCount={branchCount}
-            onChangeBranchCount={setBranchCount}
+            onChangeBranchCount={(val) => {
+              markFieldManuallyEdited('branchCount');
+              setBranchCount(val);
+            }}
             canopyShape={canopyShape}
-            onChangeCanopyShape={setCanopyShape}
+            onChangeCanopyShape={(val) => {
+              markFieldManuallyEdited('canopyShape');
+              setCanopyShape(val);
+            }}
             foliageDensity={foliageDensity}
-            onChangeFoliageDensity={setFoliageDensity}
+            onChangeFoliageDensity={(val) => {
+              markFieldManuallyEdited('foliageDensity');
+              setFoliageDensity(val);
+            }}
             detailLevel={detailLevel}
-            onChangeDetailLevel={setDetailLevel}
+            onChangeDetailLevel={(val) => {
+              markFieldManuallyEdited('detailLevel');
+              setDetailLevel(val);
+            }}
             generationMode={generationMode}
             onChangeGenerationMode={setGenerationMode}
             collisionFidelity={collisionFidelity}
             onChangeCollisionFidelity={setCollisionFidelity}
             seed={seed}
-            onChangeSeed={setSeed}
+            onChangeSeed={(val) => {
+              setSeed(val);
+              setSeedLocked(true);
+            }}
+            seedLocked={seedLocked}
+            onToggleSeedLocked={() => setSeedLocked((prev) => !prev)}
             onBack={() => setCurrentStep(2)}
             onGenerate={handleStartGeneration}
           />
@@ -1152,7 +1260,7 @@ export const CreateWizardView: React.FC = () => {
 
             {/* Engine Execution Report & AI Director Blueprint Diagnostics */}
             {(generatedAsset as any).execution_report && (
-              <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-4 space-y-2">
+              <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="px-2.5 py-1 rounded-lg bg-violet-950/80 border border-violet-500/40 text-[11px] font-bold text-violet-300 font-mono">
@@ -1161,6 +1269,22 @@ export const CreateWizardView: React.FC = () => {
                     <span className="px-2.5 py-1 rounded-lg bg-cyan-950/80 border border-cyan-500/40 text-[11px] font-bold text-cyan-300 font-mono">
                       Modo ejecutado: {(generatedAsset as any).execution_report.executed_mode}
                     </span>
+                    <span className="px-2.5 py-1 rounded-lg bg-indigo-950/80 border border-indigo-500/40 text-[11px] font-bold text-indigo-300 font-mono">
+                      Proveedor: {(generatedAsset as any).execution_report.provider || 'local_procedural'}
+                      {(generatedAsset as any).execution_report.model_used
+                        ? ` (${(generatedAsset as any).execution_report.model_used})`
+                        : ''}
+                    </span>
+                    {(generatedAsset as any).execution_report.provider_status && (
+                      <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-[11px] font-bold text-slate-300 font-mono">
+                        Estado: {(generatedAsset as any).execution_report.provider_status}
+                      </span>
+                    )}
+                    {typeof ((generatedAsset as any).execution_report.latency_ms ?? (generatedAsset as any).latency_ms) === 'number' && (
+                      <span className="px-2.5 py-1 rounded-lg bg-sky-950/80 border border-sky-500/40 text-[11px] font-bold text-sky-300 font-mono tabular-nums">
+                        Latencia: {(generatedAsset as any).execution_report.latency_ms ?? (generatedAsset as any).latency_ms} ms
+                      </span>
+                    )}
                     <span className="px-2.5 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-[11px] font-bold text-emerald-300 font-mono">
                       Triángulos: {generatedAsset.poly_count} / Budget: {(generatedAsset as any).poly_budget_requested || POLY_BUDGETS[detailLevel].tris}
                     </span>
@@ -1171,11 +1295,65 @@ export const CreateWizardView: React.FC = () => {
                     )}
                   </div>
                 </div>
+
+                {(() => {
+                  const rawProv =
+                    (generatedAsset as any).execution_report.parameter_provenance ??
+                    (generatedAsset as any).parameter_provenance;
+                  const provEntries: Array<{ key: string; value: any; source: string }> = Array.isArray(rawProv)
+                    ? rawProv.map((entry: any) => ({
+                        key: String(entry.parameter || ''),
+                        value: entry.value,
+                        source: String(entry.source || 'default'),
+                      }))
+                    : rawProv && typeof rawProv === 'object'
+                    ? Object.entries(rawProv).map(([k, v]: [string, any]) => ({
+                        key: k,
+                        value: v?.value ?? v,
+                        source: String(v?.source || 'default'),
+                      }))
+                    : [];
+                  if (provEntries.length === 0) return null;
+                  return (
+                    <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-2.5 space-y-1.5">
+                      <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                        Trazabilidad de Parámetros (Provenance)
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {provEntries.slice(0, 12).map((entry, pIdx) => (
+                          <span
+                            key={`${entry.key}-${pIdx}`}
+                            className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-700/80 text-[10px] font-mono text-slate-200"
+                          >
+                            {entry.key}: <strong className="text-cyan-300">{String(entry.value)}</strong> [{entry.source}]
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {(generatedAsset as any).execution_report.fallback_triggered && (
                   <div className="text-xs text-amber-300 bg-amber-950/40 border border-amber-500/40 rounded-xl px-3 py-2 font-medium">
                     Aviso explícito: {(generatedAsset as any).execution_report.fallback_reason} (Semilla determinista conservada: {(generatedAsset as any).execution_report.seed}).
                   </div>
                 )}
+
+                {Array.isArray((generatedAsset as any).execution_report.warnings ?? (generatedAsset as any).warnings) &&
+                  ((generatedAsset as any).execution_report.warnings ?? (generatedAsset as any).warnings).length > 0 && (
+                    <div className="text-xs text-amber-200 bg-amber-950/30 border border-amber-500/30 rounded-xl px-3 py-2 space-y-1">
+                      <div className="font-bold text-[11px] uppercase tracking-wider text-amber-300">
+                        Advertencias del motor
+                      </div>
+                      {((generatedAsset as any).execution_report.warnings ?? (generatedAsset as any).warnings).map(
+                        (w: string, wIdx: number) => (
+                          <div key={wIdx} className="font-mono text-[11px]">
+                            • {w}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
               </div>
             )}
 
@@ -1249,13 +1427,16 @@ export const CreateWizardView: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                   {[
                     { key: 'frontSvgDataUri', label: '1. Vista Frontal (+Z)' },
                     { key: 'sideSvgDataUri', label: '2. Perfil Lateral (+X)' },
-                    { key: 'isometricSvgDataUri', label: '3. Vista 3/4 Isométrica' },
-                    { key: 'topSvgDataUri', label: '4. Vista Superior (+Y)' },
-                  ].map((view) => (
+                    { key: 'backSvgDataUri', label: '3. Vista Trasera (-Z)' },
+                    { key: 'isometricSvgDataUri', label: '4. Vista 3/4 Isométrica' },
+                    { key: 'topSvgDataUri', label: '5. Vista Superior (+Y)' },
+                  ]
+                    .filter((view) => Boolean((generatedAsset as any).multi_angle_snapshots?.[view.key]))
+                    .map((view) => (
                     <div
                       key={view.key}
                       className="bg-slate-900 border border-slate-800 rounded-xl p-2 space-y-1.5"

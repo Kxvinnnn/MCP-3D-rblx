@@ -39,8 +39,14 @@ import {
 } from './src/server/engines/visualBenchmarkSuite.ts';
 import {
   EXTERNAL_3D_MODELS_COMPARISON_MATRIX,
+  executeExternal3DGeneration,
   getExternal3DAdapterStatus,
 } from './src/server/engines/external3DModelAdapter.ts';
+import {
+  evaluateSemanticVisualIdentity,
+  interpretPromptSemantics,
+  renderMultiAngleSvgSnapshots,
+} from './src/server/engines/universalFreeform3DEngine.ts';
 import {
   AI_MODULE_CONTRACTS,
   buildAiSelfUnderstandingManifest,
@@ -72,6 +78,142 @@ import {
 dotenv.config();
 
 const FASTAPI_UPSTREAM = process.env.FASTAPI_UPSTREAM_URL || 'http://127.0.0.1:8000';
+
+function resolveRequestSeed(rawSeed?: unknown, treeParamsSeed?: unknown): string | number {
+  const candidate = rawSeed ?? treeParamsSeed;
+  if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+    return Math.max(1, Math.floor(candidate));
+  }
+  if (typeof candidate === 'string') {
+    const trimmed = candidate.trim();
+    if (trimmed && trimmed !== 'forge-tree-2026' && trimmed !== 'forge-seed-2026') {
+      if (/^\d+$/.test(trimmed)) {
+        const parsed = Number(trimmed);
+        if (Number.isFinite(parsed)) {
+          return Math.max(1, Math.floor(parsed));
+        }
+      }
+      return trimmed;
+    }
+  }
+  return `forge-${Date.now().toString(36).slice(-5)}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+function assembleExternal3DModelAsset(params: {
+  prompt: string;
+  name?: string;
+  category: string;
+  assetType: 'Model3D' | 'Scene3D';
+  requestedMode: 'procedural' | 'ai' | 'hybrid' | 'image_to_3d';
+  effectiveSeed: string | number;
+  collisionFidelity: string;
+  targetPolyBudget?: number;
+  parts: any[];
+  modelUsed: string;
+  latencyMs?: number;
+  aiAvailable: boolean;
+}): Record<string, any> {
+  const rawName =
+    params.name ||
+    String(params.prompt || params.category || 'ExternalModel3D')
+      .replace(/[^a-zA-Z0-9 ]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 3)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join('') ||
+    'ExternalModel3D';
+  const safeName = rawName.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32) || 'ExternalModel3D';
+  const normalizedParts = normalizePartsWithSyncMetadata(params.parts, safeName);
+  const totalTris = normalizedParts.reduce(
+    (sum: number, p: any) => sum + (Array.isArray(p.meshData?.faces) ? p.meshData.faces.length : 12),
+    0
+  );
+  const luauCode = buildStrictLuauFromEditedParts(
+    safeName,
+    normalizedParts,
+    params.collisionFidelity
+  );
+  const fileName = `${safeName}.luau`;
+  const id = `asset-ext3d-${computeFnv1a32Hex(`${safeName}:${String(params.effectiveSeed)}:${totalTris}`)}`;
+  const geometryHash = crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify(
+        normalizedParts.map((p: any) => ({
+          partId: p.partId,
+          geometryHash: p.geometryHash,
+          vertices: p.meshData?.vertices || [],
+          faces: p.meshData?.faces || [],
+        }))
+      ),
+      'utf-8'
+    )
+    .digest('hex');
+  const semanticInterpretation = interpretPromptSemantics({
+    prompt: params.prompt || safeName,
+    category: params.category,
+    name: safeName,
+  });
+  const visualIdentityEvaluation = evaluateSemanticVisualIdentity({
+    prompt: params.prompt || safeName,
+    parts: normalizedParts,
+    interpretation: semanticInterpretation,
+  });
+  const multiAngleSnapshots = renderMultiAngleSvgSnapshots({
+    modelName: safeName,
+    subjectLabel: semanticInterpretation.subjectLabel,
+    parts: normalizedParts,
+  });
+  const executionReport: EngineExecutionReport = {
+    requested_mode: params.requestedMode,
+    executed_mode: 'external_3d_model',
+    ai_provider_available: params.aiAvailable,
+    ai_provider_used: true,
+    external_model_used: params.modelUsed,
+    external_latency_ms: params.latencyMs,
+    fallback_triggered: false,
+    fallback_reason: null,
+    seed_used: String(params.effectiveSeed),
+    seed: params.effectiveSeed,
+    seed_preserved: true,
+    poly_budget_requested: Number(params.targetPolyBudget || totalTris),
+    poly_budget_achieved: totalTris,
+  };
+  const baseAsset: Record<string, any> = {
+    id,
+    forgeAssetId: id,
+    sourceAssetId: id,
+    robloxAssetId: null,
+    assetUri: null,
+    geometrySource: 'EditableMeshBuffers',
+    geometryHash,
+    name: safeName,
+    model_name: safeName,
+    category: params.category || 'Props',
+    asset_type: params.assetType,
+    generation_mode: params.requestedMode,
+    engine_used: `external_3d_model:${params.modelUsed}`,
+    seed: String(params.effectiveSeed),
+    poly_count: totalTris,
+    target_poly_budget: Number(params.targetPolyBudget || totalTris),
+    collision_fidelity: params.collisionFidelity,
+    rojo_target_folder: 'src/shared/Assets3D',
+    file_name: fileName,
+    description: `Malla 3D sintetizada por modelo externo '${params.modelUsed}' (${normalizedParts.length} sub-mallas, ${totalTris} triángulos).`,
+    execution_report: executionReport,
+    semantic_interpretation: semanticInterpretation,
+    visual_identity_evaluation: visualIdentityEvaluation,
+    multi_angle_snapshots: multiAngleSnapshots,
+    parts: normalizedParts,
+    luau_code: luauCode,
+  };
+  const contentHash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(baseAsset), 'utf-8')
+    .digest('hex');
+  return { ...baseAsset, contentHash };
+}
 
 export interface MainServerOptions {
   securityToken?: string;
@@ -239,8 +381,11 @@ async function isFastApiRunning(): Promise<boolean> {
   });
 }
 
-// Shared Gemini Client for server-side calls
-const apiKey = process.env.GEMINI_API_KEY || '';
+// Shared Gemini Client for server-side calls (disabled automatically during tests unless opted in)
+const apiKey =
+  options.nodeEnv === 'test' && process.env.FORGE_ALLOW_LIVE_GEMINI_IN_TESTS !== 'true'
+    ? ''
+    : process.env.GEMINI_API_KEY || '';
 const ai = apiKey
   ? new GoogleGenAI({
       apiKey,
@@ -816,10 +961,32 @@ app.post('/api/v1/rojo/configure', async (req, res) => {
       }
       const resolved = path.resolve(process.cwd(), cleaned);
       const lowerResolved = resolved.toLowerCase();
-      const forbiddenPrefixes = ['/etc', '/bin', '/sbin', '/usr', '/boot', '/dev', '/proc', '/sys', 'c:\\windows', 'c:\\program files'];
+      const normalizedUnixLike = lowerResolved.replace(/^[a-z]:/, '').replace(/\\/g, '/');
+      const forbiddenPrefixes = [
+        '/etc',
+        '/bin',
+        '/sbin',
+        '/usr',
+        '/boot',
+        '/dev',
+        '/proc',
+        '/sys',
+        '/windows',
+        '/program files',
+        'c:\\windows',
+        'c:\\program files',
+      ];
       if (
         lowerResolved === '/' ||
-        forbiddenPrefixes.some((p) => lowerResolved === p || lowerResolved.startsWith(`${p}/`) || lowerResolved.startsWith(`${p}\\`))
+        normalizedUnixLike === '/' ||
+        forbiddenPrefixes.some(
+          (p) =>
+            lowerResolved === p ||
+            lowerResolved.startsWith(`${p}/`) ||
+            lowerResolved.startsWith(`${p}\\`) ||
+            normalizedUnixLike === p ||
+            normalizedUnixLike.startsWith(`${p}/`)
+        )
       ) {
         return res.status(403).json({ error: 'Seguridad: Directorio del sistema no permitido para Rojo.' });
       }
@@ -3081,6 +3248,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       strict_ai = false,
       require_ai_provider = false,
       seed,
+      manually_edited_fields,
       tree_params,
       height,
       width,
@@ -3239,10 +3407,68 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       generation_mode,
       reference_image_base64,
     });
-    const effectiveSeed = Number.isFinite(Number(seed ?? effectiveTreeParams?.seed))
-      ? Math.max(1, Math.floor(Number(seed ?? effectiveTreeParams?.seed)))
-      : 1337;
+    const effectiveSeed = resolveRequestSeed(seed, effectiveTreeParams?.seed);
     const enforceStrictAi = Boolean(strict_ai || require_ai_provider);
+
+    if (getExternal3DAdapterStatus().configured && requestedMode !== 'procedural') {
+      const extStatus = getExternal3DAdapterStatus();
+      sendSseEvent(res, {
+        type: 'log',
+        level: 'info',
+        message: `Conectando con adaptador 3D externo (${extStatus.preferredModel}) en ${extStatus.endpointUrl}...`,
+      });
+      const extRes = await executeExternal3DGeneration({
+        prompt: String(prompt || name || category),
+        modelName: name ? String(name) : undefined,
+        referenceImageBase64: reference_image_base64,
+        targetPolyBudget: Number(target_poly_budget || 3000),
+        collisionFidelity: collision_fidelity,
+      });
+      if (extRes.success && Array.isArray(extRes.parts) && extRes.parts.length > 0) {
+        const extAsset = assembleExternal3DModelAsset({
+          prompt: String(prompt || name || category),
+          name: name ? String(name) : undefined,
+          category,
+          assetType: asset_type === 'Scene3D' ? 'Scene3D' : 'Model3D',
+          requestedMode,
+          effectiveSeed,
+          collisionFidelity: collision_fidelity,
+          targetPolyBudget: target_poly_budget ? Number(target_poly_budget) : undefined,
+          parts: extRes.parts,
+          modelUsed: extRes.modelUsed,
+          latencyMs: extRes.latencyMs,
+          aiAvailable: Boolean(ai),
+        });
+        if (save_to_rojo) {
+          const savedPath = writeToRojoWorkspace(
+            extAsset.rojo_target_folder || 'src/shared/Assets3D',
+            extAsset.file_name,
+            extAsset.luau_code
+          );
+          extAsset.saved_path = savedPath;
+          sendSseEvent(res, {
+            type: 'rojo_write',
+            saved: true,
+            path: savedPath,
+            message: `ROJO 3D SYNC CONFIRMADO: Asset externo '${extAsset.file_name}' sincronizado (${extAsset.parts.length} sub-mallas, ${extAsset.poly_count} tris)`,
+          });
+        }
+        const savedExt = save_to_library ? saveAssetToLibrary(extAsset) : extAsset;
+        sendSseEvent(res, {
+          type: 'done',
+          status: 'complete',
+          progress: 100,
+          result: savedExt,
+          data: savedExt,
+        });
+        return res.end();
+      }
+      sendSseEvent(res, {
+        type: 'log',
+        level: 'warning',
+        message: `AVISO: Adaptador 3D externo no produjo geometría (${extRes.errorReason || 'sin detalles'}). Continuando con motor local...`,
+      });
+    }
 
     if ((requestedMode === 'ai' || requestedMode === 'hybrid') && !ai && enforceStrictAi) {
       const errMsg = `Proveedor IA no disponible: GEMINI_API_KEY no configurada para ejecutar el modo '${requestedMode}' (strict_ai=true).`;
@@ -3275,6 +3501,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
         target_poly_budget,
         seed: effectiveSeed,
         generation_mode: 'procedural',
+        manually_edited_fields,
         tree_params: effectiveTreeParams,
         execution_report: {
           requested_mode: 'procedural',
@@ -3396,6 +3623,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
         reference_image_base64,
         director_blueprint: directorRes.blueprint,
         execution_report: executionReport,
+        manually_edited_fields,
         tree_params: effectiveTreeParams,
       });
 
@@ -3485,6 +3713,7 @@ app.post('/api/v1/generate-3d-stream', async (req, res) => {
       reference_image_base64,
       director_blueprint: directorRes.blueprint,
       execution_report: aiExecutionReport,
+      manually_edited_fields,
       tree_params: effectiveTreeParams,
     });
 
@@ -3546,6 +3775,7 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       strict_ai = false,
       require_ai_provider = false,
       seed,
+      manually_edited_fields,
       tree_params,
       height,
       width,
@@ -3685,10 +3915,45 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       generation_mode,
       reference_image_base64,
     });
-    const effectiveSeed = Number.isFinite(Number(seed ?? effectiveTreeParams?.seed))
-      ? Math.max(1, Math.floor(Number(seed ?? effectiveTreeParams?.seed)))
-      : 1337;
+    const effectiveSeed = resolveRequestSeed(seed, effectiveTreeParams?.seed);
     const enforceStrictAi = Boolean(strict_ai || require_ai_provider);
+
+    let externalFallbackReason: string | null = null;
+    if (getExternal3DAdapterStatus().configured && requestedMode !== 'procedural') {
+      const extRes = await executeExternal3DGeneration({
+        prompt: String(prompt || name || category),
+        modelName: name ? String(name) : undefined,
+        referenceImageBase64: reference_image_base64,
+        targetPolyBudget: Number(target_poly_budget || 3000),
+        collisionFidelity: collision_fidelity,
+      });
+      if (extRes.success && Array.isArray(extRes.parts) && extRes.parts.length > 0) {
+        const extAsset = assembleExternal3DModelAsset({
+          prompt: String(prompt || name || category),
+          name: name ? String(name) : undefined,
+          category,
+          assetType: asset_type === 'Scene3D' ? 'Scene3D' : 'Model3D',
+          requestedMode,
+          effectiveSeed,
+          collisionFidelity: collision_fidelity,
+          targetPolyBudget: target_poly_budget ? Number(target_poly_budget) : undefined,
+          parts: extRes.parts,
+          modelUsed: extRes.modelUsed,
+          latencyMs: extRes.latencyMs,
+          aiAvailable: Boolean(ai),
+        });
+        if (save_to_rojo) {
+          extAsset.saved_path = writeToRojoWorkspace(
+            extAsset.rojo_target_folder || 'src/shared/Assets3D',
+            extAsset.file_name,
+            extAsset.luau_code
+          );
+        }
+        const savedExt = save_to_library ? saveAssetToLibrary(extAsset) : extAsset;
+        return res.json(savedExt);
+      }
+      externalFallbackReason = extRes.errorReason || 'Adaptador 3D externo no devolvió geometría válida.';
+    }
 
     if ((requestedMode === 'ai' || requestedMode === 'hybrid') && !ai && enforceStrictAi) {
       return res.status(503).json({
@@ -3710,6 +3975,7 @@ app.post('/api/v1/generate-3d', async (req, res) => {
         target_poly_budget,
         seed: effectiveSeed,
         generation_mode: 'procedural',
+        manually_edited_fields,
         tree_params: effectiveTreeParams,
         execution_report: {
           requested_mode: 'procedural',
@@ -3790,7 +4056,16 @@ app.post('/api/v1/generate-3d', async (req, res) => {
       generation_mode: requestedMode,
       reference_image_base64,
       director_blueprint: directorRes.blueprint,
-      execution_report: executionReport,
+      execution_report: {
+        ...executionReport,
+        ...(externalFallbackReason
+          ? {
+              fallback_triggered: true,
+              fallback_reason: `${externalFallbackReason}${executionReport.fallback_reason ? ` | ${executionReport.fallback_reason}` : ''}`,
+            }
+          : {}),
+      },
+      manually_edited_fields,
       tree_params: effectiveTreeParams,
     });
 

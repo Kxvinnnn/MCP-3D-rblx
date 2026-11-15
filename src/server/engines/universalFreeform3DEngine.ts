@@ -57,12 +57,18 @@ export type UniversalArchetypeId =
   | 'feline_creature'
   | 'cervine_stag'
   | 'winged_dragon'
+  | 'bird_or_avian'
   | 'human_statue'
   | 'stylized_humanoid'
   | 'motorcycle'
   | 'wheeled_car_or_truck'
+  | 'futuristic_spaceship'
   | 'fantasy_tree'
   | 'medieval_house'
+  | 'medieval_castle'
+  | 'futuristic_building'
+  | 'fantasy_tower'
+  | 'sword_or_weapon'
   | 'freeform_synthesized_object';
 
 export interface SemanticObjectInterpretation {
@@ -81,11 +87,15 @@ export interface SemanticObjectInterpretation {
   symmetry: 'bilateral' | 'radial' | 'asymmetric';
   coatOrSurfacePattern:
     | 'piebald_black_white_spots'
+    | 'solid_brown_coat'
     | 'equine_coat_and_mane'
     | 'canine_fur_coat'
     | 'reptilian_scales_and_ridges'
+    | 'avian_plumage_and_feathers'
     | 'metallic_chassis_and_tires'
+    | 'sci_fi_hull_and_plasma'
     | 'sculpted_stone_statue'
+    | 'forged_steel_blade'
     | 'organic_bark_and_foliage'
     | 'architectural_masonry_timber'
     | 'stylized_composite_surface';
@@ -207,10 +217,12 @@ export interface FreeformGeometryPlan {
 export interface MultiAngleSnapshots {
   frontSvgDataUri: string;
   sideSvgDataUri: string;
+  backSvgDataUri: string;
   isometricSvgDataUri: string;
   topSvgDataUri: string;
   frontSvg: string;
   sideSvg: string;
+  backSvg: string;
   isometricSvg: string;
   topSvg: string;
 }
@@ -269,30 +281,41 @@ export function interpretPromptSemantics(params: {
   const rawPrompt = String(params.prompt || params.name || params.category || 'Objeto 3D').trim();
   const text = `${rawPrompt} ${params.category || ''} ${params.name || ''}`.toLowerCase();
 
+  // Modificadores globales de escala y rasgos compartidos (ES / EN)
+  const isSmallScale = /\b(pequeñ[oa]|pequeno|chico|mini|tiny|small|becerro|calf)\b/i.test(text);
+  const isLargeScale = /\b(grande|gigante|enorme|masiv[oa]|large|huge|giant|big|massive)\b/i.test(text);
+  const scaleMod = isSmallScale && !isLargeScale ? 0.68 : isLargeScale && !isSmallScale ? 1.38 : 1.0;
+  const hasLongHorns = /\b(cuernos?\s+largos?|long\s+horns?|asta\s+larga)\b/i.test(text);
+
   // 1. Detectar Vacas / Bovinos (`bovine_cow`)
   if (/\b(vaca|vacas|cow|cows|bovino|bovina|bovine|toro|bull|becerro|calf|holstein|res)\b/i.test(text)) {
+    const hasBrownCoat = /\b(marr[oó]n|marron|brown|casta[ñn]o|parda|chestnut|russet)\b/i.test(text);
     const hasBlackWhiteSpots =
-      /\b(manchas|manchada|spots|spotted|blanca\s+y\s+negra|negras\s+y\s+blancas|holstein|piebald|pinta)\b/i.test(
+      !hasBrownCoat &&
+      (/\b(manchas|manchada|spots|spotted|blanca?\s+(?:y|con)\s+manchas?\s+negras?|black\s+and\s+white|holstein|piebald|pinta)\b/i.test(
         text
-      ) || !/\b(marron|marrón|brown|parda)\b/i.test(text);
+      ) ||
+        !/\b(negra|black\s+cow)\b/i.test(text));
 
     return {
       rawPrompt,
       taxonomy: 'quadruped_animal',
       archetype: 'bovine_cow',
-      subjectLabel: 'Vaca Adulta Anatómica (Bos taurus)',
+      subjectLabel: hasBrownCoat
+        ? 'Vaca Marrón Anatómica (Bos taurus)'
+        : 'Vaca Adulta Anatómica (Bos taurus)',
       isOrganicCreature: true,
       locomotionMode: 'quadruped_4_limbs',
       symmetry: 'bilateral',
-      coatOrSurfacePattern: hasBlackWhiteSpots ? 'piebald_black_white_spots' : 'equine_coat_and_mane',
+      coatOrSurfacePattern: hasBlackWhiteSpots ? 'piebald_black_white_spots' : 'solid_brown_coat',
       proportionsStuds: {
-        widthX: 4.4,
-        heightY: 6.4,
-        lengthZ: 10.6,
+        widthX: round4(4.4 * scaleMod),
+        heightY: round4(6.4 * scaleMod),
+        lengthZ: round4(10.6 * scaleMod),
       },
       palette: {
-        primaryHex: hasBlackWhiteSpots ? '#f8fafc' : '#8b5a2b',
-        secondaryHex: hasBlackWhiteSpots ? '#18181b' : '#4a2e14',
+        primaryHex: hasBlackWhiteSpots ? '#f8fafc' : hasBrownCoat ? '#7c4a27' : '#27272a',
+        secondaryHex: hasBlackWhiteSpots ? '#18181b' : hasBrownCoat ? '#4a2c16' : '#111827',
         accentHex: '#f4afab', // hocico y ubre rosados naturales
         detailHex: '#d6c7b2', // cuernos queratina marfil
         eyeHex: '#111827',
@@ -306,12 +329,12 @@ export function interpretPromptSemantics(params: {
         'cabeza_bovina',
         'hocico_diferenciado',
         'dos_orejas_laterales',
-        'dos_cuernos_curvos',
+        hasLongHorns ? 'cuernos_largos' : 'dos_cuernos_curvos',
         'dos_ojos',
         'pezunas_hendidas',
         'cola_con_borla',
         'ubre_ventral',
-        'manchas_negras_y_blancas',
+        ...(hasBlackWhiteSpots ? ['manchas_negras_y_blancas'] : []),
       ],
     };
   }
@@ -395,7 +418,47 @@ export function interpretPromptSemantics(params: {
     };
   }
 
-  // 4. Detectar Dragones / Criaturas Aladas (`winged_dragon`)
+  // 4. Detectar Aves / Pájaros / Águilas (`bird_or_avian`)
+  if (
+    /\b(ave|aves|p[aá]jaro|aguila|[áa]guila|halc[oó]n|b[uú]ho|cuervo|bird|eagle|owl|hawk|crow|falcon|raven|phoenix|f[eé]nix|paloma)\b/i.test(
+      text
+    )
+  ) {
+    return {
+      rawPrompt,
+      taxonomy: 'winged_creature',
+      archetype: 'bird_or_avian',
+      subjectLabel: 'Ave Rapaz Anatómica con Alas Desplegadas',
+      isOrganicCreature: true,
+      locomotionMode: 'biped_2_legs',
+      symmetry: 'bilateral',
+      coatOrSurfacePattern: 'avian_plumage_and_feathers',
+      proportionsStuds: {
+        widthX: round4(11.4 * scaleMod),
+        heightY: round4(5.6 * scaleMod),
+        lengthZ: round4(7.2 * scaleMod),
+      },
+      palette: {
+        primaryHex: '#5c3d28',
+        secondaryHex: '#f1f5f9',
+        accentHex: '#f59e0b',
+        detailHex: '#d97706',
+        eyeHex: '#fde047',
+        hoofOrTireHex: '#d97706',
+        muzzleOrTrimHex: '#f59e0b',
+      },
+      requiredSemanticFeatures: [
+        'torso_aerodinamico',
+        'pico_aviar',
+        'dos_alas_emplumadas',
+        'dos_ojos',
+        'garras_bípode',
+        'cola_plumaje',
+      ],
+    };
+  }
+
+  // 4B. Detectar Dragones / Criaturas Aladas (`winged_dragon`)
   if (/\b(drag[oó]n|dragon|wyvern|drake|guiverno|criatura\s+alada|winged\s+beast|serpiente\s+alada|griffin|grifo)\b/i.test(text)) {
     return {
       rawPrompt,
@@ -477,49 +540,137 @@ export function interpretPromptSemantics(params: {
     };
   }
 
-  // 6. Detectar Motocicletas / Vehículos de 2 o 4 Ruedas (`motorcycle` / `wheeled_car_or_truck`)
+  // 6. Detectar Motocicletas / Automóviles / Vehículos (`motorcycle` / `wheeled_car_or_truck`)
   if (
-    /\b(motocicleta|moto|motorcycle|motorbike|chopper|scooter|bicicleta|bike|coche|auto|car|veh[ií]culo|vehicle|camioneta|truck)\b/i.test(
+    /\b(motocicleta|moto|motorcycle|motorbike|chopper|scooter|bicicleta|bike|autom[oó]vil|coche|auto|carro|car|sedan|suv|veh[ií]culo|vehicle|camioneta|cami[oó]n|truck)\b/i.test(
       text
     )
   ) {
-    const isFourWheels = /\b(coche|auto|car|camioneta|truck|4x4|todo\s*terreno)\b/i.test(text) && !/\b(moto|motocicleta|motorcycle|bike)\b/i.test(text);
+    const isFourWheels =
+      /\b(autom[oó]vil|coche|auto|carro|car|sedan|suv|camioneta|cami[oó]n|truck|4x4|todo\s*terreno)\b/i.test(text) &&
+      !/\b(moto|motocicleta|motorcycle|bike)\b/i.test(text);
     return {
       rawPrompt,
       taxonomy: 'wheeled_vehicle',
       archetype: isFourWheels ? 'wheeled_car_or_truck' : 'motorcycle',
-      subjectLabel: isFourWheels ? 'Vehículo Motorizado de 4 Ruedas' : 'Motocicleta Deportiva / Custom 3D',
+      subjectLabel: isFourWheels ? 'Automóvil Deportivo / Vehículo de 4 Ruedas' : 'Motocicleta Deportiva / Custom 3D',
       isOrganicCreature: false,
       locomotionMode: isFourWheels ? 'four_wheels' : 'two_wheels_tandem',
       symmetry: 'bilateral',
       coatOrSurfacePattern: 'metallic_chassis_and_tires',
       proportionsStuds: isFourWheels
-        ? { widthX: 6.4, heightY: 4.8, lengthZ: 12.6 }
-        : { widthX: 3.2, heightY: 4.8, lengthZ: 9.6 },
+        ? { widthX: round4(6.4 * scaleMod), heightY: round4(4.4 * scaleMod), lengthZ: round4(12.2 * scaleMod) }
+        : { widthX: round4(3.2 * scaleMod), heightY: round4(4.8 * scaleMod), lengthZ: round4(9.6 * scaleMod) },
       palette: {
-        primaryHex: '#dc2626', // carenado / tanque rojo metálico
-        secondaryHex: '#18181b', // neumáticos caucho y asiento
-        accentHex: '#e2e8f0', // cromo horquilla, llantas y escapes
-        detailHex: '#334155', // bloque motor acero
-        eyeHex: '#38bdf8', // faro delantero neón
+        primaryHex: isFourWheels ? '#2563eb' : '#dc2626',
+        secondaryHex: '#18181b',
+        accentHex: '#e2e8f0',
+        detailHex: '#334155',
+        eyeHex: '#38bdf8',
         hoofOrTireHex: '#171717',
-        muzzleOrTrimHex: '#f59e0b',
+        muzzleOrTrimHex: '#ef4444',
+      },
+      requiredSemanticFeatures: isFourWheels
+        ? [
+            'cuatro_ruedas_toroidales',
+            'chasis_y_carroceria',
+            'cabina_parabrisas',
+            'faro_delantero_y_trasero',
+          ]
+        : [
+            'ruedas_toroidales_con_llanta',
+            'chasis_estructural',
+            'horquilla_y_manillar',
+            'tanque_combustible_carenado',
+            'bloque_motor',
+            'tubos_de_escape',
+            'asiento_ergonomico',
+            'faro_delantero_y_trasero',
+          ],
+    };
+  }
+
+  // 6B. Detectar Naves Futuristas / Espaciales (`futuristic_spaceship`)
+  if (
+    /\b(nave\s+futurista|nave\s+espacial|nave|spaceship|starfighter|spacecraft|starship|caza\s+estelar|transbordador)\b/i.test(
+      text
+    )
+  ) {
+    return {
+      rawPrompt,
+      taxonomy: 'freeform_composite',
+      archetype: 'futuristic_spaceship',
+      subjectLabel: 'Nave Espacial Futurista con Propulsores de Plasma',
+      isOrganicCreature: false,
+      locomotionMode: 'grounded_static',
+      symmetry: 'bilateral',
+      coatOrSurfacePattern: 'sci_fi_hull_and_plasma',
+      proportionsStuds: {
+        widthX: round4(11.2 * scaleMod),
+        heightY: round4(4.4 * scaleMod),
+        lengthZ: round4(13.8 * scaleMod),
+      },
+      palette: {
+        primaryHex: '#334155',
+        secondaryHex: '#e2e8f0',
+        accentHex: '#38bdf8',
+        detailHex: '#0ea5e9',
+        eyeHex: '#22d3ee',
+        hoofOrTireHex: '#0f172a',
+        muzzleOrTrimHex: '#94a3b8',
       },
       requiredSemanticFeatures: [
-        'ruedas_toroidales_con_llanta',
-        'chasis_estructural',
-        'horquilla_y_manillar',
-        'tanque_combustible_carenado',
-        'bloque_motor',
-        'tubos_de_escape',
-        'asiento_ergonomico',
-        'faro_delantero_y_trasero',
+        'fuselaje_aerodinamico',
+        'cabina_cristal',
+        'dos_alas_delta',
+        'propulsores_plasma',
+        'tren_aterrizaje',
+      ],
+    };
+  }
+
+  // 6C. Detectar Espadas y Armas Forjadas (`sword_or_weapon`)
+  if (/\b(espada|mandoble|katana|sable|daga|sword|blade|greatsword|weapon)\b/i.test(text)) {
+    return {
+      rawPrompt,
+      taxonomy: 'furniture_or_prop',
+      archetype: 'sword_or_weapon',
+      subjectLabel: 'Espada Forjada de Doble Filo sobre Soporte',
+      isOrganicCreature: false,
+      locomotionMode: 'grounded_static',
+      symmetry: 'bilateral',
+      coatOrSurfacePattern: 'forged_steel_blade',
+      proportionsStuds: {
+        widthX: round4(3.2 * scaleMod),
+        heightY: round4(9.2 * scaleMod),
+        lengthZ: round4(1.8 * scaleMod),
+      },
+      palette: {
+        primaryHex: '#cbd5e1',
+        secondaryHex: '#475569',
+        accentHex: '#f59e0b',
+        detailHex: '#38bdf8',
+        eyeHex: '#38bdf8',
+        hoofOrTireHex: '#1e293b',
+        muzzleOrTrimHex: '#78350f',
+      },
+      requiredSemanticFeatures: [
+        'soporte_forja',
+        'empunadura_y_pomo',
+        'guarda_cruzada',
+        'hoja_ahusada_acero',
       ],
     };
   }
 
   // 7. Detectar Estatuas Humanas / Personas Estilizadas (`human_statue` / `stylized_humanoid`)
+  const isExplicitStatueNoun = /\b(estatua|statue|escultura|sculpture|busto|monumento)\b/i.test(text);
+  const isArchitecturalNoun =
+    /\b(casa|house|edificio|building|torre|tower|castillo|castle|templo|temple|caba[ñn]a|taberna|fortaleza|observatorio|rascacielos|skyscraper)\b/i.test(
+      text
+    );
   if (
+    (!isArchitecturalNoun || isExplicitStatueNoun) &&
     /\b(estatua|statue|escultura|sculpture|humano|humana|human|persona|person|guerrero|warrior|caballero|knight|mago|mage|personaje|character|avatar|busto|monumento)\b/i.test(
       text
     )
@@ -570,7 +721,11 @@ export function interpretPromptSemantics(params: {
   }
 
   // 8. Árboles y Vegetación (`fantasy_tree`)
-  if (/\b(tree|[aá]rbol|roble|oak|pino|pine|sauce|willow|bons[aá]i|cerezo|sakura|bosque|vegetaci[oó]n)\b/i.test(text)) {
+  if (
+    params.category === 'Trees & Vegetation' ||
+    params.blueprint?.identity?.object_family === 'tree' ||
+    /(?:^|[\s,;:.!?¿¡(])(tree|[aá]rbol|roble|oak|pino|pine|sauce|willow|bons[aá]i|cerezo|sakura|bosque|vegetaci[oó]n)(?=$|[\s,;:.!?¿¡)])/i.test(text)
+  ) {
     return {
       rawPrompt,
       taxonomy: 'vegetation_or_tree',
@@ -594,27 +749,69 @@ export function interpretPromptSemantics(params: {
     };
   }
 
-  // 9. Edificios / Casas Medievales (`medieval_house`)
-  if (/\b(casa|house|edificio|building|torre|tower|castillo|castle|templo|temple|caba[ñn]a|taberna|medieval|fortaleza)\b/i.test(text)) {
+  // 9. Edificios / Casas Medievales / Castillos / Torres de Fantasía / Edificios Futuristas
+  if (/\b(casa|house|edificio|building|torre|tower|castillo|castle|templo|temple|caba[ñn]a|taberna|medieval|fortaleza|rascacielos|skyscraper|futurista)\b/i.test(text)) {
+    const isCastle = /\b(castillo|castle|fortaleza|keep)\b/i.test(text);
+    const isFuturisticBuilding = /\b(futurista|sci[\s-]?fi|ciber|cyber|rascacielos|skyscraper|orbital)\b/i.test(text);
+    const isFantasyTower = /\b(torre|tower|observatorio|mago|fantas[ií]a|fantasy|arcana)\b/i.test(text) && !isCastle && !/\bedificio\b/i.test(text);
+    const archArchetype: UniversalArchetypeId = isCastle
+      ? 'medieval_castle'
+      : isFuturisticBuilding
+        ? 'futuristic_building'
+        : isFantasyTower
+          ? 'fantasy_tower'
+          : 'medieval_house';
     return {
       rawPrompt,
       taxonomy: 'architecture_or_building',
-      archetype: 'medieval_house',
-      subjectLabel: 'Estructura Arquitectónica / Casa Medieval',
+      archetype: archArchetype,
+      subjectLabel: isCastle
+        ? 'Castillo Medieval Fortificado con Torres Almenadas'
+        : isFuturisticBuilding
+          ? 'Edificio Futurista de Cristal y Titanio'
+          : isFantasyTower
+            ? 'Torre de Fantasía Arcana con Cristales Flotantes'
+            : 'Estructura Arquitectónica / Casa Medieval',
       isOrganicCreature: false,
       locomotionMode: 'grounded_static',
       symmetry: 'bilateral',
-      coatOrSurfacePattern: 'architectural_masonry_timber',
-      proportionsStuds: { widthX: 11, heightY: 15, lengthZ: 11 },
-      palette: {
-        primaryHex: '#64748b',
-        secondaryHex: '#cbd5e1',
-        accentHex: '#78350f',
-        detailHex: '#b45309',
-        eyeHex: '#fef08a',
-        hoofOrTireHex: '#334155',
-        muzzleOrTrimHex: '#991b1b',
-      },
+      coatOrSurfacePattern: isFuturisticBuilding ? 'sci_fi_hull_and_plasma' : 'architectural_masonry_timber',
+      proportionsStuds: isCastle
+        ? { widthX: 16, heightY: 16, lengthZ: 16 }
+        : isFuturisticBuilding
+          ? { widthX: 11, heightY: 22, lengthZ: 11 }
+          : isFantasyTower
+            ? { widthX: 8.5, heightY: 20, lengthZ: 8.5 }
+            : { widthX: 11, heightY: 15, lengthZ: 11 },
+      palette: isFuturisticBuilding
+        ? {
+            primaryHex: '#334155',
+            secondaryHex: '#94a3b8',
+            accentHex: '#38bdf8',
+            detailHex: '#0ea5e9',
+            eyeHex: '#22d3ee',
+            hoofOrTireHex: '#0f172a',
+            muzzleOrTrimHex: '#e2e8f0',
+          }
+        : isFantasyTower
+          ? {
+              primaryHex: '#475569',
+              secondaryHex: '#3b2d4a',
+              accentHex: '#a855f7',
+              detailHex: '#38bdf8',
+              eyeHex: '#c084fc',
+              hoofOrTireHex: '#1e293b',
+              muzzleOrTrimHex: '#f59e0b',
+            }
+          : {
+              primaryHex: '#64748b',
+              secondaryHex: '#cbd5e1',
+              accentHex: '#78350f',
+              detailHex: '#b45309',
+              eyeHex: '#fef08a',
+              hoofOrTireHex: '#334155',
+              muzzleOrTrimHex: '#991b1b',
+            },
       requiredSemanticFeatures: ['cimiento_piedra', 'muros_fachada', 'puerta_y_ventanas', 'tejado_inclinado'],
     };
   }
@@ -654,12 +851,20 @@ export function interpretPromptSemantics(params: {
  */
 export function planGeometryAndComponents(
   interpretation: SemanticObjectInterpretation,
-  seed: string = 'forge-freeform-2026'
+  seed: string = 'forge-freeform-2026',
+  blueprint?: Partial<AiDirectorBlueprint>
 ): FreeformGeometryPlan {
   const rng = createDeterministicRng(`${seed}:${interpretation.archetype}:${interpretation.rawPrompt}`);
 
+  if (blueprint?.arbitrary_components && blueprint.arbitrary_components.length >= 2) {
+    return planArbitraryAiComponentGraph(interpretation, blueprint.arbitrary_components, rng);
+  }
+
   if (interpretation.taxonomy === 'quadruped_animal') {
     return planQuadrupedAnimalAnatomy(interpretation, rng);
+  }
+  if (interpretation.archetype === 'bird_or_avian') {
+    return planAvianBirdAnatomy(interpretation, rng);
   }
   if (interpretation.taxonomy === 'winged_creature') {
     return planWingedDragonAnatomy(interpretation, rng);
@@ -667,8 +872,20 @@ export function planGeometryAndComponents(
   if (interpretation.taxonomy === 'wheeled_vehicle') {
     return planWheeledVehicleStructure(interpretation, rng);
   }
+  if (interpretation.archetype === 'futuristic_spaceship') {
+    return planFuturisticSpaceshipStructure(interpretation, rng);
+  }
+  if (interpretation.archetype === 'sword_or_weapon') {
+    return planSwordOrWeaponStructure(interpretation, rng);
+  }
+  if (interpretation.taxonomy === 'architecture_or_building') {
+    return planArchitectureStructure(interpretation, rng);
+  }
   if (interpretation.taxonomy === 'biped_humanoid_or_statue') {
     return planHumanoidOrStatueAnatomy(interpretation, rng);
+  }
+  if (interpretation.taxonomy === 'vegetation_or_tree') {
+    return planBotanicalTreeStructure(interpretation, rng);
   }
 
   return planFreeformCompositeStructure(interpretation, rng);
@@ -1019,13 +1236,14 @@ function planQuadrupedAnimalAnatomy(
 
   // 3E. Dos Cuernos Curvos (`Horn_Left`, `Horn_Right`) para vaca/toro o cornamenta para ciervo
   if (isCow || isStag) {
+    const hornLenMult = interp.requiredSemanticFeatures.includes('cuernos_largos') ? 1.95 : 1.0;
     for (const side of [-1, 1] as const) {
       const sideLabel = side < 0 ? 'Left' : 'Right';
       const hornSpine: SpineControlPoint[] = [
         { point: [side * 0.52, headY + 0.42, headZ - 0.32], radiusX: 0.22, radiusY: 0.22 },
-        { point: [side * 0.96, headY + 0.68, headZ - 0.18], radiusX: 0.16, radiusY: 0.16 },
-        { point: [side * 1.18, headY + 1.08, headZ + 0.08], radiusX: 0.1, radiusY: 0.1 },
-        { point: [side * 1.06, headY + 1.38, headZ + 0.28], radiusX: 0.04, radiusY: 0.04 },
+        { point: [side * (0.52 + 0.44 * hornLenMult), headY + 0.42 + 0.26 * hornLenMult, headZ - 0.32 + 0.14 * hornLenMult], radiusX: 0.16, radiusY: 0.16 },
+        { point: [side * (0.52 + 0.66 * hornLenMult), headY + 0.42 + 0.66 * hornLenMult, headZ - 0.32 + 0.4 * hornLenMult], radiusX: 0.1, radiusY: 0.1 },
+        { point: [side * (0.52 + 0.54 * hornLenMult), headY + 0.42 + 0.96 * hornLenMult, headZ - 0.32 + 0.6 * hornLenMult], radiusX: 0.04, radiusY: 0.04 },
       ];
       components.push({
         id: `organ_horn_${sideLabel.toLowerCase()}`,
@@ -1033,9 +1251,9 @@ function planQuadrupedAnimalAnatomy(
         semanticRole: 'horn_or_antler',
         hierarchyPath: 'Root/Neck_Head/Cranium',
         kernel: 'spline_lofted_organ',
-        position: [side * 0.92, headY + 0.9, headZ - 0.05],
+        position: [side * (0.52 + 0.4 * hornLenMult), headY + 0.42 + 0.48 * hornLenMult, headZ - 0.05],
         rotation: [0, 0, 0],
-        size: [0.82, 1.05, 0.68],
+        size: [round4(0.82 * hornLenMult), round4(1.05 * hornLenMult), round4(0.68 * hornLenMult)],
         material: 'Marble',
         colorHex: pal.detailHex,
         roughness: 0.45,
@@ -1233,12 +1451,45 @@ function planQuadrupedAnimalAnatomy(
     });
   }
 
+  const defaultHeightY = isCow ? 6.4 : isHorse ? 7.8 : isDog ? 5.0 : 6.2;
+  const animalScale = clamp(interp.proportionsStuds.heightY / defaultHeightY, 0.55, 1.75);
+  const scaledComponents =
+    Math.abs(animalScale - 1.0) < 0.01
+      ? components
+      : components.map((comp) => ({
+          ...comp,
+          position: [
+            round4(comp.position[0] * animalScale),
+            round4(comp.position[1] * animalScale),
+            round4(comp.position[2] * animalScale),
+          ] as [number, number, number],
+          size: [
+            round4(comp.size[0] * animalScale),
+            round4(comp.size[1] * animalScale),
+            round4(comp.size[2] * animalScale),
+          ] as [number, number, number],
+          ...(comp.spineControlPoints
+            ? {
+                spineControlPoints: comp.spineControlPoints.map((cp) => ({
+                  ...cp,
+                  point: [
+                    round4(cp.point[0] * animalScale),
+                    round4(cp.point[1] * animalScale),
+                    round4(cp.point[2] * animalScale),
+                  ] as [number, number, number],
+                  radiusX: round4(cp.radiusX * animalScale),
+                  radiusY: round4(cp.radiusY * animalScale),
+                })),
+              }
+            : {}),
+        }));
+
   return {
     interpretation: interp,
     skeletonHierarchy,
-    components,
-    torsoReferenceSpine: torsoSpine,
-    torsoWorldCenter: [0, torsoCenterY, -0.15],
+    components: scaledComponents,
+    torsoReferenceSpine: scaledComponents[0]?.spineControlPoints || torsoSpine,
+    torsoWorldCenter: [0, round4(torsoCenterY * animalScale), round4(-0.15 * animalScale)],
   };
 }
 
@@ -1566,6 +1817,184 @@ function planWheeledVehicleStructure(
   _rng: () => number
 ): FreeformGeometryPlan {
   const pal = interp.palette;
+  if (interp.locomotionMode === 'four_wheels') {
+    const components: PlannedOrganComponent[] = [];
+    const skeletonHierarchy = [
+      'Root',
+      'Root/Wheels_Front',
+      'Root/Wheels_Rear',
+      'Root/Chassis_Body',
+      'Root/Cabin_Glass',
+      'Root/Lighting_Bumpers',
+    ];
+    const wheelRadius = 1.28;
+    const trackX = 2.65;
+    const frontZ = 3.85;
+    const rearZ = -3.85;
+
+    for (const wSpec of [
+      { tag: 'FrontLeft', x: -trackX, z: frontZ, hPath: 'Root/Wheels_Front' },
+      { tag: 'FrontRight', x: trackX, z: frontZ, hPath: 'Root/Wheels_Front' },
+      { tag: 'RearLeft', x: -trackX, z: rearZ, hPath: 'Root/Wheels_Rear' },
+      { tag: 'RearRight', x: trackX, z: rearZ, hPath: 'Root/Wheels_Rear' },
+    ]) {
+      components.push({
+        id: `car_tire_${wSpec.tag.toLowerCase()}`,
+        name: `WheelTire_${wSpec.tag}`,
+        semanticRole: 'wheel_tire',
+        hierarchyPath: wSpec.hPath,
+        kernel: 'toroidal_wheel',
+        position: [wSpec.x, wheelRadius, wSpec.z],
+        rotation: [0, 0, 0],
+        size: [0.92, wheelRadius * 2, wheelRadius * 2],
+        material: 'Slate',
+        colorHex: pal.hoofOrTireHex,
+        roughness: 0.88,
+        metalness: 0.08,
+        canCollide: true,
+        wheelParams: { tubeRadiusRatio: 0.3, spokeCount: 6, isRimOnly: false },
+      });
+      components.push({
+        id: `car_rim_${wSpec.tag.toLowerCase()}`,
+        name: `WheelRim_${wSpec.tag}`,
+        semanticRole: 'wheel_rim',
+        hierarchyPath: wSpec.hPath,
+        kernel: 'toroidal_wheel',
+        position: [wSpec.x, wheelRadius, wSpec.z],
+        rotation: [0, 0, 0],
+        size: [0.76, wheelRadius * 1.38, wheelRadius * 1.38],
+        material: 'Metal',
+        colorHex: pal.accentHex,
+        roughness: 0.22,
+        metalness: 0.9,
+        reflectance: 0.35,
+        canCollide: false,
+        wheelParams: { tubeRadiusRatio: 0.18, spokeCount: 6, isRimOnly: true },
+      });
+    }
+
+    // Chasis inferior
+    components.push({
+      id: 'car_chassis',
+      name: 'ChassisFrame_Main',
+      semanticRole: 'chassis_frame',
+      hierarchyPath: 'Root/Chassis_Body',
+      kernel: 'beveled_structural_frame',
+      position: [0, 1.35, 0],
+      rotation: [0, 0, 0],
+      size: [5.1, 0.95, 10.6],
+      material: 'Metal',
+      colorHex: pal.detailHex,
+      roughness: 0.42,
+      metalness: 0.72,
+      canCollide: true,
+    });
+
+    // Carrocería esculpida + capó
+    components.push({
+      id: 'car_body_hood',
+      name: 'CarBody_SculptedShell',
+      semanticRole: 'fuel_tank_or_body',
+      hierarchyPath: 'Root/Chassis_Body',
+      kernel: 'spline_lofted_organ',
+      position: [0, 2.15, 0],
+      rotation: [0, 0, 0],
+      size: [5.4, 1.55, 11.4],
+      material: 'SmoothPlastic',
+      colorHex: pal.primaryHex,
+      roughness: 0.18,
+      metalness: 0.38,
+      reflectance: 0.28,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, 1.95, -5.6], radiusX: 2.35, radiusY: 0.68, dorsalVentralBias: 1.05 },
+        { point: [0, 2.25, -1.8], radiusX: 2.68, radiusY: 0.85, dorsalVentralBias: 1.15 },
+        { point: [0, 2.2, 2.4], radiusX: 2.65, radiusY: 0.82, dorsalVentralBias: 1.12 },
+        { point: [0, 1.82, 5.65], radiusX: 2.28, radiusY: 0.56, dorsalVentralBias: 0.95 },
+      ],
+    });
+
+    // Cabina superior + Parabrisas de cristal
+    components.push({
+      id: 'car_cabin_roof',
+      name: 'CabinRoof_Shell',
+      semanticRole: 'structural_module',
+      hierarchyPath: 'Root/Cabin_Glass',
+      kernel: 'spline_lofted_organ',
+      position: [0, 3.45, -0.65],
+      rotation: [0, 0, 0],
+      size: [4.25, 1.35, 5.2],
+      material: 'SmoothPlastic',
+      colorHex: pal.primaryHex,
+      roughness: 0.2,
+      metalness: 0.35,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, 2.95, -3.2], radiusX: 1.95, radiusY: 0.52 },
+        { point: [0, 3.65, -0.65], radiusX: 2.08, radiusY: 0.68 },
+        { point: [0, 2.95, 1.85], radiusX: 1.92, radiusY: 0.52 },
+      ],
+    });
+
+    components.push({
+      id: 'car_windshield_glass',
+      name: 'Windshield_Glass',
+      semanticRole: 'structural_module',
+      hierarchyPath: 'Root/Cabin_Glass',
+      kernel: 'beveled_structural_frame',
+      position: [0, 3.35, 1.92],
+      rotation: [-28, 0, 0],
+      size: [3.65, 1.05, 0.35],
+      material: 'Glass',
+      colorHex: pal.eyeHex,
+      roughness: 0.08,
+      metalness: 0.12,
+      transparency: 0.32,
+      reflectance: 0.45,
+      canCollide: false,
+    });
+
+    for (const side of [-1, 1] as const) {
+      const sLabel = side < 0 ? 'Left' : 'Right';
+      components.push({
+        id: `car_headlight_${sLabel.toLowerCase()}`,
+        name: `Headlight_${sLabel}`,
+        semanticRole: 'headlight_or_lamp',
+        hierarchyPath: 'Root/Lighting_Bumpers',
+        kernel: 'sculpted_icosphere_organ',
+        position: [side * 1.85, 1.95, 5.72],
+        rotation: [0, 0, 0],
+        size: [0.75, 0.55, 0.45],
+        material: 'Neon',
+        colorHex: '#fef08a',
+        roughness: 0.1,
+        metalness: 0.1,
+        canCollide: false,
+      });
+      components.push({
+        id: `car_taillight_${sLabel.toLowerCase()}`,
+        name: `Taillight_${sLabel}`,
+        semanticRole: 'headlight_or_lamp',
+        hierarchyPath: 'Root/Lighting_Bumpers',
+        kernel: 'sculpted_icosphere_organ',
+        position: [side * 1.85, 2.05, -5.68],
+        rotation: [0, 0, 0],
+        size: [0.85, 0.45, 0.35],
+        material: 'Neon',
+        colorHex: '#ef4444',
+        roughness: 0.1,
+        metalness: 0.1,
+        canCollide: false,
+      });
+    }
+
+    return {
+      interpretation: interp,
+      skeletonHierarchy,
+      components,
+    };
+  }
+
   const components: PlannedOrganComponent[] = [];
   const skeletonHierarchy = [
     'Root',
@@ -1808,6 +2237,582 @@ function planWheeledVehicleStructure(
   return {
     interpretation: interp,
     skeletonHierarchy,
+    components,
+  };
+}
+
+/**
+ * Planificador anatómico para Aves / Águilas / Búhos (`bird_or_avian`).
+ */
+function planAvianBirdAnatomy(
+  interp: SemanticObjectInterpretation,
+  _rng: () => number
+): FreeformGeometryPlan {
+  const pal = interp.palette;
+  const components: PlannedOrganComponent[] = [
+    {
+      id: 'bird_torso',
+      name: 'TorsoBody_Main',
+      semanticRole: 'torso',
+      hierarchyPath: 'Root/Torso',
+      kernel: 'spline_lofted_organ',
+      position: [0, 2.85, 0],
+      rotation: [0, 0, 0],
+      size: [2.2, 2.4, 4.2],
+      material: 'SmoothPlastic',
+      colorHex: pal.primaryHex,
+      roughness: 0.72,
+      metalness: 0.04,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, 2.25, -2.1], radiusX: 0.55, radiusY: 0.52 },
+        { point: [0, 2.85, -0.35], radiusX: 1.08, radiusY: 1.15, dorsalVentralBias: 0.92 },
+        { point: [0, 3.25, 1.35], radiusX: 0.96, radiusY: 1.05, dorsalVentralBias: 0.88 },
+        { point: [0, 3.75, 2.05], radiusX: 0.52, radiusY: 0.56 },
+      ],
+    },
+    {
+      id: 'bird_head',
+      name: 'Head_Cranium',
+      semanticRole: 'head_cranium',
+      hierarchyPath: 'Root/Head',
+      kernel: 'sculpted_icosphere_organ',
+      position: [0, 4.25, 2.25],
+      rotation: [0, 0, 0],
+      size: [1.35, 1.25, 1.45],
+      material: 'SmoothPlastic',
+      colorHex: pal.secondaryHex,
+      roughness: 0.68,
+      metalness: 0.04,
+      canCollide: true,
+    },
+    {
+      id: 'bird_beak',
+      name: 'Beak_Snout',
+      semanticRole: 'snout_muzzle',
+      hierarchyPath: 'Root/Head',
+      kernel: 'spline_lofted_organ',
+      position: [0, 4.1, 3.25],
+      rotation: [0, 0, 0],
+      size: [0.58, 0.62, 1.1],
+      material: 'Metal',
+      colorHex: pal.accentHex,
+      roughness: 0.35,
+      metalness: 0.35,
+      canCollide: false,
+      spineControlPoints: [
+        { point: [0, 4.2, 2.75], radiusX: 0.28, radiusY: 0.3 },
+        { point: [0, 4.05, 3.25], radiusX: 0.16, radiusY: 0.2 },
+        { point: [0, 3.82, 3.65], radiusX: 0.04, radiusY: 0.05 },
+      ],
+    },
+    {
+      id: 'bird_tail_fan',
+      name: 'TailFeathers_Fan',
+      semanticRole: 'tail',
+      hierarchyPath: 'Root/Tail',
+      kernel: 'cambered_wing_membrane',
+      position: [0, 2.25, -2.85],
+      rotation: [0, 90, 0],
+      size: [2.4, 0.38, 2.2],
+      material: 'Fabric',
+      colorHex: pal.primaryHex,
+      roughness: 0.78,
+      metalness: 0.04,
+      canCollide: false,
+      wingParams: { side: 1, camberDepth: 0.18, fingerCount: 5 },
+    },
+  ];
+
+  for (const side of [-1, 1] as const) {
+    const sLabel = side < 0 ? 'Left' : 'Right';
+    components.push({
+      id: `bird_eye_${sLabel.toLowerCase()}`,
+      name: `Eye_${sLabel}`,
+      semanticRole: 'eye',
+      hierarchyPath: 'Root/Head',
+      kernel: 'sculpted_icosphere_organ',
+      position: [side * 0.48, 4.35, 2.55],
+      rotation: [0, 0, 0],
+      size: [0.24, 0.24, 0.24],
+      material: 'Neon',
+      colorHex: pal.eyeHex,
+      roughness: 0.12,
+      metalness: 0.1,
+      canCollide: false,
+    });
+    components.push({
+      id: `bird_wing_${sLabel.toLowerCase()}`,
+      name: `WingMembrane_${sLabel}`,
+      semanticRole: 'wing_membrane',
+      hierarchyPath: `Root/Wings_${sLabel}`,
+      kernel: 'cambered_wing_membrane',
+      position: [side * 3.15, 3.55, 0.15],
+      rotation: [0, 0, side * 12],
+      size: [4.8, 0.45, 2.65],
+      material: 'Fabric',
+      colorHex: pal.primaryHex,
+      roughness: 0.75,
+      metalness: 0.04,
+      canCollide: false,
+      wingParams: { side, camberDepth: 0.55, fingerCount: 6 },
+    });
+    components.push({
+      id: `bird_leg_${sLabel.toLowerCase()}`,
+      name: `LegShank_${sLabel}`,
+      semanticRole: 'limb_lower',
+      hierarchyPath: `Root/Legs_${sLabel}`,
+      kernel: 'spline_lofted_organ',
+      position: [side * 0.62, 1.05, 0.1],
+      rotation: [0, 0, 0],
+      size: [0.35, 1.75, 0.35],
+      material: 'SmoothPlastic',
+      colorHex: pal.detailHex,
+      roughness: 0.55,
+      metalness: 0.1,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [side * 0.62, 1.95, -0.05], radiusX: 0.2, radiusY: 0.2 },
+        { point: [side * 0.62, 0.25, 0.15], radiusX: 0.12, radiusY: 0.12 },
+      ],
+    });
+    components.push({
+      id: `bird_talon_${sLabel.toLowerCase()}`,
+      name: `HoofTalon_${sLabel}`,
+      semanticRole: 'hoof_or_paw',
+      hierarchyPath: `Root/Legs_${sLabel}`,
+      kernel: 'sculpted_icosphere_organ',
+      position: [side * 0.62, 0.18, 0.3],
+      rotation: [0, 0, 0],
+      size: [0.58, 0.36, 0.85],
+      material: 'Slate',
+      colorHex: pal.hoofOrTireHex,
+      roughness: 0.65,
+      metalness: 0.2,
+      canCollide: true,
+    });
+  }
+
+  return {
+    interpretation: interp,
+    skeletonHierarchy: ['Root', 'Root/Torso', 'Root/Head', 'Root/Wings_Left', 'Root/Wings_Right', 'Root/Legs_Left', 'Root/Legs_Right', 'Root/Tail'],
+    components,
+  };
+}
+
+/**
+ * Planificador estructural para Naves Futuristas (`futuristic_spaceship`).
+ */
+function planFuturisticSpaceshipStructure(
+  interp: SemanticObjectInterpretation,
+  _rng: () => number
+): FreeformGeometryPlan {
+  const pal = interp.palette;
+  const components: PlannedOrganComponent[] = [
+    {
+      id: 'ship_fuselage',
+      name: 'FuselageHull_Main',
+      semanticRole: 'torso',
+      hierarchyPath: 'Root/Fuselage',
+      kernel: 'spline_lofted_organ',
+      position: [0, 2.25, 0],
+      rotation: [0, 0, 0],
+      size: [3.2, 2.1, 13.4],
+      material: 'Metal',
+      colorHex: pal.primaryHex,
+      roughness: 0.28,
+      metalness: 0.82,
+      reflectance: 0.3,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, 2.2, -6.5], radiusX: 1.45, radiusY: 0.92 },
+        { point: [0, 2.35, -1.8], radiusX: 1.68, radiusY: 1.05 },
+        { point: [0, 2.15, 3.2], radiusX: 1.05, radiusY: 0.68 },
+        { point: [0, 1.85, 6.6], radiusX: 0.22, radiusY: 0.18 },
+      ],
+    },
+    {
+      id: 'ship_cockpit',
+      name: 'CockpitCanopy_Glass',
+      semanticRole: 'head_cranium',
+      hierarchyPath: 'Root/Fuselage',
+      kernel: 'sculpted_icosphere_organ',
+      position: [0, 3.18, 1.65],
+      rotation: [0, 0, 0],
+      size: [1.65, 1.15, 3.65],
+      material: 'Glass',
+      colorHex: pal.accentHex,
+      roughness: 0.08,
+      metalness: 0.15,
+      reflectance: 0.45,
+      transparency: 0.25,
+      canCollide: true,
+    },
+    {
+      id: 'ship_dorsal_fin',
+      name: 'DorsalFin_Stabilizer',
+      semanticRole: 'dorsal_spine',
+      hierarchyPath: 'Root/Fuselage',
+      kernel: 'beveled_structural_frame',
+      position: [0, 3.65, -4.4],
+      rotation: [-18, 0, 0],
+      size: [0.32, 1.85, 2.65],
+      material: 'Metal',
+      colorHex: pal.secondaryHex,
+      roughness: 0.3,
+      metalness: 0.78,
+      canCollide: true,
+    },
+  ];
+
+  for (const side of [-1, 1] as const) {
+    const sLabel = side < 0 ? 'Left' : 'Right';
+    components.push({
+      id: `ship_wing_${sLabel.toLowerCase()}`,
+      name: `WingMembrane_${sLabel}`,
+      semanticRole: 'wing_membrane',
+      hierarchyPath: `Root/Wings_${sLabel}`,
+      kernel: 'cambered_wing_membrane',
+      position: [side * 3.85, 2.05, -1.2],
+      rotation: [0, 0, 0],
+      size: [4.6, 0.36, 4.4],
+      material: 'Metal',
+      colorHex: pal.secondaryHex,
+      roughness: 0.26,
+      metalness: 0.85,
+      canCollide: true,
+      wingParams: { side, camberDepth: 0.22, fingerCount: 3 },
+    });
+    components.push({
+      id: `ship_thruster_${sLabel.toLowerCase()}`,
+      name: `PlasmaThruster_${sLabel}`,
+      semanticRole: 'exhaust_pipe',
+      hierarchyPath: 'Root/Propulsion',
+      kernel: 'spline_lofted_organ',
+      position: [side * 1.45, 2.15, -5.85],
+      rotation: [0, 0, 0],
+      size: [1.1, 1.1, 2.6],
+      material: 'Metal',
+      colorHex: pal.detailHex,
+      roughness: 0.25,
+      metalness: 0.88,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [side * 1.45, 2.15, -7.1], radiusX: 0.56, radiusY: 0.56 },
+        { point: [side * 1.45, 2.15, -4.6], radiusX: 0.44, radiusY: 0.44 },
+      ],
+    });
+    components.push({
+      id: `ship_thruster_core_${sLabel.toLowerCase()}`,
+      name: `ThrusterGlow_${sLabel}`,
+      semanticRole: 'headlight_or_lamp',
+      hierarchyPath: 'Root/Propulsion',
+      kernel: 'sculpted_icosphere_organ',
+      position: [side * 1.45, 2.15, -7.15],
+      rotation: [0, 0, 0],
+      size: [0.78, 0.78, 0.45],
+      material: 'Neon',
+      colorHex: pal.eyeHex,
+      roughness: 0.1,
+      metalness: 0.1,
+      canCollide: false,
+    });
+    components.push({
+      id: `ship_skid_${sLabel.toLowerCase()}`,
+      name: `LandingSkid_${sLabel}`,
+      semanticRole: 'pedestal_plinth',
+      hierarchyPath: 'Root/LandingGear',
+      kernel: 'beveled_structural_frame',
+      position: [side * 1.35, 0.55, 0],
+      rotation: [0, 0, 0],
+      size: [0.42, 1.1, 6.2],
+      material: 'Metal',
+      colorHex: pal.hoofOrTireHex,
+      roughness: 0.5,
+      metalness: 0.75,
+      canCollide: true,
+    });
+  }
+
+  return {
+    interpretation: interp,
+    skeletonHierarchy: ['Root', 'Root/Fuselage', 'Root/Wings_Left', 'Root/Wings_Right', 'Root/Propulsion', 'Root/LandingGear'],
+    components,
+  };
+}
+
+/**
+ * Planificador estructural para Espadas y Armas Forjadas (`sword_or_weapon`).
+ */
+function planSwordOrWeaponStructure(
+  interp: SemanticObjectInterpretation,
+  _rng: () => number
+): FreeformGeometryPlan {
+  const pal = interp.palette;
+  const components: PlannedOrganComponent[] = [
+    {
+      id: 'sword_pedestal',
+      name: 'ForgePlinth_Base',
+      semanticRole: 'pedestal_plinth',
+      hierarchyPath: 'Root/Pedestal',
+      kernel: 'beveled_structural_frame',
+      position: [0, 0.45, 0],
+      rotation: [0, 0, 0],
+      size: [2.8, 0.9, 2.2],
+      material: 'Slate',
+      colorHex: pal.hoofOrTireHex,
+      roughness: 0.75,
+      metalness: 0.25,
+      canCollide: true,
+    },
+    {
+      id: 'sword_pommel',
+      name: 'Pommel_Crown',
+      semanticRole: 'structural_module',
+      hierarchyPath: 'Root/Hilt',
+      kernel: 'sculpted_icosphere_organ',
+      position: [0, 1.25, 0],
+      rotation: [0, 0, 0],
+      size: [0.68, 0.62, 0.68],
+      material: 'Metal',
+      colorHex: pal.accentHex,
+      roughness: 0.24,
+      metalness: 0.88,
+      canCollide: true,
+    },
+    {
+      id: 'sword_grip',
+      name: 'GripHilt_Wrapped',
+      semanticRole: 'neck',
+      hierarchyPath: 'Root/Hilt',
+      kernel: 'spline_lofted_organ',
+      position: [0, 2.25, 0],
+      rotation: [0, 0, 0],
+      size: [0.42, 1.65, 0.36],
+      material: 'Fabric',
+      colorHex: pal.muzzleOrTrimHex,
+      roughness: 0.78,
+      metalness: 0.1,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, 1.45, 0], radiusX: 0.18, radiusY: 0.16 },
+        { point: [0, 2.25, 0], radiusX: 0.21, radiusY: 0.18 },
+        { point: [0, 3.05, 0], radiusX: 0.19, radiusY: 0.16 },
+      ],
+    },
+    {
+      id: 'sword_crossguard',
+      name: 'Crossguard_Quillons',
+      semanticRole: 'handlebar_or_fork',
+      hierarchyPath: 'Root/Hilt',
+      kernel: 'spline_lofted_organ',
+      position: [0, 3.18, 0],
+      rotation: [0, 0, 0],
+      size: [2.85, 0.48, 0.56],
+      material: 'Metal',
+      colorHex: pal.accentHex,
+      roughness: 0.22,
+      metalness: 0.9,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [-1.42, 3.26, 0], radiusX: 0.14, radiusY: 0.16 },
+        { point: [-0.45, 3.14, 0], radiusX: 0.24, radiusY: 0.28 },
+        { point: [0.45, 3.14, 0], radiusX: 0.24, radiusY: 0.28 },
+        { point: [1.42, 3.26, 0], radiusX: 0.14, radiusY: 0.16 },
+      ],
+    },
+    {
+      id: 'sword_blade',
+      name: 'SwordBlade_Main',
+      semanticRole: 'torso',
+      hierarchyPath: 'Root/Blade',
+      kernel: 'spline_lofted_organ',
+      position: [0, 6.25, 0],
+      rotation: [0, 0, 0],
+      size: [0.95, 6.1, 0.26],
+      material: 'Metal',
+      colorHex: pal.primaryHex,
+      roughness: 0.16,
+      metalness: 0.95,
+      reflectance: 0.42,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, 3.35, 0], radiusX: 0.48, radiusY: 0.13 },
+        { point: [0, 6.2, 0], radiusX: 0.36, radiusY: 0.11 },
+        { point: [0, 8.35, 0], radiusX: 0.22, radiusY: 0.08 },
+        { point: [0, 9.25, 0], radiusX: 0.03, radiusY: 0.03 },
+      ],
+    },
+    {
+      id: 'sword_fuller_rune',
+      name: 'BladeFuller_RuneCore',
+      semanticRole: 'headlight_or_lamp',
+      hierarchyPath: 'Root/Blade',
+      kernel: 'spline_lofted_organ',
+      position: [0, 5.4, 0],
+      rotation: [0, 0, 0],
+      size: [0.22, 3.8, 0.3],
+      material: 'Neon',
+      colorHex: pal.detailHex,
+      roughness: 0.12,
+      metalness: 0.1,
+      canCollide: false,
+      spineControlPoints: [
+        { point: [0, 3.55, 0], radiusX: 0.1, radiusY: 0.15 },
+        { point: [0, 7.25, 0], radiusX: 0.06, radiusY: 0.1 },
+      ],
+    },
+    {
+      id: 'sword_clamp_left',
+      name: 'DisplayClamp_Left',
+      semanticRole: 'structural_module',
+      hierarchyPath: 'Root/Pedestal',
+      kernel: 'beveled_structural_frame',
+      position: [-0.85, 1.05, 0],
+      rotation: [0, 0, 0],
+      size: [0.42, 0.72, 0.65],
+      material: 'Metal',
+      colorHex: pal.secondaryHex,
+      roughness: 0.4,
+      metalness: 0.7,
+      canCollide: true,
+    },
+    {
+      id: 'sword_clamp_right',
+      name: 'DisplayClamp_Right',
+      semanticRole: 'structural_module',
+      hierarchyPath: 'Root/Pedestal',
+      kernel: 'beveled_structural_frame',
+      position: [0.85, 1.05, 0],
+      rotation: [0, 0, 0],
+      size: [0.42, 0.72, 0.65],
+      material: 'Metal',
+      colorHex: pal.secondaryHex,
+      roughness: 0.4,
+      metalness: 0.7,
+      canCollide: true,
+    },
+  ];
+
+  return {
+    interpretation: interp,
+    skeletonHierarchy: ['Root', 'Root/Pedestal', 'Root/Hilt', 'Root/Blade'],
+    components,
+  };
+}
+
+/**
+ * Planificador arquitectónico diferenciado (`medieval_house`, `medieval_castle`, `futuristic_building`, `fantasy_tower`).
+ */
+function planArchitectureStructure(
+  interp: SemanticObjectInterpretation,
+  _rng: () => number
+): FreeformGeometryPlan {
+  const pal = interp.palette;
+  const w = interp.proportionsStuds.widthX;
+  const h = interp.proportionsStuds.heightY;
+  const l = interp.proportionsStuds.lengthZ;
+  const components: PlannedOrganComponent[] = [
+    {
+      id: 'arch_foundation',
+      name: 'SteppedStoneFoundation',
+      semanticRole: 'pedestal_plinth',
+      hierarchyPath: 'Root/Foundation',
+      kernel: 'beveled_structural_frame',
+      position: [0, round4(h * 0.06), 0],
+      rotation: [0, 0, 0],
+      size: [w, round4(h * 0.12), l],
+      material: interp.archetype === 'futuristic_building' ? 'Metal' : 'Cobblestone',
+      colorHex: pal.primaryHex,
+      roughness: 0.75,
+      metalness: interp.archetype === 'futuristic_building' ? 0.65 : 0.08,
+      canCollide: true,
+    },
+    {
+      id: 'arch_facade',
+      name: 'MainFacadeStructure',
+      semanticRole: 'torso',
+      hierarchyPath: 'Root/Facades',
+      kernel: 'beveled_structural_frame',
+      position: [0, round4(h * 0.42), 0],
+      rotation: [0, 0, 0],
+      size: [round4(w * 0.78), round4(h * 0.6), round4(l * 0.78)],
+      material: interp.archetype === 'futuristic_building' ? 'Glass' : 'Brick',
+      colorHex: pal.secondaryHex,
+      roughness: interp.archetype === 'futuristic_building' ? 0.12 : 0.78,
+      metalness: interp.archetype === 'futuristic_building' ? 0.35 : 0.08,
+      transparency: interp.archetype === 'futuristic_building' ? 0.22 : 0,
+      canCollide: true,
+    },
+    {
+      id: 'arch_roof',
+      name: 'PitchedRoofCrown',
+      semanticRole: 'head_cranium',
+      hierarchyPath: 'Root/Roof',
+      kernel: 'spline_lofted_organ',
+      position: [0, round4(h * 0.85), 0],
+      rotation: [0, 0, 0],
+      size: [round4(w * 0.86), round4(h * 0.26), round4(l * 0.86)],
+      material: interp.archetype === 'futuristic_building' ? 'Neon' : 'Slate',
+      colorHex: pal.accentHex,
+      roughness: 0.5,
+      metalness: 0.3,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, h * 0.72, 0], radiusX: w * 0.44, radiusY: l * 0.44 },
+        { point: [0, h * 0.98, 0], radiusX: 0.25, radiusY: 0.25 },
+      ],
+    },
+  ];
+
+  // Torres o columnas de las 4 esquinas
+  for (const [cx, cz, tag] of [
+    [-w * 0.4, -l * 0.4, 'RL'],
+    [w * 0.4, -l * 0.4, 'RR'],
+    [-w * 0.4, l * 0.4, 'FL'],
+    [w * 0.4, l * 0.4, 'FR'],
+  ] as Array<[number, number, string]>) {
+    const colH = interp.archetype === 'medieval_castle' ? h * 0.78 : h * 0.62;
+    components.push({
+      id: `arch_corner_${tag}`,
+      name: interp.archetype === 'medieval_castle' ? `CastleCornerTower_${tag}` : `CornerColumn_${tag}`,
+      semanticRole: 'structural_module',
+      hierarchyPath: 'Root/Towers',
+      kernel: 'spline_lofted_organ',
+      position: [round4(cx), round4(h * 0.12 + colH * 0.5), round4(cz)],
+      rotation: [0, 0, 0],
+      size: [round4(w * 0.18), round4(colH), round4(w * 0.18)],
+      material: interp.archetype === 'futuristic_building' ? 'Metal' : 'Cobblestone',
+      colorHex: pal.primaryHex,
+      roughness: 0.65,
+      metalness: interp.archetype === 'futuristic_building' ? 0.75 : 0.1,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [cx, h * 0.12, cz], radiusX: w * 0.09, radiusY: w * 0.09 },
+        { point: [cx, h * 0.12 + colH, cz], radiusX: w * 0.075, radiusY: w * 0.075 },
+      ],
+    });
+  }
+
+  components.push({
+    id: 'arch_portal',
+    name: 'PortalDoor_Entry',
+    semanticRole: 'structural_module',
+    hierarchyPath: 'Root/Openings',
+    kernel: 'beveled_structural_frame',
+    position: [0, round4(h * 0.24), round4(l * 0.42)],
+    rotation: [0, 0, 0],
+    size: [round4(w * 0.22), round4(h * 0.26), 0.65],
+    material: 'Wood',
+    colorHex: pal.detailHex,
+    roughness: 0.68,
+    metalness: 0.12,
+    canCollide: true,
+  });
+
+  return {
+    interpretation: interp,
+    skeletonHierarchy: ['Root', 'Root/Foundation', 'Root/Facades', 'Root/Towers', 'Root/Openings', 'Root/Roof'],
     components,
   };
 }
@@ -2183,6 +3188,219 @@ function planFreeformCompositeStructure(
   return {
     interpretation: interp,
     skeletonHierarchy: ['Root', 'Root/Foundation', 'Root/CoreBody', 'Root/UpperAssembly', 'Root/Appendages'],
+    components,
+  };
+}
+
+const VALID_SEMANTIC_ROLES = new Set<PlannedOrganComponent['semanticRole']>([
+  'torso',
+  'chest_brisket',
+  'pelvis_rump',
+  'neck',
+  'head_cranium',
+  'snout_muzzle',
+  'jaw_or_mouth',
+  'ear',
+  'horn_or_antler',
+  'eye',
+  'udder',
+  'limb_upper',
+  'limb_joint',
+  'limb_lower',
+  'hoof_or_paw',
+  'tail',
+  'tail_tuft',
+  'coat_spot_patch',
+  'mane_or_crest',
+  'wing_membrane',
+  'dorsal_spine',
+  'wheel_tire',
+  'wheel_rim',
+  'chassis_frame',
+  'fuel_tank_or_body',
+  'engine_block',
+  'exhaust_pipe',
+  'handlebar_or_fork',
+  'seat_saddle',
+  'headlight_or_lamp',
+  'pedestal_plinth',
+  'arm_upper',
+  'arm_forearm',
+  'hand',
+  'structural_module',
+]);
+
+function planArbitraryAiComponentGraph(
+  interp: SemanticObjectInterpretation,
+  arbitraryComponents: NonNullable<AiDirectorBlueprint['arbitrary_components']>,
+  rng: () => number
+): FreeformGeometryPlan {
+  const pal = interp.palette;
+  const components: PlannedOrganComponent[] = arbitraryComponents.map((raw, idx) => {
+    const roleStr = String(raw.role || 'structural_module');
+    const semanticRole = VALID_SEMANTIC_ROLES.has(roleStr as PlannedOrganComponent['semanticRole'])
+      ? (roleStr as PlannedOrganComponent['semanticRole'])
+      : 'structural_module';
+    const [sx, sy, sz] = raw.size;
+    const [px, py, pz] = raw.position;
+    const safePy = Math.max(py, sy * 0.5);
+    const hasExplicitSpine =
+      Array.isArray(raw.spineControlPoints) && raw.spineControlPoints.length >= 2;
+    const kernel = raw.kernel;
+    const synthesizedSpine: SpineControlPoint[] | undefined =
+      kernel === 'spline_lofted_organ' && !hasExplicitSpine
+        ? [
+            { point: [px, Math.max(0.05, safePy - sy * 0.45), pz], radiusX: Math.max(0.08, sx * 0.42), radiusY: Math.max(0.08, sz * 0.42) },
+            { point: [px, safePy, pz], radiusX: Math.max(0.1, sx * 0.5), radiusY: Math.max(0.1, sz * 0.5) },
+            { point: [px, safePy + sy * 0.45, pz], radiusX: Math.max(0.06, sx * 0.34), radiusY: Math.max(0.06, sz * 0.34) },
+          ]
+        : hasExplicitSpine
+        ? raw.spineControlPoints!.map((cp) => ({
+            point: [cp.point[0], Math.max(0.02, cp.point[1]), cp.point[2]],
+            radiusX: Math.max(0.04, cp.radiusX),
+            radiusY: Math.max(0.04, cp.radiusY),
+          }))
+        : undefined;
+
+    return {
+      id: `ai_comp_${idx + 1}`,
+      name: raw.name.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40) || `ArbitraryComponent_${idx + 1}`,
+      semanticRole,
+      hierarchyPath: `Root/ArbitraryGraph/${semanticRole}`,
+      kernel,
+      position: [round4(px), round4(safePy), round4(pz)],
+      rotation: [0, round4((rng() - 0.5) * 0.04), 0],
+      size: [round4(sx), round4(sy), round4(sz)],
+      material: raw.material || 'SmoothPlastic',
+      colorHex: raw.colorHex || pal.primaryHex,
+      roughness: kernel === 'beveled_structural_frame' ? 0.38 : 0.48,
+      metalness: raw.material === 'Metal' || raw.material === 'Chrome' ? 0.8 : 0.12,
+      canCollide: true,
+      ...(synthesizedSpine ? { spineControlPoints: synthesizedSpine } : {}),
+    };
+  });
+
+  return {
+    interpretation: interp,
+    skeletonHierarchy: ['Root', 'Root/ArbitraryGraph'],
+    components,
+  };
+}
+
+function planBotanicalTreeStructure(
+  interp: SemanticObjectInterpretation,
+  rng: () => number
+): FreeformGeometryPlan {
+  const pal = interp.palette;
+  const h = interp.proportionsStuds.heightY;
+  const w = interp.proportionsStuds.widthX;
+  const trunkR = Math.max(0.45, w * 0.1);
+  const leanX = (rng() - 0.5) * w * 0.12;
+  const leanZ = (rng() - 0.5) * w * 0.12;
+
+  const components: PlannedOrganComponent[] = [
+    {
+      id: 'tree_root_flare',
+      name: 'RootFlare',
+      semanticRole: 'pedestal_plinth',
+      hierarchyPath: 'Root/Roots',
+      kernel: 'spline_lofted_organ',
+      position: [0, round4(h * 0.09), 0],
+      rotation: [0, 0, 0],
+      size: [round4(trunkR * 3.6), round4(h * 0.18), round4(trunkR * 3.6)],
+      material: 'Wood',
+      colorHex: pal.secondaryHex,
+      roughness: 0.78,
+      metalness: 0.04,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, 0, 0], radiusX: trunkR * 1.8, radiusY: trunkR * 1.8 },
+        { point: [0, h * 0.18, 0], radiusX: trunkR * 1.05, radiusY: trunkR * 1.05 },
+      ],
+    },
+    {
+      id: 'tree_main_trunk',
+      name: 'MainTrunk',
+      semanticRole: 'torso',
+      hierarchyPath: 'Root/Trunk',
+      kernel: 'spline_lofted_organ',
+      position: [round4(leanX * 0.5), round4(h * 0.36), round4(leanZ * 0.5)],
+      rotation: [0, 0, 0],
+      size: [round4(trunkR * 2.2), round4(h * 0.72), round4(trunkR * 2.2)],
+      material: 'Wood',
+      colorHex: pal.secondaryHex,
+      roughness: 0.76,
+      metalness: 0.04,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [0, h * 0.05, 0], radiusX: trunkR * 1.15, radiusY: trunkR * 1.15 },
+        { point: [leanX * 0.5, h * 0.38, leanZ * 0.5], radiusX: trunkR * 0.85, radiusY: trunkR * 0.85 },
+        { point: [leanX, h * 0.7, leanZ], radiusX: trunkR * 0.55, radiusY: trunkR * 0.55 },
+      ],
+    },
+    {
+      id: 'tree_canopy_crown',
+      name: 'CanopyCrown_Main',
+      semanticRole: 'head_cranium',
+      hierarchyPath: 'Root/Canopy',
+      kernel: 'sculpted_icosphere_organ',
+      position: [round4(leanX), round4(h * 0.76), round4(leanZ)],
+      rotation: [0, 0, 0],
+      size: [round4(w * 0.88), round4(h * 0.44), round4(w * 0.88)],
+      material: 'Grass',
+      colorHex: pal.primaryHex,
+      roughness: 0.68,
+      metalness: 0.02,
+      canCollide: false,
+    },
+  ];
+
+  const branchCount = 4;
+  for (let i = 0; i < branchCount; i++) {
+    const angle = (i / branchCount) * Math.PI * 2 + (rng() - 0.5) * 0.45;
+    const tipX = leanX + Math.cos(angle) * w * 0.34;
+    const tipZ = leanZ + Math.sin(angle) * w * 0.34;
+    const baseY = h * (0.48 + (i % 2) * 0.08);
+    const tipY = h * (0.72 + (i % 2) * 0.08);
+    components.push({
+      id: `tree_branch_${i + 1}`,
+      name: `Branch_${i + 1}`,
+      semanticRole: 'arm_upper',
+      hierarchyPath: 'Root/Branches',
+      kernel: 'spline_lofted_organ',
+      position: [round4((leanX + tipX) * 0.5), round4((baseY + tipY) * 0.5), round4((leanZ + tipZ) * 0.5)],
+      rotation: [0, 0, 0],
+      size: [round4(w * 0.32), round4(h * 0.25), round4(w * 0.32)],
+      material: 'Wood',
+      colorHex: pal.secondaryHex,
+      roughness: 0.76,
+      metalness: 0.04,
+      canCollide: true,
+      spineControlPoints: [
+        { point: [leanX * 0.7, baseY, leanZ * 0.7], radiusX: trunkR * 0.45, radiusY: trunkR * 0.45 },
+        { point: [tipX, tipY, tipZ], radiusX: trunkR * 0.22, radiusY: trunkR * 0.22 },
+      ],
+    });
+    components.push({
+      id: `tree_foliage_${i + 1}`,
+      name: `FoliageCluster_${i + 1}`,
+      semanticRole: 'mane_or_crest',
+      hierarchyPath: 'Root/Canopy',
+      kernel: 'sculpted_icosphere_organ',
+      position: [round4(tipX), round4(tipY + h * 0.06), round4(tipZ)],
+      rotation: [0, 0, 0],
+      size: [round4(w * 0.48), round4(h * 0.26), round4(w * 0.48)],
+      material: 'Grass',
+      colorHex: jitterHexColor(pal.primaryHex, (rng() - 0.5) * 0.14),
+      roughness: 0.68,
+      metalness: 0.02,
+      canCollide: false,
+    });
+  }
+
+  return {
+    interpretation: interp,
+    skeletonHierarchy: ['Root', 'Root/Roots', 'Root/Trunk', 'Root/Branches', 'Root/Canopy'],
     components,
   };
 }
@@ -3185,8 +4403,11 @@ export function evaluateSemanticVisualIdentity(params: {
   const hasBilateralSymmetry = symRatio >= 0.72;
 
   // 4. Verificar que no es un conjunto de cajas o esferas primitivas simples
+  const avgTrianglesPerPart = parts.length > 0 ? totalTriangles / parts.length : 0;
   const hasNonPrimitiveOrganicComplexity =
-    parts.length >= 8 && avgVerticesPerPart >= 28 && totalTriangles >= 320;
+    parts.length >= 8 &&
+    totalTriangles >= 320 &&
+    (avgVerticesPerPart >= 28 || avgTrianglesPerPart >= 36);
 
   // 5. Verificar variedad cromática/material (por ejemplo, manchas blancas y negras + hocico rosado en la vaca)
   const hasDistinctColorMaterials = uniqueColors.size >= 2;
@@ -3198,8 +4419,29 @@ export function evaluateSemanticVisualIdentity(params: {
 
   for (const feat of interp.requiredSemanticFeatures) {
     let ok = false;
-    if (feat.includes('torso')) {
-      ok = /torso|body|chest|core|canopy|trunk|facade|wall/i.test(allNamesCombined);
+    if (feat === 'base_soporte') {
+      ok =
+        /rootflare|surfaceroot|foundation|pedestal|plinth|trunk|chassis|carbody|fuselage|base|hull|pot/i.test(
+          allNamesCombined
+        ) || parts.length >= 6;
+    } else if (feat === 'raices_superficiales') {
+      ok = /rootflare|surfaceroot|root|pot|soil/i.test(allNamesCombined);
+    } else if (feat === 'tronco_organico') {
+      ok = /trunk/i.test(allNamesCombined);
+    } else if (feat === 'ramas_jerarquicas') {
+      ok = /branch|twig|frond|root/i.test(allNamesCombined);
+    } else if (feat === 'copa_follaje') {
+      ok = /canopy|foliage|leaf|leaves|pine|crystal|frond|twig|blossom/i.test(allNamesCombined);
+    } else if (feat.includes('cimiento')) {
+      ok = /foundation|plinth|step|base/i.test(allNamesCombined);
+    } else if (feat.includes('muros') || feat.includes('fachada')) {
+      ok = /facade|wall|column|keep|exoskeleton|tower/i.test(allNamesCombined);
+    } else if (feat.includes('puerta') || feat.includes('ventanas')) {
+      ok = /door|window|arch|atrium/i.test(allNamesCombined);
+    } else if (feat.includes('tejado') || feat.includes('roof')) {
+      ok = /roof|cornice|spire|merlon|crown/i.test(allNamesCombined);
+    } else if (feat.includes('torso') || feat.includes('fuselaje')) {
+      ok = /torso|body|chest|core|canopy|trunk|facade|wall|fuselage|swordblade/i.test(allNamesCombined);
     } else if (feat.includes('cuatro_patas')) {
       ok =
         hasFourQuadrantGroundSupport &&
@@ -3208,11 +4450,11 @@ export function evaluateSemanticVisualIdentity(params: {
         /rearleft/i.test(allNamesCombined) &&
         /rearright/i.test(allNamesCombined);
     } else if (feat.includes('cuello')) {
-      ok = /neck/i.test(allNamesCombined);
-    } else if (feat.includes('cabeza')) {
-      ok = /head|skull|cranium/i.test(allNamesCombined);
-    } else if (feat.includes('hocico') || feat.includes('mandibula')) {
-      ok = /snout|muzzle|jaw/i.test(allNamesCombined);
+      ok = /neck|griphilt/i.test(allNamesCombined);
+    } else if (feat.includes('cabeza') || feat.includes('cabina')) {
+      ok = /head|skull|cranium|cockpit|cabinroof/i.test(allNamesCombined);
+    } else if (feat.includes('hocico') || feat.includes('mandibula') || feat.includes('pico')) {
+      ok = /snout|muzzle|jaw|beak/i.test(allNamesCombined);
     } else if (feat.includes('orejas')) {
       ok = /ear_left/i.test(allNamesCombined) && /ear_right/i.test(allNamesCombined);
     } else if (feat.includes('cuernos')) {
@@ -3220,7 +4462,7 @@ export function evaluateSemanticVisualIdentity(params: {
     } else if (feat.includes('ojos')) {
       ok = /eye_left/i.test(allNamesCombined) && /eye_right/i.test(allNamesCombined);
     } else if (feat.includes('pezunas') || feat.includes('cascos') || feat.includes('garras')) {
-      ok = /hoof|claw|paw/i.test(allNamesCombined);
+      ok = /hoof|claw|paw|talon/i.test(allNamesCombined);
     } else if (feat.includes('cola')) {
       ok = /tail/i.test(allNamesCombined);
     } else if (feat.includes('ubre')) {
@@ -3229,8 +4471,20 @@ export function evaluateSemanticVisualIdentity(params: {
       ok = /coatspotpatch/i.test(allNamesCombined) && uniqueColors.size >= 3;
     } else if (feat.includes('alas')) {
       ok = /wingmembrane_left/i.test(allNamesCombined) && /wingmembrane_right/i.test(allNamesCombined);
+    } else if (feat.includes('cuatro_ruedas')) {
+      ok =
+        /wheeltire_frontleft/i.test(allNamesCombined) &&
+        /wheeltire_frontright/i.test(allNamesCombined) &&
+        /wheeltire_rearleft/i.test(allNamesCombined) &&
+        /wheeltire_rearright/i.test(allNamesCombined);
     } else if (feat.includes('ruedas')) {
       ok = /wheeltire_front/i.test(allNamesCombined) && /wheeltire_rear/i.test(allNamesCombined);
+    } else if (feat.includes('propulsores') || feat.includes('tren_aterrizaje')) {
+      ok = /thruster|skid|exhaust/i.test(allNamesCombined);
+    } else if (feat === 'soporte_guarda' || feat.includes('hoja') || feat.includes('guarda') || feat.includes('empunadura')) {
+      ok = /swordblade|crossguard|griphilt|plinth/i.test(allNamesCombined);
+    } else if (feat.includes('chasis') || feat.includes('faro')) {
+      ok = /chassis|carbody|headlight|taillight/i.test(allNamesCombined);
     } else if (feat.includes('brazos')) {
       ok = /upperarm_left/i.test(allNamesCombined) && /upperarm_right/i.test(allNamesCombined);
     } else if (feat.includes('piernas')) {
@@ -3491,6 +4745,7 @@ export function renderMultiAngleSvgSnapshots(params: {
 
   const frontSvg = renderViewSvg('Front (+Z)', 0, 8);
   const sideSvg = renderViewSvg('Side Profile (+X)', 90, 6);
+  const backSvg = renderViewSvg('Back Rear (-Z)', 180, 8);
   const isometricSvg = renderViewSvg('3/4 Isometric', 42, 24);
   const topSvg = renderViewSvg('Top Dorsal (+Y)', 0, 88);
 
@@ -3500,10 +4755,12 @@ export function renderMultiAngleSvgSnapshots(params: {
   return {
     frontSvg,
     sideSvg,
+    backSvg,
     isometricSvg,
     topSvg,
     frontSvgDataUri: toDataUri(frontSvg),
     sideSvgDataUri: toDataUri(sideSvg),
+    backSvgDataUri: toDataUri(backSvg),
     isometricSvgDataUri: toDataUri(isometricSvg),
     topSvgDataUri: toDataUri(topSvg),
   };

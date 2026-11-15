@@ -16,6 +16,11 @@
  * Jamás simula que se ejecutó un modelo externo cuando no está configurado o accesible.
  */
 
+import {
+  extractPartsFromUploadedMesh,
+  type MeshPartInput,
+} from './generation3DEngine.ts';
+
 export interface OpenSource3DModelEvaluation {
   id: 'hunyuan3d_2' | 'trellis' | 'stable_fast_3d' | 'triposr' | 'openlrm_shape';
   name: string;
@@ -219,16 +224,99 @@ export function getExternal3DAdapterStatus(): External3DAdapterStatus {
   };
 }
 
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
+
+function groundAndCenterExternalParts(parts: MeshPartInput[], fromRawObj: boolean): MeshPartInput[] {
+  const recentered: MeshPartInput[] = parts.map((p): MeshPartInput => {
+    const verts = p.meshData?.vertices;
+    if (!p.meshData || !Array.isArray(verts) || verts.length === 0) return p;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (const v of verts) {
+      if (v[0] < minX) minX = v[0];
+      if (v[0] > maxX) maxX = v[0];
+      if (v[1] < minY) minY = v[1];
+      if (v[1] > maxY) maxY = v[1];
+      if (v[2] < minZ) minZ = v[2];
+      if (v[2] > maxZ) maxZ = v[2];
+    }
+
+    const cx = (minX + maxX) * 0.5;
+    const cy = (minY + maxY) * 0.5;
+    const cz = (minZ + maxZ) * 0.5;
+    const spanX = Math.max(0.2, round4(maxX - minX));
+    const spanY = Math.max(0.2, round4(maxY - minY));
+    const spanZ = Math.max(0.2, round4(maxZ - minZ));
+
+    const needsRecenter =
+      Math.abs(cx) > 1e-4 || Math.abs(cy) > 1e-4 || Math.abs(cz) > 1e-4;
+    const centeredVerts: [number, number, number][] = needsRecenter
+      ? verts.map((v) => [round4(v[0] - cx), round4(v[1] - cy), round4(v[2] - cz)])
+      : verts;
+
+    const basePos = Array.isArray(p.position) ? p.position : [0, spanY * 0.5, 0];
+    const nextPos: [number, number, number] = fromRawObj
+      ? [round4(cx), round4(cy), round4(cz)]
+      : [round4(Number(basePos[0] ?? 0) + cx), round4(Number(basePos[1] ?? 0) + cy), round4(Number(basePos[2] ?? 0) + cz)];
+
+    return {
+      ...p,
+      size: [spanX, spanY, spanZ],
+      position: nextPos,
+      meshData: {
+        ...p.meshData,
+        vertices: centeredVerts,
+      },
+    };
+  });
+
+  let globalMinY = Infinity;
+  for (const p of recentered) {
+    const py = Number(p.position?.[1] ?? 0);
+    const verts = p.meshData?.vertices;
+    if (Array.isArray(verts) && verts.length > 0) {
+      for (const v of verts) {
+        const wy = py + Number(v[1] ?? 0);
+        if (wy < globalMinY) globalMinY = wy;
+      }
+    } else {
+      const sy = Number(p.size?.[1] ?? 1);
+      const bottom = py - sy * 0.5;
+      if (bottom < globalMinY) globalMinY = bottom;
+    }
+  }
+  const shiftY = Number.isFinite(globalMinY) ? -globalMinY : 0;
+
+  return recentered.map((p) => ({
+    ...p,
+    position: [
+      round4(Number(p.position?.[0] ?? 0)),
+      round4(Number(p.position?.[1] ?? 0) + shiftY),
+      round4(Number(p.position?.[2] ?? 0)),
+    ],
+  }));
+}
+
 export async function executeExternal3DGeneration(params: {
   prompt: string;
+  modelName?: string;
   referenceImageBase64?: string;
   targetPolyBudget?: number;
+  collisionFidelity?: string;
   model?: string;
 }): Promise<{
   success: boolean;
-  parts?: any[];
+  parts?: MeshPartInput[];
   errorReason?: string;
   modelUsed: string;
+  latencyMs?: number;
 }> {
   const status = getExternal3DAdapterStatus();
   if (!status.configured || !status.endpointUrl) {
@@ -239,15 +327,25 @@ export async function executeExternal3DGeneration(params: {
     };
   }
 
+  const startedAt = Date.now();
+  const safeModelName =
+    String(params.modelName || params.prompt || 'ExternalModel3D')
+      .replace(/[^a-zA-Z0-9_]/g, '')
+      .slice(0, 28) || 'ExternalModel3D';
+  const collisionFidelity = params.collisionFidelity || 'Hull';
+
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 25000);
+    const timer = setTimeout(() => controller.abort(), 30000);
 
     const res = await fetch(status.endpointUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(process.env.FORGE_EXTERNAL_3D_TOKEN ? { Authorization: `Bearer ${process.env.FORGE_EXTERNAL_3D_TOKEN}` } : {}),
+        Accept: 'application/json, text/plain, model/obj',
+        ...(process.env.FORGE_EXTERNAL_3D_TOKEN
+          ? { Authorization: `Bearer ${process.env.FORGE_EXTERNAL_3D_TOKEN}` }
+          : {}),
       },
       body: JSON.stringify({
         prompt: params.prompt,
@@ -259,34 +357,124 @@ export async function executeExternal3DGeneration(params: {
     });
     clearTimeout(timer);
 
+    const latencyMs = Date.now() - startedAt;
+
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
       return {
         success: false,
-        errorReason: `Endpoint externo HTTP ${res.status}: ${errText.slice(0, 120)}`,
+        errorReason: `Endpoint externo HTTP ${res.status}: ${errText.slice(0, 140)}`,
         modelUsed: status.preferredModel,
+        latencyMs,
       };
     }
 
-    const json = await res.json().catch(() => null);
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    const rawBodyText = await res.text();
+
+    let json: any = null;
+    if (!contentType.includes('model/obj') && rawBodyText.trim().startsWith('{')) {
+      try {
+        json = JSON.parse(rawBodyText);
+      } catch {
+        json = null;
+      }
+    }
+
     if (json && Array.isArray(json.parts) && json.parts.length > 0) {
       return {
         success: true,
-        parts: json.parts,
-        modelUsed: status.preferredModel,
+        parts: groundAndCenterExternalParts(json.parts, false),
+        modelUsed: String(json.model_used || json.model || status.preferredModel),
+        latencyMs,
       };
+    }
+
+    const objPayload =
+      typeof json?.obj_text === 'string'
+        ? json.obj_text
+        : typeof json?.mesh_obj === 'string'
+        ? json.mesh_obj
+        : typeof json?.obj === 'string'
+        ? json.obj
+        : !json && /(^|\n)\s*v\s+[-0-9.]/.test(rawBodyText) && /(^|\n)\s*f\s+\d/.test(rawBodyText)
+        ? rawBodyText
+        : null;
+
+    if (objPayload) {
+      const objParts = extractPartsFromUploadedMesh(
+        safeModelName,
+        objPayload,
+        undefined,
+        collisionFidelity
+      );
+      if (objParts.length > 0) {
+        return {
+          success: true,
+          parts: groundAndCenterExternalParts(objParts, true),
+          modelUsed: String(json?.model_used || json?.model || status.preferredModel),
+          latencyMs,
+        };
+      }
+    }
+
+    const subMeshes = Array.isArray(json?.sub_meshes)
+      ? json.sub_meshes
+      : Array.isArray(json?.meshes)
+      ? json.meshes
+      : json && Array.isArray(json.vertices) && Array.isArray(json.faces)
+      ? [
+          {
+            name: `${safeModelName}_ExternalMesh`,
+            vertices: json.vertices,
+            faces: json.faces,
+            normals: json.normals,
+            uvs: json.uvs,
+            color: json.color,
+            material: json.material,
+          },
+        ]
+      : json?.mesh && Array.isArray(json.mesh.vertices) && Array.isArray(json.mesh.faces)
+      ? [
+          {
+            name: `${safeModelName}_ExternalMesh`,
+            vertices: json.mesh.vertices,
+            faces: json.mesh.faces,
+            normals: json.mesh.normals,
+            uvs: json.mesh.uvs,
+          },
+        ]
+      : null;
+
+    if (subMeshes && subMeshes.length > 0) {
+      const extracted = extractPartsFromUploadedMesh(
+        safeModelName,
+        undefined,
+        subMeshes,
+        collisionFidelity
+      );
+      if (extracted.length > 0) {
+        return {
+          success: true,
+          parts: groundAndCenterExternalParts(extracted, false),
+          modelUsed: String(json?.model_used || json?.model || status.preferredModel),
+          latencyMs,
+        };
+      }
     }
 
     return {
       success: false,
-      errorReason: 'Respuesta del servicio 3D externo no devolvió piezas válidas.',
+      errorReason: 'Respuesta del servicio 3D externo no devolvió partes ni malla (.obj / vertices+faces) válidas.',
       modelUsed: status.preferredModel,
+      latencyMs,
     };
   } catch (err: any) {
     return {
       success: false,
       errorReason: err.message || 'Error de red al conectar con el servidor 3D externo.',
       modelUsed: status.preferredModel,
+      latencyMs: Date.now() - startedAt,
     };
   }
 }

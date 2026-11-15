@@ -919,10 +919,11 @@ export function buildLatheSilhouetteMesh(options: {
   modelName: string;
   size: [number, number, number];
   widthProfile: number[];
+  depthProfile?: number[];
   centerOffsetProfile?: number[];
   radialSegments: number;
 }): SpecializedMeshData {
-  const { modelName, size, widthProfile, centerOffsetProfile, radialSegments } = options;
+  const { modelName, size, widthProfile, depthProfile, centerOffsetProfile, radialSegments } = options;
 
   return buildMultiLodSpecializedMesh(modelName, (lodFactor) => {
     const rSegs = Math.max(6, Math.round(radialSegments * lodFactor));
@@ -935,13 +936,14 @@ export function buildLatheSilhouetteMesh(options: {
       const v = h / (profileLen - 1);
       const y = (v - 0.5) * size[1];
       const wNorm = clamp(widthProfile[h] ?? 0.5, 0.08, 1.0);
+      const dNorm = depthProfile ? clamp(depthProfile[h] ?? wNorm, 0.08, 1.0) : wNorm;
       const xShift = (centerOffsetProfile?.[h] ?? 0) * size[0] * 0.4;
 
       for (let r = 0; r < rSegs; r++) {
         const u = r / rSegs;
         const theta = u * Math.PI * 2;
         const vx = Math.cos(theta) * size[0] * 0.5 * wNorm + xShift;
-        const vz = Math.sin(theta) * size[2] * 0.5 * wNorm;
+        const vz = Math.sin(theta) * size[2] * 0.5 * dNorm;
         vertices.push([vx, y, vz]);
         uvs.push([u, v]);
       }
@@ -1911,6 +1913,8 @@ export function generateSpecializedBuildingAssetParts(params: {
   const roofW = round4(totalW * 1.04);
   const roofD = round4(totalD * 1.04);
   const roofY = round4(plinthH + bodyH + corniceH + roofH * 0.48);
+  const subType = String(blueprint.identity.species_or_subtype || '').toLowerCase();
+
   parts.push(
     makePartSpec({
       idx: idx++,
@@ -1927,11 +1931,191 @@ export function generateSpecializedBuildingAssetParts(params: {
       meshData: buildArchitecturalRoofMesh({
         modelName,
         size: [roofW, roofH, roofD],
-        roofStyle: 'pagoda_curved',
+        roofStyle:
+          subType === 'medieval_castle'
+            ? 'crenellated'
+            : subType === 'fantasy_tower'
+            ? 'pitched_hip'
+            : subType === 'futuristic_building'
+            ? 'gable'
+            : 'pagoda_curved',
         segments: budget.heightSegmentsPrimary,
       }),
     })
   );
+
+  // 7. Subtype Architectural Differentiation (Castle / Futuristic Building / Fantasy Tower)
+  const parapetY = round4(plinthH + bodyH + corniceH);
+  if (subType === 'medieval_castle') {
+    const keepW = round4(totalW * 0.44);
+    const keepH = round4(totalH * 0.34);
+    const keepY = round4(parapetY + keepH * 0.46);
+    parts.push(
+      makePartSpec({
+        idx: idx++,
+        name: 'CentralKeep_Tower',
+        parentPath: 'Root/CastleSuperstructure',
+        size: [keepW, keepH, keepW],
+        position: [0, keepY, 0],
+        colorHex: stoneHex,
+        material: stoneMat,
+        roughness: 0.84,
+        metalness: 0.08,
+        collisionFidelity: cf,
+        meshData: buildTaperedCurvedTubeMesh({
+          modelName,
+          size: [keepW, keepH, keepW],
+          radialSegments: Math.max(8, budget.radialSegmentsPrimary),
+          heightSegments: budget.heightSegmentsSecondary,
+          bottomRadiusRatio: 1.0,
+          topRadiusRatio: 0.88,
+          flutingCount: 8,
+          flutingDepth: 0.05,
+        }),
+      })
+    );
+
+    const merlonOffsets: [number, number][] = [
+      [-roofW * 0.42, -roofD * 0.42],
+      [roofW * 0.42, -roofD * 0.42],
+      [-roofW * 0.42, roofD * 0.42],
+      [roofW * 0.42, roofD * 0.42],
+    ];
+    merlonOffsets.forEach(([mx, mz], mIdx) => {
+      const mSize = round4(Math.max(0.9, totalW * 0.12));
+      const mH = round4(Math.max(1.1, totalH * 0.1));
+      parts.push(
+        makePartSpec({
+          idx: idx++,
+          name: `BattlementMerlon_${mIdx + 1}`,
+          parentPath: 'Root/CastleSuperstructure',
+          size: [mSize, mH, mSize],
+          position: [round4(mx), round4(parapetY + mH * 0.55), round4(mz)],
+          colorHex: jitterHexColor(stoneHex, -0.03),
+          material: stoneMat,
+          roughness: 0.85,
+          metalness: 0.06,
+          collisionFidelity: cf,
+          meshData: buildBeveledStructuralMesh({
+            modelName,
+            size: [mSize, mH, mSize],
+            bevelRatio: 0.1,
+            radialSegments: 6,
+            heightSegments: 2,
+          }),
+        })
+      );
+    });
+  } else if (subType === 'futuristic_building') {
+    for (let rIdx = 0; rIdx < 2; rIdx++) {
+      const side = rIdx === 0 ? -1 : 1;
+      const ribW = round4(Math.max(0.55, totalW * 0.08));
+      const ribH = round4(bodyH * 1.12);
+      parts.push(
+        makePartSpec({
+          idx: idx++,
+          name: `NeonExoskeleton_Rib_${rIdx + 1}`,
+          parentPath: 'Root/FuturisticExoskeleton',
+          size: [ribW, ribH, round4(bodyD * 0.92)],
+          position: [round4(side * bodyW * 0.52), round4(plinthH + ribH * 0.5), 0],
+          colorHex: accentHex || '#38bdf8',
+          material: 'Neon',
+          roughness: 0.18,
+          metalness: 0.65,
+          collisionFidelity: cf,
+          meshData: buildBeveledStructuralMesh({
+            modelName,
+            size: [ribW, ribH, round4(bodyD * 0.92)],
+            topTaperZ: 0.82,
+            radialSegments: 8,
+            heightSegments: budget.heightSegmentsSecondary,
+          }),
+        })
+      );
+    }
+    const spireH = round4(totalH * 0.32);
+    const spireW = round4(Math.max(0.65, totalW * 0.11));
+    parts.push(
+      makePartSpec({
+        idx: idx++,
+        name: 'OrbitalSpire_Antenna',
+        parentPath: 'Root/FuturisticExoskeleton',
+        size: [spireW, spireH, spireW],
+        position: [0, round4(roofY + roofH * 0.42 + spireH * 0.45), 0],
+        colorHex: '#e2e8f0',
+        material: 'Metal',
+        roughness: 0.25,
+        metalness: 0.88,
+        collisionFidelity: cf,
+        meshData: buildTaperedCurvedTubeMesh({
+          modelName,
+          size: [spireW, spireH, spireW],
+          radialSegments: 8,
+          heightSegments: 4,
+          bottomRadiusRatio: 1.0,
+          topRadiusRatio: 0.22,
+        }),
+      })
+    );
+  } else if (subType === 'fantasy_tower') {
+    const spireW = round4(totalW * 0.36);
+    const spireH = round4(totalH * 0.38);
+    parts.push(
+      makePartSpec({
+        idx: idx++,
+        name: 'UpperObservatorySpire',
+        parentPath: 'Root/ArcaneTowerSpire',
+        size: [spireW, spireH, spireW],
+        position: [0, round4(roofY + roofH * 0.36 + spireH * 0.45), 0],
+        colorHex: accentHex,
+        material: roofMat,
+        roughness: 0.58,
+        metalness: 0.22,
+        collisionFidelity: cf,
+        meshData: buildTaperedCurvedTubeMesh({
+          modelName,
+          size: [spireW, spireH, spireW],
+          radialSegments: Math.max(8, budget.radialSegmentsPrimary),
+          heightSegments: budget.heightSegmentsSecondary,
+          bottomRadiusRatio: 1.0,
+          topRadiusRatio: 0.18,
+          curveX: 0.12,
+        }),
+      })
+    );
+    for (let cIdx = 0; cIdx < 3; cIdx++) {
+      const ang = (cIdx / 3) * Math.PI * 2;
+      const orbitR = round4(totalW * 0.48);
+      const crySize = round4(Math.max(0.7, totalW * 0.11));
+      parts.push(
+        makePartSpec({
+          idx: idx++,
+          name: `FloatingRuneCrystal_${cIdx + 1}`,
+          parentPath: 'Root/ArcaneTowerSpire',
+          size: [crySize, round4(crySize * 1.9), crySize],
+          position: [
+            round4(Math.cos(ang) * orbitR),
+            round4(roofY + roofH * 0.55 + cIdx * 0.4),
+            round4(Math.sin(ang) * orbitR),
+          ],
+          rotation: [12, round4((ang * 180) / Math.PI), 15],
+          colorHex: '#a855f7',
+          material: 'Neon',
+          roughness: 0.15,
+          metalness: 0.2,
+          collisionFidelity: cf,
+          meshData: buildDeformedIcosphereMesh({
+            modelName,
+            size: [crySize, round4(crySize * 1.9), crySize],
+            subdivisions: 1,
+            noiseAmplitude: 0.08,
+            facetPlanesCount: 6,
+            seedOffset: 70 + cIdx,
+          }),
+        })
+      );
+    }
+  }
 
   return groundPartsAtYZero(parts);
 }
@@ -2960,20 +3144,29 @@ export function generateReferenceImage3DAssetParts(params: {
 
   const totalH = clamp(blueprint.proportions_studs.height || 12, 6, 28);
   const totalW = clamp(Number((totalH * referenceAnalysis.aspectRatioWidthToHeight).toFixed(2)), 2.5, 28);
+  const depthScale =
+    referenceAnalysis.inferredObjectFamily === 'animal_or_creature' ||
+    referenceAnalysis.inferredObjectFamily === 'vehicle_or_craft'
+      ? 0.72
+      : 0.92;
+  const totalD = clamp(Number((totalW * depthScale).toFixed(2)), 2.5, 26);
   const profile16 = referenceAnalysis.widthProfile16;
+  const depth16 = referenceAnalysis.depthProfile16 || profile16;
   const offsets16 = referenceAnalysis.silhouetteProfile16.map((s) => s.centerOffsetNorm);
   const pal = referenceAnalysis.dominantPaletteHex;
 
   // 1. Base Zone (slices 0..5)
   const baseH = round4(totalH * 0.28);
   const baseMaxW = Math.max(...profile16.slice(0, 6), 0.25);
+  const baseMaxD = Math.max(...depth16.slice(0, 6), 0.25);
   const baseW = round4(totalW * baseMaxW);
+  const baseD = round4(totalD * baseMaxD);
   parts.push(
     makePartSpec({
       idx: idx++,
       name: 'ReferenceSilhouetteBase',
       parentPath: 'Root/LatheBase',
-      size: [baseW, baseH, baseW],
+      size: [baseW, baseH, baseD],
       position: [0, baseH * 0.5, 0],
       colorHex: pal.bottomHex,
       material: blueprint.materials_and_textures.primary_material || 'SmoothPlastic',
@@ -2982,8 +3175,9 @@ export function generateReferenceImage3DAssetParts(params: {
       collisionFidelity: cf,
       meshData: buildLatheSilhouetteMesh({
         modelName,
-        size: [baseW, baseH, baseW],
+        size: [baseW, baseH, baseD],
         widthProfile: profile16.slice(0, 6).map((w) => w / baseMaxW),
+        depthProfile: depth16.slice(0, 6).map((d) => d / baseMaxD),
         centerOffsetProfile: offsets16.slice(0, 6),
         radialSegments: budget.radialSegmentsPrimary,
       }),
@@ -2993,14 +3187,16 @@ export function generateReferenceImage3DAssetParts(params: {
   // 2. Mid Structural Body (slices 5..11)
   const bodyH = round4(totalH * 0.42);
   const bodyMaxW = Math.max(...profile16.slice(5, 12), 0.25);
+  const bodyMaxD = Math.max(...depth16.slice(5, 12), 0.25);
   const bodyW = round4(totalW * bodyMaxW);
+  const bodyD = round4(totalD * bodyMaxD);
   const bodyY = round4(baseH + bodyH * 0.48);
   parts.push(
     makePartSpec({
       idx: idx++,
       name: 'ReferenceSilhouetteBody',
       parentPath: 'Root/LatheBody',
-      size: [bodyW, bodyH, bodyW],
+      size: [bodyW, bodyH, bodyD],
       position: [0, bodyY, 0],
       colorHex: pal.midHex,
       material: blueprint.materials_and_textures.secondary_material || 'SmoothPlastic',
@@ -3009,8 +3205,9 @@ export function generateReferenceImage3DAssetParts(params: {
       collisionFidelity: cf,
       meshData: buildLatheSilhouetteMesh({
         modelName,
-        size: [bodyW, bodyH, bodyW],
+        size: [bodyW, bodyH, bodyD],
         widthProfile: profile16.slice(5, 12).map((w) => w / bodyMaxW),
+        depthProfile: depth16.slice(5, 12).map((d) => d / bodyMaxD),
         centerOffsetProfile: offsets16.slice(5, 12),
         radialSegments: budget.radialSegmentsPrimary,
       }),
@@ -3020,14 +3217,16 @@ export function generateReferenceImage3DAssetParts(params: {
   // 3. Upper Crown / Dome Zone (slices 11..15)
   const crownH = round4(totalH * 0.34);
   const crownMaxW = Math.max(...profile16.slice(10, 16), 0.25);
+  const crownMaxD = Math.max(...depth16.slice(10, 16), 0.25);
   const crownW = round4(totalW * crownMaxW);
+  const crownD = round4(totalD * crownMaxD);
   const crownY = round4(baseH + bodyH * 0.92 + crownH * 0.46);
   parts.push(
     makePartSpec({
       idx: idx++,
       name: 'ReferenceSilhouetteCrown',
       parentPath: 'Root/LatheCrown',
-      size: [crownW, crownH, crownW],
+      size: [crownW, crownH, crownD],
       position: [0, crownY, 0],
       colorHex: pal.topHex,
       material: blueprint.materials_and_textures.accent_material || 'SmoothPlastic',
@@ -3036,8 +3235,9 @@ export function generateReferenceImage3DAssetParts(params: {
       collisionFidelity: cf,
       meshData: buildLatheSilhouetteMesh({
         modelName,
-        size: [crownW, crownH, crownW],
+        size: [crownW, crownH, crownD],
         widthProfile: profile16.slice(10, 16).map((w) => w / crownMaxW),
+        depthProfile: depth16.slice(10, 16).map((d) => d / crownMaxD),
         centerOffsetProfile: offsets16.slice(10, 16),
         radialSegments: budget.radialSegmentsPrimary,
       }),
@@ -3142,6 +3342,8 @@ export function buildPartsFromSpecializedEngine(params: {
         rawSpecies === 'fantasy' ||
         rawSpecies === 'bonsai'
           ? rawSpecies
+          : rawSpecies === 'crystalline'
+          ? 'fantasy'
           : 'oak';
       rawParts = generateSpecializedTreeAssetParts({
         modelName,

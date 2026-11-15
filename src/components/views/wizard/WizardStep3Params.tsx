@@ -5,7 +5,9 @@ import {
   ChevronDown,
   ChevronUp,
   Dices,
+  Lock,
   Sparkles,
+  Unlock,
 } from 'lucide-react';
 import { HelpTooltip, FORGE_GLOSSARY } from '../../common/HelpTooltip.tsx';
 import { DetailLevel, ObjectCategory, POLY_BUDGETS } from './wizardData.ts';
@@ -42,6 +44,8 @@ interface WizardStep3ParamsProps {
   onChangeCollisionFidelity: (val: 'Hull' | 'Box' | 'PreciseConvexDecomposition') => void;
   seed: string;
   onChangeSeed: (val: string) => void;
+  seedLocked: boolean;
+  onToggleSeedLocked: () => void;
   onBack: () => void;
   onGenerate: () => void;
 }
@@ -78,6 +82,8 @@ export const WizardStep3Params: React.FC<WizardStep3ParamsProps> = ({
   onChangeCollisionFidelity,
   seed,
   onChangeSeed,
+  seedLocked,
+  onToggleSeedLocked,
   onBack,
   onGenerate,
 }) => {
@@ -359,9 +365,14 @@ export const WizardStep3Params: React.FC<WizardStep3ParamsProps> = ({
         </div>
 
         <div>
-          <label className="text-xs font-bold text-slate-200 block mb-1.5">
-            Semilla (Variación):
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs font-bold text-slate-200">
+              Semilla (Variación):
+            </label>
+            <span className="text-[10px] font-semibold text-slate-400">
+              {seedLocked ? 'Fija (manual)' : 'Automática (nueva en cada creación)'}
+            </span>
+          </div>
           <div className="flex items-center gap-2">
             <input
               type="text"
@@ -371,9 +382,25 @@ export const WizardStep3Params: React.FC<WizardStep3ParamsProps> = ({
             />
             <button
               type="button"
-              onClick={() => onChangeSeed(`forge-${Math.floor(1000 + Math.random() * 9000)}`)}
+              onClick={onToggleSeedLocked}
+              className={`p-2.5 rounded-xl border cursor-pointer transition flex items-center gap-1 text-[11px] font-bold ${
+                seedLocked
+                  ? 'bg-amber-950/60 border-amber-500/40 text-amber-300 hover:bg-amber-900/60'
+                  : 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300 hover:bg-emerald-900/50'
+              }`}
+              title={
+                seedLocked
+                  ? 'Semilla bloqueada (haz clic para variar automáticamente en cada creación)'
+                  : 'Variación automática activa (haz clic para fijar esta semilla)'
+              }
+            >
+              {seedLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeSeed(`forge-${Math.floor(1000 + Math.random() * 9000)}-${Date.now().toString(36).slice(-4)}`)}
               className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 cursor-pointer transition"
-              title="Semilla aleatoria"
+              title="Generar nueva semilla aleatoria y fijarla"
             >
               <Dices className="w-4 h-4" />
             </button>

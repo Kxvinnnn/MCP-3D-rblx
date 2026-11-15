@@ -20,6 +20,8 @@ export interface SilhouetteSlice {
   yNorm: number;
   /** Normalized width of the foreground object at this vertical slice (0.05..1.0) */
   widthNorm: number;
+  /** Estimated volumetric depth (Z-axis) at this vertical slice (0.15..1.0) */
+  depthNorm?: number;
   /** Horizontal center offset relative to image center (-0.5..0.5) */
   centerOffsetNorm: number;
   /** Dominant hex color at this slice */
@@ -49,8 +51,11 @@ export interface ReferenceImageAnalysis {
   aspectRatioWidthToHeight: number;
   aspectRatio: number;
   symmetryScore: number;
+  estimatedSymmetryScore: number;
+  volumetricConfidence: number;
   silhouetteProfile16: SilhouetteSlice[];
   widthProfile16: number[];
+  depthProfile16: number[];
   verticalWidthProfile: number[];
   dominantPaletteHex: {
     bottomHex: string;
@@ -66,6 +71,8 @@ export interface ReferenceImageAnalysis {
     | 'lamp_or_vessel'
     | 'wide_structure'
     | 'organic_rock'
+    | 'animal_or_creature'
+    | 'vehicle_or_craft'
     | 'composite_prop';
   inferredFamily: string;
 }
@@ -79,9 +86,12 @@ export interface ReferenceImageComparisonMetrics {
   aspectRatioDelta: number;
   silhouetteMatchIoU: number;
   symmetryScore: number;
+  volumetricMatchScore?: number;
   extractedPaletteHex: string[];
   widthProfileReference16: number[];
   widthProfileModel16: number[];
+  depthProfileReference16?: number[];
+  depthProfileModel16?: number[];
   detectedComponentZones: string[];
 }
 
@@ -565,6 +575,7 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
   const sliceCount = 16;
   const silhouetteProfile16: SilhouetteSlice[] = [];
   let symmetryAccum = 0;
+  let pixelMirrorAccum = 0;
 
   const zoneRgbSums = {
     bottom: [0, 0, 0, 0],
@@ -585,6 +596,10 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
     let gSum = 0;
     let bSum = 0;
     let cCount = 0;
+    let centerLumSum = 0;
+    let centerLumCount = 0;
+    let edgeLumSum = 0;
+    let edgeLumCount = 0;
 
     for (let y = rowStart; y <= rowEnd; y++) {
       for (let x = minX; x <= maxX; x++) {
@@ -592,9 +607,12 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
           if (x < sliceLeft) sliceLeft = x;
           if (x > sliceRight) sliceRight = x;
           const idx = (y * width + x) * 4;
-          rSum += rgba[idx];
-          gSum += rgba[idx + 1];
-          bSum += rgba[idx + 2];
+          const r = rgba[idx];
+          const g = rgba[idx + 1];
+          const b = rgba[idx + 2];
+          rSum += r;
+          gSum += g;
+          bSum += b;
           cCount++;
         }
       }
@@ -607,7 +625,44 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
       const sliceCenterPx = (sliceLeft + sliceRight) * 0.5;
       const bboxCenterPx = (minX + maxX) * 0.5;
       centerOffsetNorm = clamp((sliceCenterPx - bboxCenterPx) / bboxWidthPx, -0.45, 0.45);
+
+      const halfSpan = Math.max(1, (sliceRight - sliceLeft) * 0.5);
+      let symAgree = 0;
+      let symTotal = 0;
+      for (let y = rowStart; y <= rowEnd; y++) {
+        for (let x = sliceLeft; x <= sliceRight; x++) {
+          const idx = (y * width + x) * 4;
+          const lum = 0.299 * rgba[idx] + 0.587 * rgba[idx + 1] + 0.114 * rgba[idx + 2];
+          const distFromCenter = Math.abs(x - sliceCenterPx) / halfSpan;
+          const fgHere = isForegroundPixel(x, y);
+          if (fgHere) {
+            if (distFromCenter < 0.42) {
+              centerLumSum += lum;
+              centerLumCount++;
+            } else {
+              edgeLumSum += lum;
+              edgeLumCount++;
+            }
+          }
+          const mirrorX = clamp(Math.round(sliceCenterPx * 2 - x), minX, maxX);
+          const fgMirror = isForegroundPixel(mirrorX, y);
+          if (fgHere || fgMirror) {
+            symTotal++;
+            if (fgHere && fgMirror) symAgree++;
+          }
+        }
+      }
+      pixelMirrorAccum += symTotal > 0 ? symAgree / symTotal : 1;
+    } else {
+      pixelMirrorAccum += 0.85;
     }
+
+    // Estimate local volumetric relief/depth along Z from horizontal width + shading relief + slice height envelope
+    const centerLum = centerLumCount > 0 ? centerLumSum / centerLumCount : 128;
+    const edgeLum = edgeLumCount > 0 ? edgeLumSum / edgeLumCount : centerLum;
+    const shadingRelief = clamp(Math.abs(centerLum - edgeLum) / 140, 0, 0.35);
+    const verticalBellyEnvelope = 0.86 + 0.18 * Math.sin(yNorm * Math.PI);
+    const depthNorm = Number(clamp(widthNorm * verticalBellyEnvelope * (0.85 + shadingRelief), 0.18, 1.0).toFixed(4));
 
     symmetryAccum += 1 - Math.min(1, Math.abs(centerOffsetNorm) * 2.5);
 
@@ -636,6 +691,7 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
     silhouetteProfile16.push({
       yNorm: Number(yNorm.toFixed(4)),
       widthNorm: Number(widthNorm.toFixed(4)),
+      depthNorm,
       centerOffsetNorm: Number(centerOffsetNorm.toFixed(4)),
       sliceHex,
     });
@@ -667,7 +723,20 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
       : '#2d6a4f';
 
   const widthProfile16 = silhouetteProfile16.map((s) => s.widthNorm);
+  const depthProfile16 = silhouetteProfile16.map((s) => s.depthNorm ?? s.widthNorm);
   const symmetryScore = Number(clamp(symmetryAccum / sliceCount, 0, 1).toFixed(4));
+  const estimatedSymmetryScore = Number(
+    clamp((symmetryScore * 0.55 + (pixelMirrorAccum / sliceCount) * 0.45), 0, 1).toFixed(4)
+  );
+  const volumetricConfidence = Number(
+    clamp(
+      foregroundCoverage * 0.35 +
+        estimatedSymmetryScore * 0.45 +
+        (validImageDecoded ? 0.2 : 0.06),
+      0.15,
+      0.99
+    ).toFixed(4)
+  );
 
   const bottomAvgW =
     widthProfile16.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
@@ -675,12 +744,28 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
     widthProfile16.slice(5, 11).reduce((a, b) => a + b, 0) / 6;
   const topAvgW =
     widthProfile16.slice(11, 16).reduce((a, b) => a + b, 0) / 5;
+  const maxCenterOffset = Math.max(
+    ...silhouetteProfile16.map((s) => Math.abs(s.centerOffsetNorm)),
+    0
+  );
 
   let inferredObjectFamily: ReferenceImageAnalysis['inferredObjectFamily'] = 'composite_prop';
   if (topAvgW > bottomAvgW * 1.35 && midAvgW < topAvgW) {
     inferredObjectFamily = 'tree_or_foliage';
   } else if (aspectRatioWidthToHeight < 0.58 && bottomAvgW >= topAvgW) {
     inferredObjectFamily = 'tower_or_column';
+  } else if (
+    aspectRatioWidthToHeight >= 1.32 &&
+    estimatedSymmetryScore >= 0.7 &&
+    bottomAvgW >= topAvgW * 1.05
+  ) {
+    inferredObjectFamily = 'vehicle_or_craft';
+  } else if (
+    aspectRatioWidthToHeight >= 0.85 &&
+    midAvgW > bottomAvgW * 1.1 &&
+    (maxCenterOffset > 0.08 || estimatedSymmetryScore < 0.88)
+  ) {
+    inferredObjectFamily = 'animal_or_creature';
   } else if (bottomAvgW > midAvgW * 1.25 && topAvgW > midAvgW * 1.15) {
     inferredObjectFamily = 'lamp_or_vessel';
   } else if (aspectRatioWidthToHeight > 1.25) {
@@ -747,8 +832,11 @@ export function analyzeReferenceImageBase64(referenceImageBase64: string): Refer
     aspectRatioWidthToHeight,
     aspectRatio: aspectRatioWidthToHeight,
     symmetryScore,
+    estimatedSymmetryScore,
+    volumetricConfidence,
     silhouetteProfile16,
     widthProfile16,
+    depthProfile16,
     verticalWidthProfile: widthProfile16,
     dominantPaletteHex: {
       bottomHex,
@@ -775,54 +863,74 @@ export function evaluateReferenceVsModelMetrics(
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
 
   for (const p of parts) {
-    const [sx, sy] = p.size;
-    const [px, py] = p.position;
+    const [sx, sy, sz] = p.size;
+    const [px, py, pz] = p.position;
     minX = Math.min(minX, px - sx * 0.5);
     maxX = Math.max(maxX, px + sx * 0.5);
     minY = Math.min(minY, py - sy * 0.5);
     maxY = Math.max(maxY, py + sy * 0.5);
+    minZ = Math.min(minZ, pz - sz * 0.5);
+    maxZ = Math.max(maxZ, pz + sz * 0.5);
   }
 
   const modelWidth = Math.max(0.5, maxX - minX);
   const modelHeight = Math.max(0.5, maxY - minY);
+  const modelDepth = Math.max(0.5, maxZ - minZ);
   const aspectRatioModel = Number((modelWidth / modelHeight).toFixed(4));
   const aspectRatioDelta = Number(Math.abs(aspectRatioModel - analysis.aspectRatioWidthToHeight).toFixed(4));
 
-  // Sample 16 vertical slices on the 3D model
+  // Sample 16 vertical slices on the 3D model (X width + Z volumetric depth)
   const widthProfileModel16: number[] = [];
+  const depthProfileModel16: number[] = [];
   for (let s = 0; s < 16; s++) {
     const yNorm = s / 15;
     const yWorld = minY + yNorm * modelHeight;
     let sliceMaxHalfX = 0;
+    let sliceMaxHalfZ = 0;
     for (const p of parts) {
-      const [sx, sy] = p.size;
-      const [px, py] = p.position;
+      const [sx, sy, sz] = p.size;
+      const [px, py, pz] = p.position;
       const pBot = py - sy * 0.5;
       const pTop = py + sy * 0.5;
       if (yWorld >= pBot - 0.25 && yWorld <= pTop + 0.25) {
         const localT = clamp((yWorld - pBot) / Math.max(0.1, sy), 0, 1);
         const env = 0.75 + 0.25 * Math.sin(localT * Math.PI);
         sliceMaxHalfX = Math.max(sliceMaxHalfX, Math.abs(px) + sx * 0.5 * env);
+        sliceMaxHalfZ = Math.max(sliceMaxHalfZ, Math.abs(pz) + sz * 0.5 * env);
       }
     }
     const normW = clamp((sliceMaxHalfX * 2) / modelWidth, 0.08, 1.0);
+    const normD = clamp((sliceMaxHalfZ * 2) / modelDepth, 0.08, 1.0);
     widthProfileModel16.push(Number(normW.toFixed(4)));
+    depthProfileModel16.push(Number(normD.toFixed(4)));
   }
 
   // Compute 1D slice Intersection-over-Union (IoU) across the 16 vertical scanlines
   let intersectionSum = 0;
   let unionSum = 0;
+  let depthInter = 0;
+  let depthUnion = 0;
+  const refDepth16 = analysis.depthProfile16 || analysis.widthProfile16;
   for (let s = 0; s < 16; s++) {
     const refW = analysis.widthProfile16[s] ?? 0.5;
     const modW = widthProfileModel16[s] ?? 0.5;
     intersectionSum += Math.min(refW, modW);
     unionSum += Math.max(refW, modW);
+
+    const refD = refDepth16[s] ?? refW;
+    const modD = depthProfileModel16[s] ?? modW;
+    depthInter += Math.min(refD, modD);
+    depthUnion += Math.max(refD, modD);
   }
   const rawIoU = unionSum > 0 ? intersectionSum / unionSum : 0.75;
+  const depthIoU = depthUnion > 0 ? depthInter / depthUnion : 0.72;
   const aspectBonus = Math.max(0, 1 - aspectRatioDelta * 0.35);
   const silhouetteMatchIoU = Number(clamp(rawIoU * 0.8 + aspectBonus * 0.2, 0.1, 0.99).toFixed(4));
+  const volumetricMatchScore = Number(clamp(silhouetteMatchIoU * 0.65 + depthIoU * 0.35, 0.15, 0.99).toFixed(4));
 
   return {
     referenceProvided: true,
@@ -833,6 +941,7 @@ export function evaluateReferenceVsModelMetrics(
     aspectRatioDelta,
     silhouetteMatchIoU,
     symmetryScore: analysis.symmetryScore,
+    volumetricMatchScore,
     extractedPaletteHex: [
       analysis.dominantPaletteHex.bottomHex,
       analysis.dominantPaletteHex.midHex,
@@ -840,6 +949,8 @@ export function evaluateReferenceVsModelMetrics(
     ],
     widthProfileReference16: analysis.widthProfile16,
     widthProfileModel16,
+    depthProfileReference16: refDepth16,
+    depthProfileModel16,
     detectedComponentZones: analysis.detectedZones.map((z) => z.label),
   };
 }

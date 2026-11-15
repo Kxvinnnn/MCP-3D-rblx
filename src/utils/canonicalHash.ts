@@ -126,6 +126,8 @@ const ROOT_EXCLUDED_CANONICAL_KEYS = new Set([
   'verified_package_files',
   'saved_path',
   'obj_saved_path',
+  'latency_ms',
+  'execution_report',
 ]);
 
 /**

@@ -51,7 +51,14 @@ export type SpecializedObjectFamily =
   | 'image_lathe'
   | 'freeform_composite';
 
-export type TreeSpeciesArchetype = 'oak' | 'pine' | 'willow' | 'dead' | 'fantasy' | 'bonsai';
+export type TreeSpeciesArchetype =
+  | 'oak'
+  | 'pine'
+  | 'willow'
+  | 'dead'
+  | 'fantasy'
+  | 'bonsai'
+  | 'crystalline';
 
 export interface PlannedComponentSpec {
   id: string;
@@ -65,11 +72,32 @@ export interface PlannedComponentSpec {
   lod_priority: 'critical_silhouette' | 'secondary_structure' | 'fine_detail';
 }
 
+export interface AiPlanned3DComponent {
+  name: string;
+  role: string;
+  kernel:
+    | 'spline_lofted_organ'
+    | 'toroidal_wheel'
+    | 'cambered_wing_membrane'
+    | 'sculpted_icosphere_organ'
+    | 'beveled_structural_frame';
+  position: [number, number, number];
+  size: [number, number, number];
+  material: string;
+  colorHex: string;
+  spineControlPoints?: Array<{
+    point: [number, number, number];
+    radiusX: number;
+    radiusY: number;
+  }>;
+}
+
 export interface AiDirectorBlueprint {
   schema_version: 'forge-director-v3';
   blueprintVersion: 'forge-director-v3';
   objectFamily: SpecializedObjectFamily;
   targetPolyBudget: number;
+  arbitrary_components?: AiPlanned3DComponent[];
   proportions: {
     widthStuds: number;
     heightStuds: number;
@@ -161,6 +189,11 @@ export interface BlueprintValidationResult {
   subPartsPlan: PlannedComponentSpec[];
 }
 
+export interface ParameterProvenanceEntry {
+  value: any;
+  source: 'manual_ui' | 'preset' | 'prompt_nlp' | 'ai_director' | 'image_reference' | 'default';
+}
+
 export interface EngineExecutionReport {
   requested_mode: GenerationExecutionMode;
   executed_mode:
@@ -169,9 +202,17 @@ export interface EngineExecutionReport {
     | 'hybrid'
     | 'image_to_3d'
     | 'hybrid_fallback_procedural'
-    | 'ai_fallback_procedural';
+    | 'ai_fallback_procedural'
+    | 'external_3d_model';
   ai_provider_available: boolean;
   ai_provider_used: boolean;
+  provider?: string;
+  model_used?: string;
+  provider_status?: 'connected' | 'mock_or_local' | 'unavailable' | 'fallback';
+  generation_stage?: string;
+  latency_ms?: number;
+  external_model_used?: string;
+  external_latency_ms?: number;
   image_reference_processed?: boolean;
   reference_image_analyzed?: boolean;
   fallback_triggered: boolean;
@@ -182,6 +223,8 @@ export interface EngineExecutionReport {
   poly_budget_requested?: number;
   poly_budget_achieved?: number;
   detail_level?: 'low' | 'medium' | 'high' | 'ultra';
+  parameter_provenance?: Record<string, ParameterProvenanceEntry>;
+  warnings?: string[];
 }
 
 function clamp(v: number, min: number, max: number): number {
@@ -285,9 +328,14 @@ export function inferSpecializedObjectFamily(params: {
     return { family: 'scene', treeSpecies: 'oak', subtype: 'scene' };
   }
 
-  // 1. Winged Mythic Creatures (Dragons, Wyverns, Griffins)
-  if (/\b(drag[oó]n|dragon|wyvern|drake|guiverno|criatura\s+alada|winged\s+beast|grifo|griffin)\b/i.test(text)) {
-    return { family: 'winged_creature', treeSpecies: 'oak', subtype: 'winged_dragon' };
+  // 1. Winged Creatures (Dragons, Wyverns, Griffins, Birds/Eagles/Owls)
+  if (
+    /\b(drag[oó]n|dragon|wyvern|drake|guiverno|criatura\s+alada|winged\s+beast|grifo|griffin|ave|p[aá]jaro|[áa]guila|halc[oó]n|b[uú]ho|cuervo|bird|eagle|owl|hawk|crow|falcon|raven|phoenix|f[eé]nix|paloma)\b/i.test(
+      text
+    )
+  ) {
+    const sem = interpretPromptSemantics({ prompt: text, category: params.category });
+    return { family: 'winged_creature', treeSpecies: 'oak', subtype: sem.archetype };
   }
 
   // 2. Quadruped Animals (Cows, Horses, Dogs, Wolves, Cats, Deer, Bears, Sheep, Goats, etc.)
@@ -302,7 +350,7 @@ export function inferSpecializedObjectFamily(params: {
 
   // 3. Wheeled Vehicles & Motorcycles (Motorcycles, Bikes, Cars, Trucks)
   if (
-    /\b(motocicleta|moto|motorcycle|motorbike|chopper|scooter|bicicleta|bike|coche|auto|car|veh[ií]culo|vehicle|camioneta|truck)\b/i.test(
+    /\b(motocicleta|moto|motorcycle|motorbike|chopper|scooter|bicicleta|bike|autom[oó]vil|coche|auto|carro|car|sedan|suv|veh[ií]culo|vehicle|camioneta|cami[oó]n|truck)\b/i.test(
       text
     )
   ) {
@@ -310,9 +358,25 @@ export function inferSpecializedObjectFamily(params: {
     return { family: 'wheeled_vehicle', treeSpecies: 'oak', subtype: sem.archetype };
   }
 
-  // 4. Biped Humanoids & Human Statues
+  // 3B. Spaceships / Weapons -> universal freeform composite before generic building/machine checks
   if (
-    /\b(estatua|statue|escultura|sculpture|humano|humana|human|persona|person|guerrero|warrior|caballero|knight|mago|mage|personaje|character|avatar|monumento)\b/i.test(
+    /\b(nave\s+futurista|nave\s+espacial|nave|spaceship|starfighter|spacecraft|starship|espada|mandoble|katana|sable|sword|blade|weapon)\b/i.test(
+      text
+    )
+  ) {
+    const sem = interpretPromptSemantics({ prompt: text, category: params.category });
+    return { family: 'freeform_composite', treeSpecies: 'oak', subtype: sem.archetype };
+  }
+
+  // 4. Biped Humanoids & Human Statues (architecture keywords win unless explicitly a statue/monument)
+  const isExplicitStatue = /\b(estatua|statue|escultura|sculpture|busto|monumento)\b/i.test(text);
+  const isArchitecturalNoun =
+    /\b(edificio|building|torre|tower|castillo|castle|casa|house|templo|temple|fortaleza|observatorio|caba[ñn]a|taberna|fachada|muralla|pabell[oó]n|keep|bunker|rascacielos|skyscraper)\b/i.test(
+      text
+    );
+  if (
+    (!isArchitecturalNoun || isExplicitStatue) &&
+    /\b(estatua|statue|escultura|sculpture|humano|humana|human|persona|person|guerrero|warrior|caballero|knight|mago|mage|personaje|character|avatar|busto|monumento)\b/i.test(
       text
     )
   ) {
@@ -350,11 +414,13 @@ export function inferSpecializedObjectFamily(params: {
     if (/\b(seco|muerto|dead|dry|marchito|leafless|sin\s+hojas|calcinado)\b/i.test(text)) {
       species = 'dead';
     } else if (
-      /\b(fantas[ií]a|fantasy|m[aá]gico|magic|bioluminisc|cristal|crystal|alien|m[ií]stico|ne[oó]n|corrupt)\b/i.test(
+      /\b(fantas[ií]a|fant[aá]stico|fantasy|m[aá]gico|magic|bioluminisc|alien|m[ií]stico|ne[oó]n|corrupt)\b/i.test(
         text
       )
     ) {
       species = 'fantasy';
+    } else if (/\b(cristalino|cristal|crystalline|crystal|prism[aá]tico)\b/i.test(text)) {
+      species = 'crystalline';
     } else if (/\b(pino|pine|abeto|spruce|c[oó]nico|conical|cipr[eé]s|evergreen|alpino)\b/i.test(text)) {
       species = 'pine';
     } else if (/\b(sauce|willow|llor[oó]n|weeping|colgante)\b/i.test(text)) {
@@ -373,7 +439,17 @@ export function inferSpecializedObjectFamily(params: {
       text
     )
   ) {
-    return { family: 'building', treeSpecies: 'oak', subtype: 'building' };
+    let bSubtype = 'building';
+    if (/\b(castillo|castle|fortaleza|keep)\b/i.test(text)) {
+      bSubtype = 'medieval_castle';
+    } else if (/\b(futurista|sci[\s-]?fi|ciber|cyber|rascacielos|skyscraper|orbital)\b/i.test(text)) {
+      bSubtype = 'futuristic_building';
+    } else if (/\b(torre|tower|observatorio|mago|fantas[ií]a|fantasy|arcana)\b/i.test(text) && !/\bedificio\b/i.test(text)) {
+      bSubtype = 'fantasy_tower';
+    } else if (/\b(casa|house|caba[ñn]a|taberna|medieval)\b/i.test(text)) {
+      bSubtype = 'medieval_house';
+    }
+    return { family: 'building', treeSpecies: 'oak', subtype: bSubtype };
   }
 
   // 8. Rocks & Nature
@@ -429,7 +505,7 @@ export function buildBaselineDirectorBlueprint(params: {
   tree_params?: Record<string, any>;
   referenceAnalysis?: ReferenceImageAnalysis | null;
 }): AiDirectorBlueprint {
-  const { family, treeSpecies } = inferSpecializedObjectFamily({
+  const { family, treeSpecies, subtype: inferredFamilySubtype } = inferSpecializedObjectFamily({
     prompt: params.prompt,
     category: params.category,
     asset_type: params.asset_type,
@@ -490,20 +566,28 @@ export function buildBaselineDirectorBlueprint(params: {
     width = clamp(Number(tp.width ?? height * 0.78), 4, 34);
     depth = width;
     primaryMat = sanitizeRobloxMaterial(tp.trunkMaterial, 'Wood');
-    secondaryMat = sanitizeRobloxMaterial(tp.leafMaterial, treeSpecies === 'fantasy' ? 'Neon' : 'Grass');
-    accentMat = treeSpecies === 'fantasy' ? 'Glass' : 'WoodPlanks';
-    primaryHex = sanitizeHex(tp.trunkColor, treeSpecies === 'fantasy' ? '#3b2d4a' : '#5c3d28');
+    secondaryMat = sanitizeRobloxMaterial(
+      tp.leafMaterial,
+      treeSpecies === 'crystalline' ? 'Ice' : treeSpecies === 'fantasy' ? 'Neon' : 'Grass'
+    );
+    accentMat = treeSpecies === 'fantasy' || treeSpecies === 'crystalline' ? 'Glass' : 'WoodPlanks';
+    primaryHex = sanitizeHex(
+      tp.trunkColor,
+      treeSpecies === 'fantasy' ? '#3b2d4a' : treeSpecies === 'crystalline' ? '#334155' : '#5c3d28'
+    );
     secondaryHex = sanitizeHex(
       tp.leafColor,
-      treeSpecies === 'fantasy'
-        ? '#a855f7'
-        : treeSpecies === 'pine'
-          ? '#1e5631'
-          : treeSpecies === 'willow'
-            ? '#3a8754'
-            : '#2d7a46'
+      treeSpecies === 'crystalline'
+        ? '#38bdf8'
+        : treeSpecies === 'fantasy'
+          ? '#a855f7'
+          : treeSpecies === 'pine'
+            ? '#1e5631'
+            : treeSpecies === 'willow'
+              ? '#3a8754'
+              : '#2d7a46'
     );
-    accentHex = treeSpecies === 'fantasy' ? '#22d3ee' : '#4a3222';
+    accentHex = treeSpecies === 'fantasy' || treeSpecies === 'crystalline' ? '#22d3ee' : '#4a3222';
     silhouette =
       treeSpecies === 'pine'
         ? 'conical_tiered'
@@ -1032,13 +1116,15 @@ export function buildBaselineDirectorBlueprint(params: {
   const inferredSubtype =
     family === 'tree'
       ? treeSpecies
-      : family === 'quadruped_animal' ||
-          family === 'winged_creature' ||
-          family === 'wheeled_vehicle' ||
-          family === 'biped_humanoid_or_statue' ||
-          family === 'freeform_composite'
-        ? interpretPromptSemantics({ prompt: rawPrompt, category: params.category, name: params.name }).archetype
-        : family;
+      : family === 'building' && inferredFamilySubtype
+        ? inferredFamilySubtype
+        : family === 'quadruped_animal' ||
+            family === 'winged_creature' ||
+            family === 'wheeled_vehicle' ||
+            family === 'biped_humanoid_or_statue' ||
+            family === 'freeform_composite'
+          ? interpretPromptSemantics({ prompt: rawPrompt, category: params.category, name: params.name }).archetype
+          : family;
 
   return {
     schema_version: 'forge-director-v3',
@@ -1103,6 +1189,73 @@ export function buildBaselineDirectorBlueprint(params: {
       collision_fidelity: params.collision_fidelity || 'Hull',
     },
   };
+}
+
+const ALLOWED_AI_KERNELS = new Set<AiPlanned3DComponent['kernel']>([
+  'spline_lofted_organ',
+  'toroidal_wheel',
+  'cambered_wing_membrane',
+  'sculpted_icosphere_organ',
+  'beveled_structural_frame',
+]);
+
+function sanitizeVec3Tuple(raw: unknown, fallback: [number, number, number]): [number, number, number] {
+  if (!Array.isArray(raw) || raw.length < 3) return fallback;
+  const x = Number(raw[0]);
+  const y = Number(raw[1]);
+  const z = Number(raw[2]);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return fallback;
+  return [clamp(x, -120, 120), clamp(y, -40, 140), clamp(z, -120, 120)];
+}
+
+function sanitizeAiPlannedComponents(
+  rawList: unknown,
+  fallbackHex: string
+): AiPlanned3DComponent[] | undefined {
+  if (!Array.isArray(rawList) || rawList.length === 0) return undefined;
+  const sanitized: AiPlanned3DComponent[] = [];
+  for (let i = 0; i < Math.min(rawList.length, 24); i++) {
+    const item = rawList[i] as Record<string, unknown> | null;
+    if (!item || typeof item !== 'object') continue;
+    const rawKernel = String(item.kernel || 'spline_lofted_organ') as AiPlanned3DComponent['kernel'];
+    const kernel = ALLOWED_AI_KERNELS.has(rawKernel) ? rawKernel : 'sculpted_icosphere_organ';
+    const rawSize = sanitizeVec3Tuple(item.size, [2, 2, 2]);
+    const size: [number, number, number] = [
+      clamp(Math.abs(rawSize[0]), 0.12, 80),
+      clamp(Math.abs(rawSize[1]), 0.12, 80),
+      clamp(Math.abs(rawSize[2]), 0.12, 80),
+    ];
+    const pos = sanitizeVec3Tuple(item.position, [0, size[1] * 0.5, 0]);
+    const safeName =
+      String(item.name || `ArbitraryPart_${i + 1}`)
+        .replace(/[^a-zA-Z0-9_]/g, '')
+        .slice(0, 40) || `ArbitraryPart_${i + 1}`;
+    const rawSpine = Array.isArray(item.spineControlPoints) ? item.spineControlPoints : undefined;
+    const spineControlPoints = rawSpine
+      ? rawSpine
+          .slice(0, 10)
+          .map((cp: any) => {
+            if (!cp || typeof cp !== 'object') return null;
+            const pt = sanitizeVec3Tuple(cp.point, pos);
+            const rx = clamp(Math.abs(Number(cp.radiusX ?? size[0] * 0.4)), 0.04, 40);
+            const ry = clamp(Math.abs(Number(cp.radiusY ?? size[1] * 0.4)), 0.04, 40);
+            return { point: pt, radiusX: rx, radiusY: ry };
+          })
+          .filter((x): x is { point: [number, number, number]; radiusX: number; radiusY: number } => Boolean(x))
+      : undefined;
+
+    sanitized.push({
+      name: safeName,
+      role: String(item.role || 'structural_module').slice(0, 40),
+      kernel,
+      position: pos,
+      size,
+      material: sanitizeRobloxMaterial(String(item.material || ''), 'SmoothPlastic'),
+      colorHex: sanitizeHex(String(item.colorHex || ''), fallbackHex),
+      ...(spineControlPoints && spineControlPoints.length >= 2 ? { spineControlPoints } : {}),
+    });
+  }
+  return sanitized.length >= 2 ? sanitized : undefined;
 }
 
 /**
@@ -1183,6 +1336,10 @@ export function validateAndSanitizeDirectorBlueprint(
     ? candAny.subPartsPlan
     : [];
   const finalComponents = candidateComponents.length >= 2 ? candidateComponents : base.components;
+  const sanitizedArbitrary = sanitizeAiPlannedComponents(
+    candAny.arbitrary_components,
+    primaryHex
+  );
 
   const finalW = Number(width.toFixed(2));
   const finalH = Number(height.toFixed(2));
@@ -1195,6 +1352,9 @@ export function validateAndSanitizeDirectorBlueprint(
     blueprintVersion: 'forge-director-v3',
     objectFamily: resolvedFamily,
     targetPolyBudget: resolvedBudget,
+    ...(sanitizedArbitrary || base.arbitrary_components
+      ? { arbitrary_components: sanitizedArbitrary ?? base.arbitrary_components }
+      : {}),
     proportions: {
       widthStuds: finalW,
       heightStuds: finalH,
@@ -1344,6 +1504,38 @@ export async function requestGeminiDirectorBlueprint(params: {
       accent_hex: { type: SchemaType.STRING },
       roughness: { type: SchemaType.NUMBER },
       metalness: { type: SchemaType.NUMBER },
+      arbitrary_components: {
+        type: SchemaType.ARRAY,
+        description:
+          'Grafo libre de subcomponentes 3D articulados para construir cualquier objeto arbitrario (ej. naves, dinosaurios, instrumentos, esculturas) asentados en Y>=0.',
+        items: {
+          type: SchemaType.OBJECT,
+          properties: {
+            name: { type: SchemaType.STRING },
+            role: { type: SchemaType.STRING },
+            kernel: {
+              type: SchemaType.STRING,
+              description:
+                'spline_lofted_organ | toroidal_wheel | cambered_wing_membrane | sculpted_icosphere_organ | beveled_structural_frame',
+            },
+            position: { type: SchemaType.ARRAY, items: { type: SchemaType.NUMBER } },
+            size: { type: SchemaType.ARRAY, items: { type: SchemaType.NUMBER } },
+            material: { type: SchemaType.STRING },
+            colorHex: { type: SchemaType.STRING },
+            spineControlPoints: {
+              type: SchemaType.ARRAY,
+              items: {
+                type: SchemaType.OBJECT,
+                properties: {
+                  point: { type: SchemaType.ARRAY, items: { type: SchemaType.NUMBER } },
+                  radiusX: { type: SchemaType.NUMBER },
+                  radiusY: { type: SchemaType.NUMBER },
+                },
+              },
+            },
+          },
+        },
+      },
     },
     required: [
       'name',
@@ -1373,7 +1565,8 @@ export async function requestGeminiDirectorBlueprint(params: {
     }
     contents.push({
       text: `Actúa como el Director de Generación 3D de Nightmare Forge para Roblox Studio.
-Analiza la solicitud y devuelve el plan estructurado JSON (proporciones en Studs, familia geométrica, subtipo anatómico/estructural, materiales Roblox y paleta hexadecimal #RRGGBB):
+Analiza la solicitud y devuelve el plan estructurado JSON (proporciones en Studs, familia geométrica, subtipo anatómico/estructural, materiales Roblox y paleta hexadecimal #RRGGBB).
+Para objetos libres o composiciones personalizadas ('freeform_composite' o cualquier objeto sin plantilla rígida), incluye OBLIGATORIAMENTE 'arbitrary_components' con 4 a 12 piezas 3D articuladas en coordenadas Stud (asentadas sobre Y >= 0, usando 'spline_lofted_organ' + 'spineControlPoints' para formas orgánicas o curvadas).
 Prompt: ${params.prompt}
 Categoría: ${params.category || 'Props'}
 Tipo: ${params.asset_type || 'Model3D'}
@@ -1403,6 +1596,9 @@ Presupuesto poligonal objetivo: ${baseline.target_poly_budget} triángulos.`,
           height: Number(rawJson.height_studs ?? baseline.proportions_studs.height),
           depth: Number(rawJson.depth_studs ?? baseline.proportions_studs.depth),
         },
+        arbitrary_components: Array.isArray(rawJson.arbitrary_components)
+          ? rawJson.arbitrary_components
+          : undefined,
         materials_and_textures: {
           ...baseline.materials_and_textures,
           primary_material: rawJson.primary_material || baseline.materials_and_textures.primary_material,

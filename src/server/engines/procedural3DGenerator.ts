@@ -35,6 +35,7 @@ import {
   type AiDirectorBlueprint,
   type EngineExecutionReport,
   type GenerationExecutionMode,
+  type ParameterProvenanceEntry,
   validateAndSanitizeDirectorBlueprint,
 } from './aiGenerationDirector.ts';
 import {
@@ -49,7 +50,9 @@ import {
 } from './specializedGeometryGenerators.ts';
 import {
   evaluateSemanticVisualIdentity,
+  generateReal3DMeshesFromPlan,
   interpretPromptSemantics,
+  planGeometryAndComponents,
   renderMultiAngleSvgSnapshots,
 } from './universalFreeform3DEngine.ts';
 
@@ -97,7 +100,11 @@ export interface TreeProceduralParams {
   detailLevel?: TreeDetailLevel;
   lodLevel?: 0 | 1 | 2;
   targetPolyBudget?: number;
-  species?: 'oak' | 'pine' | 'willow' | 'dead' | 'fantasy' | 'bonsai';
+  species?: 'oak' | 'pine' | 'willow' | 'dead' | 'fantasy' | 'bonsai' | 'crystalline';
+  style?: string;
+  asymmetricBranches?: boolean;
+  crystallineCanopy?: boolean;
+  emissiveLeaves?: boolean;
 }
 
 export type Procedural3DPart = Record<string, any>;
@@ -116,6 +123,7 @@ export interface Procedural3DGenerationRequest {
   detail_level?: TreeDetailLevel;
   seed?: string | number;
   tree_params?: TreeProceduralParams & Record<string, any>;
+  preset_params?: TreeProceduralParams & Record<string, any>;
   manually_edited_fields?: string[];
   reference_image_base64?: string;
   ai_director_blueprint?: Partial<AiDirectorBlueprint>;
@@ -830,10 +838,26 @@ export function generateParameterizedTree3DParts(
   const seed = params.seed ?? 'forge-tree-seed-2026';
   const rng = createSeededRng(seed);
 
-  const height = clamp(Number(params.height ?? 14), 4, 45);
+  const height = clamp(Number(params.height ?? 14), 2.5, 45);
+  const species = params.species;
+  const visualStyle = String(params.style || (params.detailLevel === 'low' ? 'low_poly' : '')).toLowerCase();
+  const asymmetricBranches = Boolean(params.asymmetricBranches);
+  const crystallineCanopy = Boolean(params.crystallineCanopy || species === 'crystalline');
+  const emissiveLeaves = Boolean(params.emissiveLeaves || species === 'fantasy');
+  const hasSpecialSpeciesGeometry = Boolean(
+    (species && species !== 'oak') || crystallineCanopy || asymmetricBranches
+  );
   const trunkThickness = clamp(Number(params.trunkThickness ?? 1.6), 0.4, 6.0);
-  const trunkLeanDeg = clamp(Number(params.trunkLean ?? 0), -28, 28);
-  const trunkCurvature = clamp(Number(params.trunkCurvature ?? 0), 0, 1);
+  const trunkLeanDeg = clamp(
+    Number(params.trunkLean ?? (species === 'willow' ? 9 : species === 'bonsai' ? 14 : 0)),
+    -28,
+    28
+  );
+  const trunkCurvature = clamp(
+    Number(params.trunkCurvature ?? (species === 'bonsai' ? 0.65 : species === 'dead' ? 0.48 : 0)),
+    0,
+    1
+  );
   const branchCount = clamp(Math.round(Number(params.branchCount ?? 4)), 1, 12);
   const explicitBranchLength =
     params.branchLength !== undefined && Number.isFinite(Number(params.branchLength)) && Number(params.branchLength) > 0
@@ -960,11 +984,80 @@ export function generateParameterizedTree3DParts(
     }),
   });
 
+  // 0. Bandeja cerámica y sustrato cuando es un Bonsái (`BonsaiCeramicPot` + `BonsaiSoilBed`)
+  if (species === 'bonsai') {
+    const potW = round4(Math.max(3.6, trunkThickness * 3.8));
+    const potH = round4(Math.max(0.75, height * 0.16));
+    const potD = round4(potW * 0.78);
+    parts.push({
+      partId: 'part_0_bonsai_pot',
+      name: 'BonsaiCeramicPot',
+      parentPath: 'Root/Roots',
+      shape: 'MeshPart',
+      size: [potW, potH, potD],
+      position: [0, round4(potH * 0.5), 0],
+      rotation: [0, 0, 0],
+      color: '#334155',
+      material: 'Slate',
+      transparency: 0,
+      reflectance: 0.08,
+      roughness: 0.45,
+      metalness: 0.12,
+      canCollide: true,
+      anchored: true,
+      collisionFidelity,
+      meshData: buildTaperedCylinderMesh({
+        modelName,
+        partName: 'BonsaiCeramicPot',
+        size: [potW, potH, potD],
+        bottomScaleRatio: 0.78,
+        topScaleRatio: 1.05,
+        radialSegments: Math.max(8, segSpec.trunkRad),
+        heightSegments: 2,
+        jitterAmount: 0.02,
+        colorHex: '#334155',
+        activeLod,
+        rng,
+      }),
+    });
+    parts.push({
+      partId: 'part_0_bonsai_soil',
+      name: 'BonsaiSoilBed',
+      parentPath: 'Root/Roots',
+      shape: 'MeshPart',
+      size: [round4(potW * 0.88), round4(potH * 0.35), round4(potD * 0.88)],
+      position: [0, round4(potH * 0.92), 0],
+      rotation: [0, 0, 0],
+      color: '#4a3525',
+      material: 'Ground',
+      transparency: 0,
+      reflectance: 0.01,
+      roughness: 0.92,
+      metalness: 0.02,
+      canCollide: true,
+      anchored: true,
+      collisionFidelity,
+      meshData: buildTaperedCylinderMesh({
+        modelName,
+        partName: 'BonsaiSoilBed',
+        size: [round4(potW * 0.88), round4(potH * 0.35), round4(potD * 0.88)],
+        bottomScaleRatio: 1.0,
+        topScaleRatio: 0.96,
+        radialSegments: 8,
+        heightSegments: 1,
+        jitterAmount: 0.06,
+        colorHex: '#4a3525',
+        activeLod,
+        rng,
+      }),
+    });
+  }
+
   // 1B. Raíces superficiales orgánicas expuestas (`SurfaceRoot_1..K` en `Root/Roots`)
   const enableRecursiveHierarchy = Boolean(
     (params as any).includeRecursiveHierarchy ||
       params.targetPolyBudget !== undefined ||
-      (params as any).species !== undefined
+      hasSpecialSpeciesGeometry
   );
   if (enableRecursiveHierarchy) {
     const surfaceRootCount = rootFlareScale >= 1.2 ? 4 : 3;
@@ -1089,7 +1182,11 @@ export function generateParameterizedTree3DParts(
         : branchDistribution === 'whorled'
         ? (i / branchCount) * Math.PI * 2
         : (i / branchCount) * Math.PI * 2;
-    const angle = baseAngle + (rng() - 0.5) * 0.45 * variation;
+    const asymBias = asymmetricBranches ? (i % 2 === 0 ? 1.48 : 0.56) : 1.0;
+    const angle =
+      baseAngle +
+      (rng() - 0.5) * 0.45 * variation +
+      (asymmetricBranches ? (i % 2 === 0 ? 0.28 : -0.34) : 0);
     const tierFactor =
       branchDistribution === 'whorled' || branchDistribution === 'canopy_top'
         ? 0.5
@@ -1099,12 +1196,13 @@ export function generateParameterizedTree3DParts(
         ? trunkHeight * 0.08 * ((i % 2) * 0.5)
         : branchDistribution === 'canopy_top'
         ? trunkHeight * 0.14
-        : tierFactor * (trunkHeight * 0.32);
+        : tierFactor * (trunkHeight * 0.32) + (asymmetricBranches && i % 2 === 0 ? trunkHeight * 0.1 : 0);
 
     const computedBranchLen =
-      explicitBranchLength !== null
+      (explicitBranchLength !== null
         ? explicitBranchLength * widthScaleFactor * (1 - tierFactor * 0.12) * (0.94 + rng() * 0.16 * variation)
-        : height * (0.24 - tierFactor * 0.06) * widthScaleFactor * (0.9 + rng() * 0.25 * variation);
+        : height * (0.24 - tierFactor * 0.06) * widthScaleFactor * (0.9 + rng() * 0.25 * variation)) *
+      asymBias;
     const branchLength = round4(Math.max(1.2, computedBranchLen));
     const branchThick = round4(Math.max(0.28, trunkThickness * (0.48 - tierFactor * 0.12)));
     const pitchDeg = canopyShape === 'weeping' ? 58 : canopyShape === 'conical' ? 32 : 42;
@@ -1221,7 +1319,7 @@ export function generateParameterizedTree3DParts(
     }
   }
 
-  // 4. Copa principal (`CanopyCrown_Main`) según `canopyShape`, `canopySize`, `width`, `leafDistribution` y `foliageDensity`
+  // 4. Copa principal (`CanopyCrown_Main`) y estructuras botánicas específicas por especie
   const densityMultiplier =
     (leafDistribution === 'dense'
       ? 1.25
@@ -1235,7 +1333,7 @@ export function generateParameterizedTree3DParts(
     height * (canopyShape === 'conical' ? 0.46 : 0.56) * densityMultiplier * canopySize;
   const crownWidth = round4(
     Math.max(
-      2.0,
+      1.6,
       params.width !== undefined && Number.isFinite(Number(params.width)) && Number(params.width) > 0
         ? Number(params.width) * densityMultiplier * canopySize
         : computedDefaultCrownW
@@ -1243,12 +1341,12 @@ export function generateParameterizedTree3DParts(
   );
   const crownHeight = round4(
     Math.max(
-      1.8,
+      1.2,
       height *
         (canopyShape === 'conical'
           ? 0.55
-          : canopyShape === 'layered'
-          ? 0.34
+          : canopyShape === 'layered' || species === 'bonsai'
+          ? 0.28
           : canopyShape === 'weeping'
           ? 0.48
           : 0.44) *
@@ -1259,113 +1357,397 @@ export function generateParameterizedTree3DParts(
   const crownCenterY = round4(rootFlareHeight + trunkHeight * 0.88 + crownHeight * 0.26);
   const crownSize: [number, number, number] = [crownWidth, crownHeight, crownWidth];
 
-  parts.push({
-    partId: 'part_canopy_main',
-    name: 'CanopyCrown_Main',
-    parentPath: 'Root/Canopy',
-    shape: 'MeshPart',
-    size: crownSize,
-    position: [round4(trunkTopOffsetX), crownCenterY, round4(trunkTopOffsetZ)],
-    rotation: [0, round4(rng() * 360), 0],
-    color: baseLeafColor,
-    material: leafMaterial,
-    transparency: 0,
-    reflectance: 0.04,
-    roughness: 0.72,
-    metalness: 0.02,
-    canCollide: true,
-    anchored: true,
-    collisionFidelity,
-    meshData: buildOrganicCanopyOrRockMesh({
-      modelName,
-      partName: 'CanopyCrown_Main',
-      size: crownSize,
-      shapeStyle: canopyShape,
-      radialSegments: segSpec.canopyRad,
-      latSegments: segSpec.canopyLat,
-      jitterAmount: Math.max(variation, leafVariation) * 0.28,
-      colorHex: baseLeafColor,
-      activeLod,
-      rng,
-    }),
-  });
-
-  // 5. Racimos de follaje secundarios (`FoliageCluster_1..N`) controlados por `foliageCount`, `foliageDensity`, `leafDistribution` y `colorVariation`
-  const defaultClusterCount =
-    leafDistribution === 'dense'
-      ? Math.max(4, Math.round(branchCount * foliageDensity))
-      : leafDistribution === 'sparse'
-      ? Math.max(1, Math.floor(branchCount * 0.5 * foliageDensity))
-      : Math.max(2, Math.min(8, Math.round(Math.min(6, branchCount) * foliageDensity)));
-  const clusterCount =
-    params.foliageCount !== undefined && Number.isFinite(Number(params.foliageCount))
-      ? clamp(Math.round(Number(params.foliageCount)), 0, 16)
-      : clamp(defaultClusterCount, 0, 16);
-
-  for (let c = 0; c < clusterCount; c++) {
-    const anchor = branchEndpoints[c % branchEndpoints.length] || [
-      round4(trunkTopOffsetX + Math.cos(c) * branchSpreadRadius),
-      crownCenterY,
-      round4(trunkTopOffsetZ + Math.sin(c) * branchSpreadRadius),
+  if (species === 'dead') {
+    // Árbol muerto: 0 hojas / sin CanopyCrown_Main, sustituido por aguja seca y ramillas retorcidas
+    const snagSize: [number, number, number] = [
+      round4(Math.max(0.28, trunkThickness * 0.42)),
+      round4(Math.max(1.2, height * 0.28)),
+      round4(Math.max(0.28, trunkThickness * 0.42)),
     ];
-    const alternatingScaleBias = 1 + (c % 2 === 0 ? -0.22 : 0.24) * leafVariation;
-    const clusterScale = round4(
-      clamp(
-        (0.46 + (rng() - 0.3) * 0.36 * leafVariation) *
-          alternatingScaleBias *
-          (leafDistribution === 'clustered' ? 1.12 : 1.0) *
-          (0.85 + foliageDensity * 0.15),
-        0.26,
-        0.95
-      )
-    );
-    const clusterSize: [number, number, number] = [
-      round4(Math.max(1.1, crownWidth * clusterScale)),
-      round4(Math.max(0.95, crownHeight * clusterScale * (canopyShape === 'layered' ? 0.65 : 0.85))),
-      round4(Math.max(1.1, crownWidth * clusterScale)),
-    ];
-    const clusterName = `FoliageCluster_${c + 1}`;
-    const clusterY = Math.max(
-      round4(clusterSize[1] * 0.5 + 0.5),
-      round4(anchor[1] + (canopyShape === 'weeping' ? -0.35 : 0.45))
-    );
-    const leafTintFactor = 1 + (rng() - 0.5) * 0.34 * colorVariation;
-    const clusterColor = modulateHexColor(baseLeafColor, leafTintFactor);
-
     parts.push({
-      partId: `part_foliage_${c + 1}`,
-      name: clusterName,
-      parentPath: 'Root/Canopy',
+      partId: 'part_dead_snag_spire',
+      name: 'DeadSnagSpire',
+      parentPath: 'Root/Branches/Deadwood',
       shape: 'MeshPart',
-      size: clusterSize,
-      position: [anchor[0], clusterY, anchor[2]],
-      rotation: [
-        round4((rng() - 0.5) * 14 * leafVariation),
-        round4(rng() * 360),
-        round4((rng() - 0.5) * 14 * leafVariation),
-      ],
-      color: clusterColor,
-      material: leafMaterial,
+      size: snagSize,
+      position: [round4(trunkTopOffsetX), round4(rootFlareHeight + trunkHeight * 0.92 + snagSize[1] * 0.4), round4(trunkTopOffsetZ)],
+      rotation: [round4((rng() - 0.5) * 16), 0, round4((rng() - 0.5) * 16)],
+      color: trunkColor,
+      material: trunkMaterial,
       transparency: 0,
-      reflectance: 0.04,
-      roughness: 0.74,
+      reflectance: 0.01,
+      roughness: 0.92,
       metalness: 0.02,
-      canCollide: false,
+      canCollide: true,
       anchored: true,
       collisionFidelity,
-      meshData: buildOrganicCanopyOrRockMesh({
+      meshData: buildTaperedCylinderMesh({
         modelName,
-        partName: clusterName,
-        size: clusterSize,
-        shapeStyle: canopyShape,
-        radialSegments: Math.max(5, Math.round(segSpec.canopyRad * 0.8)),
-        latSegments: Math.max(3, Math.round(segSpec.canopyLat * 0.85)),
-        jitterAmount: leafVariation * 0.32,
-        colorHex: clusterColor,
+        partName: 'DeadSnagSpire',
+        size: snagSize,
+        bottomScaleRatio: 0.95,
+        topScaleRatio: 0.12,
+        radialSegments: 6,
+        heightSegments: 3,
+        jitterAmount: 0.28,
+        curvatureAmount: 0.45,
+        colorHex: trunkColor,
         activeLod,
         rng,
       }),
     });
+
+    for (let t = 0; t < 4; t++) {
+      const anchor = branchEndpoints[t % branchEndpoints.length] || [trunkTopOffsetX, crownCenterY, trunkTopOffsetZ];
+      const twigAngle = (t / 4) * Math.PI * 2 + 0.4;
+      const twigLen = round4(Math.max(0.75, height * 0.12));
+      const twigThk = round4(Math.max(0.16, trunkThickness * 0.18));
+      const twigName = `BareTwig_${t + 1}`;
+      parts.push({
+        partId: `part_bare_twig_${t + 1}`,
+        name: twigName,
+        parentPath: 'Root/Branches/Deadwood',
+        shape: 'MeshPart',
+        size: [twigThk, twigLen, twigThk],
+        position: [round4(anchor[0] + Math.cos(twigAngle) * twigLen * 0.28), round4(anchor[1] + twigLen * 0.25), round4(anchor[2] + Math.sin(twigAngle) * twigLen * 0.28)],
+        rotation: [round4(Math.sin(twigAngle) * 48), round4((twigAngle * 180) / Math.PI), round4(-Math.cos(twigAngle) * 48)],
+        color: modulateHexColor(trunkColor, 0.88),
+        material: trunkMaterial,
+        transparency: 0,
+        reflectance: 0.01,
+        roughness: 0.92,
+        metalness: 0.02,
+        canCollide: false,
+        anchored: true,
+        collisionFidelity,
+        meshData: buildTaperedCylinderMesh({
+          modelName,
+          partName: twigName,
+          size: [twigThk, twigLen, twigThk],
+          bottomScaleRatio: 0.85,
+          topScaleRatio: 0.14,
+          radialSegments: 5,
+          heightSegments: 2,
+          jitterAmount: 0.24,
+          colorHex: trunkColor,
+          activeLod,
+          rng,
+        }),
+      });
+    }
+  } else {
+    const effectiveCrownMaterial = crystallineCanopy
+      ? params.emissiveLeaves
+        ? 'Ice'
+        : 'Glass'
+      : visualStyle === 'cartoon'
+        ? 'SmoothPlastic'
+        : leafMaterial;
+    const effectiveCrownTransparency = crystallineCanopy ? 0.18 : 0;
+    const effectiveCrownReflectance = crystallineCanopy ? 0.45 : visualStyle === 'cartoon' ? 0.08 : 0.04;
+    const effectiveCrownRoughness = crystallineCanopy ? 0.14 : visualStyle === 'cartoon' ? 0.25 : 0.72;
+
+    parts.push({
+      partId: 'part_canopy_main',
+      name: 'CanopyCrown_Main',
+      parentPath: 'Root/Canopy',
+      shape: 'MeshPart',
+      size: crownSize,
+      position: [round4(trunkTopOffsetX), crownCenterY, round4(trunkTopOffsetZ)],
+      rotation: [0, round4(rng() * 360), 0],
+      color: baseLeafColor,
+      material: effectiveCrownMaterial,
+      transparency: effectiveCrownTransparency,
+      reflectance: effectiveCrownReflectance,
+      roughness: effectiveCrownRoughness,
+      metalness: crystallineCanopy ? 0.15 : 0.02,
+      canCollide: true,
+      anchored: true,
+      collisionFidelity,
+      meshData: crystallineCanopy
+        ? buildTaperedCylinderMesh({
+            modelName,
+            partName: 'CanopyCrown_Main',
+            size: crownSize,
+            bottomScaleRatio: 1.0,
+            topScaleRatio: 0.22,
+            radialSegments: 6,
+            heightSegments: 3,
+            jitterAmount: 0.22,
+            colorHex: baseLeafColor,
+            activeLod,
+            rng,
+          })
+        : buildOrganicCanopyOrRockMesh({
+            modelName,
+            partName: 'CanopyCrown_Main',
+            size: crownSize,
+            shapeStyle: species === 'pine' ? 'conical' : canopyShape,
+            radialSegments: segSpec.canopyRad,
+            latSegments: segSpec.canopyLat,
+            jitterAmount: visualStyle === 'cartoon' ? 0.08 : Math.max(variation, leafVariation) * 0.28,
+            colorHex: baseLeafColor,
+            activeLod,
+            rng,
+          }),
+    });
+
+    // 5. Racimos de follaje secundarios (`FoliageCluster_1..N`)
+    const defaultClusterCount =
+      leafDistribution === 'dense'
+        ? Math.max(4, Math.round(branchCount * foliageDensity))
+        : leafDistribution === 'sparse'
+        ? Math.max(1, Math.floor(branchCount * 0.5 * foliageDensity))
+        : Math.max(2, Math.min(8, Math.round(Math.min(6, branchCount) * foliageDensity)));
+    const clusterCount =
+      params.foliageCount !== undefined && Number.isFinite(Number(params.foliageCount))
+        ? clamp(Math.round(Number(params.foliageCount)), 0, 16)
+        : clamp(defaultClusterCount, 0, 16);
+
+    for (let c = 0; c < clusterCount; c++) {
+      const anchor = branchEndpoints[c % branchEndpoints.length] || [
+        round4(trunkTopOffsetX + Math.cos(c) * branchSpreadRadius),
+        crownCenterY,
+        round4(trunkTopOffsetZ + Math.sin(c) * branchSpreadRadius),
+      ];
+      const alternatingScaleBias = 1 + (c % 2 === 0 ? -0.22 : 0.24) * leafVariation;
+      const clusterScale = round4(
+        clamp(
+          (0.46 + (rng() - 0.3) * 0.36 * leafVariation) *
+            alternatingScaleBias *
+            (leafDistribution === 'clustered' ? 1.12 : 1.0) *
+            (0.85 + foliageDensity * 0.15),
+          0.26,
+          0.95
+        )
+      );
+      const clusterSize: [number, number, number] = [
+        round4(Math.max(1.0, crownWidth * clusterScale)),
+        round4(Math.max(0.75, crownHeight * clusterScale * (canopyShape === 'layered' || species === 'bonsai' ? 0.52 : 0.85))),
+        round4(Math.max(1.0, crownWidth * clusterScale)),
+      ];
+      const clusterName = `FoliageCluster_${c + 1}`;
+      const clusterY = Math.max(
+        round4(clusterSize[1] * 0.5 + 0.5),
+        round4(anchor[1] + (canopyShape === 'weeping' ? -0.35 : 0.45))
+      );
+      const leafTintFactor = 1 + (rng() - 0.5) * 0.34 * colorVariation;
+      const clusterColor = modulateHexColor(baseLeafColor, leafTintFactor);
+
+      parts.push({
+        partId: `part_foliage_${c + 1}`,
+        name: clusterName,
+        parentPath: 'Root/Canopy',
+        shape: 'MeshPart',
+        size: clusterSize,
+        position: [anchor[0], clusterY, anchor[2]],
+        rotation: [
+          round4((rng() - 0.5) * 14 * leafVariation),
+          round4(rng() * 360),
+          round4((rng() - 0.5) * 14 * leafVariation),
+        ],
+        color: clusterColor,
+        material: effectiveCrownMaterial,
+        transparency: crystallineCanopy ? 0.15 : 0,
+        reflectance: effectiveCrownReflectance,
+        roughness: effectiveCrownRoughness,
+        metalness: crystallineCanopy ? 0.12 : 0.02,
+        canCollide: false,
+        anchored: true,
+        collisionFidelity,
+        meshData: buildOrganicCanopyOrRockMesh({
+          modelName,
+          partName: clusterName,
+          size: clusterSize,
+          shapeStyle: species === 'pine' ? 'conical' : canopyShape,
+          radialSegments: Math.max(5, Math.round(segSpec.canopyRad * 0.8)),
+          latSegments: Math.max(3, Math.round(segSpec.canopyLat * 0.85)),
+          jitterAmount: visualStyle === 'cartoon' ? 0.06 : leafVariation * 0.32,
+          colorHex: clusterColor,
+          activeLod,
+          rng,
+        }),
+      });
+    }
+
+    // 5B. Geometría estructural diferenciada por especie (`pine`, `willow`, `fantasy`, `crystalline`)
+    if (species === 'pine') {
+      for (let tier = 2; tier <= 4; tier++) {
+        const ratio = 1 - (tier - 1) * 0.22;
+        const tierSize: [number, number, number] = [
+          round4(Math.max(1.2, crownWidth * ratio)),
+          round4(Math.max(1.1, crownHeight * 0.42)),
+          round4(Math.max(1.2, crownWidth * ratio)),
+        ];
+        const tierY = round4(crownCenterY + (tier - 1) * crownHeight * 0.34);
+        const tierName = `PineTier_${tier}`;
+        parts.push({
+          partId: `part_pine_tier_${tier}`,
+          name: tierName,
+          parentPath: 'Root/Canopy/PineTiers',
+          shape: 'MeshPart',
+          size: tierSize,
+          position: [round4(trunkTopOffsetX), tierY, round4(trunkTopOffsetZ)],
+          rotation: [0, round4(tier * 28), 0],
+          color: modulateHexColor(baseLeafColor, 1 + tier * 0.04),
+          material: leafMaterial,
+          transparency: 0,
+          reflectance: 0.03,
+          roughness: 0.78,
+          metalness: 0.02,
+          canCollide: false,
+          anchored: true,
+          collisionFidelity,
+          meshData: buildTaperedCylinderMesh({
+            modelName,
+            partName: tierName,
+            size: tierSize,
+            bottomScaleRatio: 1.0,
+            topScaleRatio: 0.08,
+            radialSegments: Math.max(6, segSpec.canopyRad),
+            heightSegments: 3,
+            jitterAmount: 0.08,
+            colorHex: baseLeafColor,
+            activeLod,
+            rng,
+          }),
+        });
+      }
+    } else if (species === 'willow') {
+      for (let f = 0; f < 6; f++) {
+        const frondAngle = (f / 6) * Math.PI * 2 + 0.2;
+        const frondRadius = crownWidth * 0.44;
+        const frondH = round4(Math.max(2.2, height * 0.36));
+        const frondW = round4(Math.max(0.45, crownWidth * 0.14));
+        const frondName = `WillowFrond_${f + 1}`;
+        parts.push({
+          partId: `part_willow_frond_${f + 1}`,
+          name: frondName,
+          parentPath: 'Root/Canopy/WeepingFronds',
+          shape: 'MeshPart',
+          size: [frondW, frondH, frondW],
+          position: [
+            round4(trunkTopOffsetX + Math.cos(frondAngle) * frondRadius),
+            round4(Math.max(frondH * 0.55, crownCenterY - frondH * 0.42)),
+            round4(trunkTopOffsetZ + Math.sin(frondAngle) * frondRadius),
+          ],
+          rotation: [round4((rng() - 0.5) * 6), 0, round4((rng() - 0.5) * 6)],
+          color: modulateHexColor(baseLeafColor, 0.96 + (f % 2) * 0.08),
+          material: leafMaterial,
+          transparency: 0,
+          reflectance: 0.03,
+          roughness: 0.72,
+          metalness: 0.02,
+          canCollide: false,
+          anchored: true,
+          collisionFidelity,
+          meshData: buildTaperedCylinderMesh({
+            modelName,
+            partName: frondName,
+            size: [frondW, frondH, frondW],
+            bottomScaleRatio: 0.38,
+            topScaleRatio: 1.0,
+            radialSegments: 6,
+            heightSegments: 3,
+            jitterAmount: 0.1,
+            colorHex: baseLeafColor,
+            activeLod,
+            rng,
+          }),
+        });
+      }
+    }
+
+    if (species === 'fantasy' || emissiveLeaves) {
+      for (let ac = 0; ac < 4; ac++) {
+        const cAngle = (ac / 4) * Math.PI * 2 + 0.5;
+        const cDist = Math.max(0.8, rootFlareWidth * 0.55);
+        const cSize: [number, number, number] = [
+          round4(Math.max(0.32, trunkThickness * 0.28)),
+          round4(Math.max(0.85, height * 0.14)),
+          round4(Math.max(0.32, trunkThickness * 0.28)),
+        ];
+        const cName = `ArcaneCrystal_${ac + 1}`;
+        parts.push({
+          partId: `part_arcane_crystal_${ac + 1}`,
+          name: cName,
+          parentPath: 'Root/Roots/Arcane',
+          shape: 'MeshPart',
+          size: cSize,
+          position: [round4(Math.cos(cAngle) * cDist), round4(cSize[1] * 0.55), round4(Math.sin(cAngle) * cDist)],
+          rotation: [round4(Math.sin(cAngle) * 18), round4((cAngle * 180) / Math.PI), round4(-Math.cos(cAngle) * 18)],
+          color: baseLeafColor,
+          material: 'Neon',
+          transparency: 0.08,
+          reflectance: 0.3,
+          roughness: 0.15,
+          metalness: 0.1,
+          canCollide: false,
+          anchored: true,
+          collisionFidelity,
+          meshData: buildTaperedCylinderMesh({
+            modelName,
+            partName: cName,
+            size: cSize,
+            bottomScaleRatio: 0.95,
+            topScaleRatio: 0.08,
+            radialSegments: 5,
+            heightSegments: 2,
+            jitterAmount: 0.05,
+            colorHex: baseLeafColor,
+            activeLod,
+            rng,
+          }),
+        });
+      }
+    }
+
+    if (crystallineCanopy) {
+      for (let cs = 0; cs < 4; cs++) {
+        const sAngle = (cs / 4) * Math.PI * 2 + 0.3;
+        const sSize: [number, number, number] = [
+          round4(Math.max(0.8, crownWidth * 0.26)),
+          round4(Math.max(1.8, crownHeight * 0.85)),
+          round4(Math.max(0.8, crownWidth * 0.26)),
+        ];
+        const sName = `CrystalCrownShard_${cs + 1}`;
+        parts.push({
+          partId: `part_crystal_shard_${cs + 1}`,
+          name: sName,
+          parentPath: 'Root/Canopy/Crystals',
+          shape: 'MeshPart',
+          size: sSize,
+          position: [
+            round4(trunkTopOffsetX + Math.cos(sAngle) * crownWidth * 0.28),
+            round4(crownCenterY + crownHeight * 0.22),
+            round4(trunkTopOffsetZ + Math.sin(sAngle) * crownWidth * 0.28),
+          ],
+          rotation: [round4(Math.sin(sAngle) * 26), round4(cs * 45), round4(-Math.cos(sAngle) * 26)],
+          color: modulateHexColor(baseLeafColor, 1.12),
+          material: params.emissiveLeaves ? 'Neon' : 'Ice',
+          transparency: 0.18,
+          reflectance: 0.45,
+          roughness: 0.12,
+          metalness: 0.15,
+          canCollide: false,
+          anchored: true,
+          collisionFidelity,
+          meshData: buildTaperedCylinderMesh({
+            modelName,
+            partName: sName,
+            size: sSize,
+            bottomScaleRatio: 0.92,
+            topScaleRatio: 0.06,
+            radialSegments: 5,
+            heightSegments: 2,
+            jitterAmount: 0.04,
+            colorHex: baseLeafColor,
+            activeLod,
+            rng,
+          }),
+        });
+      }
+    }
   }
 
   return groundAndNormalizeParts(parts.map((p) => centerProceduralPartGeometry(modelName, p)));
@@ -1618,6 +2000,58 @@ export function generateSeededCategoryParts(
     };
   }
 
+  // Familias orgánicas, vehículos, estatuas y objetos libres arbitrarios -> Motor Universal (`planGeometryAndComponents` + `generateReal3DMeshesFromPlan`)
+  const objFamily = blueprint.identity.object_family;
+  const usesUniversalEngine =
+    Boolean(blueprint.arbitrary_components && blueprint.arbitrary_components.length >= 2) ||
+    objFamily === 'quadruped_animal' ||
+    objFamily === 'winged_creature' ||
+    objFamily === 'biped_humanoid_or_statue' ||
+    objFamily === 'wheeled_vehicle' ||
+    objFamily === 'freeform_composite';
+
+  if (usesUniversalEngine && options?.assetType !== 'Scene3D') {
+    const safeCollisionFidelity: 'Hull' | 'Box' | 'PreciseConvexDecomposition' =
+      collisionFidelity === 'Box' || collisionFidelity === 'PreciseConvexDecomposition'
+        ? collisionFidelity
+        : 'Hull';
+    const interpretation = interpretPromptSemantics({
+      prompt: options?.prompt || modelName || category,
+      category,
+      name: modelName,
+      blueprint,
+    });
+    const plan = planGeometryAndComponents(interpretation, String(seed), blueprint);
+    const activeLod: 0 | 1 | 2 =
+      treeParams?.lodLevel === 1 || treeParams?.lodLevel === 2 ? treeParams.lodLevel : 0;
+    const rawUniversalParts = generateReal3DMeshesFromPlan({
+      modelName,
+      plan,
+      budget: budgetProfile,
+      collisionFidelity: safeCollisionFidelity,
+      activeLod,
+    });
+    const normalizedUniversal = groundAndNormalizeParts(
+      rawUniversalParts.map((p) => centerProceduralPartGeometry(modelName, p))
+    );
+    return {
+      parts: normalizedUniversal,
+      pbrProfile: {
+        albedo_hex: blueprint.materials_and_textures.primary_hex,
+        roughness: blueprint.materials_and_textures.roughness,
+        metalness: blueprint.materials_and_textures.metalness,
+        emissive_hex: blueprint.materials_and_textures.accent_hex,
+        roblox_material: blueprint.materials_and_textures.primary_material,
+        pattern: blueprint.materials_and_textures.pbr_pattern,
+      },
+      description: `Asset 3D universal generado vía planGeometryAndComponents (${interpretation.archetype}, familia '${objFamily}', seed=${String(
+        seed
+      )}, ${normalizedUniversal.length} sub-mallas).`,
+      blueprint,
+      budgetProfile,
+    };
+  }
+
   // Resto de familias especializadas: Rocas (Icosferas), Edificios, Sillas, Lámparas, Mecanismos, Mesas, Cofres y Escenarios (Scene3D)
   const specializedParts = buildPartsFromSpecializedEngine({
     modelName,
@@ -1660,6 +2094,7 @@ export function generateSeededCategoryParts(
  * - Persistencia en Biblioteca de Assets
  */
 export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationRequest): Record<string, any> {
+  const generationStartMs = Date.now();
   const canonicalCategory = resolveCanonicalAssetCategory(req.category, req.prompt);
   const rawName =
     req.name ||
@@ -1678,7 +2113,7 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   const rawSeed = req.seed ?? req.tree_params?.seed;
   const isDefaultSeed = !rawSeed || rawSeed === 'forge-tree-2026' || rawSeed === 'forge-seed-2026';
   const seed = isDefaultSeed
-    ? `forge-${safeModelName.toLowerCase()}-${Date.now().toString(36).slice(-6)}`
+    ? `forge-${safeModelName.toLowerCase()}-${Date.now().toString(36).slice(-4)}-${crypto.randomBytes(2).toString('hex')}`
     : rawSeed;
   const collisionFidelity = req.collision_fidelity || 'Hull';
   const assetType = req.asset_type || 'Model3D';
@@ -1693,26 +2128,128 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
       ? parseNaturalLanguageToTreeParams(req.prompt).params
       : undefined;
 
-  const manFields = Array.isArray(req.manually_edited_fields) ? req.manually_edited_fields : [];
+  const UI_DEFAULT_TREE_PARAMS: Record<string, any> = {
+    height: 14,
+    width: 10,
+    trunkThickness: 1.6,
+    trunkLean: 0,
+    trunkCurvature: 0.15,
+    rootFlareScale: 1.0,
+    branchCount: 4,
+    branchLength: 4.0,
+    branchDistribution: 'tiered',
+    canopyShape: 'spherical',
+    canopySize: 1.0,
+    leafDistribution: 'balanced',
+    foliageCount: 4,
+    foliageDensity: 1.0,
+    trunkMaterial: 'Wood',
+    leafMaterial: 'Grass',
+    trunkColor: '#6e482b',
+    leafColor: '#34843d',
+    variation: 0.25,
+    leafVariation: 0.25,
+    colorVariation: 0.2,
+    detailLevel: 'medium',
+  };
+
+  const hasExplicitEditedList = Array.isArray(req.manually_edited_fields);
+  const manFields = hasExplicitEditedList ? req.manually_edited_fields! : [];
   const mergedTreeParams: Record<string, any> = {
     seed,
-    ...(req.tree_params || {}),
+    ...(req.preset_params || {}),
   };
+  if (req.tree_params) {
+    for (const [k, v] of Object.entries(req.tree_params)) {
+      if (v === undefined) continue;
+      const presetVal = (req.preset_params as Record<string, any> | undefined)?.[k];
+      const isUiDefault = v === UI_DEFAULT_TREE_PARAMS[k];
+      const isManuallyEdited = hasExplicitEditedList && manFields.includes(k);
+      if (presetVal !== undefined && !isManuallyEdited && isUiDefault) {
+        continue;
+      }
+      mergedTreeParams[k] = v;
+    }
+  }
+
+  const parameterProvenance: Record<string, ParameterProvenanceEntry> = {
+    seed: {
+      value: String(seed),
+      source: isDefaultSeed ? 'default' : hasExplicitEditedList && manFields.includes('seed') ? 'manual_ui' : 'prompt_nlp',
+    },
+  };
+  const provenanceWarnings: string[] = [];
+
+  for (const key of Object.keys(UI_DEFAULT_TREE_PARAMS)) {
+    const manualValue = (req.tree_params as Record<string, any> | undefined)?.[key];
+    const presetValue = (req.preset_params as Record<string, any> | undefined)?.[key];
+    const isExplicitManual =
+      manualValue !== undefined &&
+      ((hasExplicitEditedList && manFields.includes(key)) ||
+        manualValue !== UI_DEFAULT_TREE_PARAMS[key]);
+    if (isExplicitManual) {
+      parameterProvenance[key] = { value: mergedTreeParams[key], source: 'manual_ui' };
+    } else if (presetValue !== undefined) {
+      parameterProvenance[key] = { value: mergedTreeParams[key], source: 'preset' };
+    } else {
+      parameterProvenance[key] = {
+        value: UI_DEFAULT_TREE_PARAMS[key],
+        source: 'default',
+      };
+    }
+  }
 
   if (promptTreeParsed) {
     for (const [key, val] of Object.entries(promptTreeParsed)) {
       if (val !== undefined) {
-        const isDefaultUiValue =
-          (key === 'leafColor' && mergedTreeParams.leafColor === '#34843d') ||
-          (key === 'trunkColor' && mergedTreeParams.trunkColor === '#6e482b') ||
-          (key === 'height' && mergedTreeParams.height === 14) ||
-          (key === 'width' && mergedTreeParams.width === 10) ||
-          (key === 'trunkThickness' && mergedTreeParams.trunkThickness === 1.6) ||
-          (key === 'branchCount' && mergedTreeParams.branchCount === 4);
-
-        if (!manFields.includes(key) && (isDefaultUiValue || mergedTreeParams[key] === undefined)) {
+        const hasPreset =
+          req.preset_params !== undefined &&
+          (req.preset_params as Record<string, any>)[key] !== undefined;
+        if (hasExplicitEditedList && manFields.includes(key)) {
+          parameterProvenance[key] = { value: mergedTreeParams[key], source: 'manual_ui' };
+          provenanceWarnings.push(
+            `Manual UI override preserved for '${key}' (${String(mergedTreeParams[key])}) over prompt value (${String(val)}).`
+          );
+        } else if (hasPreset) {
+          parameterProvenance[key] = { value: mergedTreeParams[key], source: 'preset' };
+          if (String(mergedTreeParams[key]) !== String(val)) {
+            provenanceWarnings.push(
+              `Preset parameter preserved for '${key}' (${String(mergedTreeParams[key])}) over prompt value (${String(val)}).`
+            );
+          }
+        } else if (hasExplicitEditedList) {
           mergedTreeParams[key] = val;
+          parameterProvenance[key] = { value: val, source: 'prompt_nlp' };
+        } else {
+          const isDefaultUiValue =
+            mergedTreeParams[key] === undefined ||
+            mergedTreeParams[key] === UI_DEFAULT_TREE_PARAMS[key];
+          if (isDefaultUiValue) {
+            mergedTreeParams[key] = val;
+            parameterProvenance[key] = { value: val, source: 'prompt_nlp' };
+          } else if (parameterProvenance[key]?.source === 'manual_ui') {
+            provenanceWarnings.push(
+              `Explicit request value preserved for '${key}' (${String(mergedTreeParams[key])}) over prompt value (${String(val)}).`
+            );
+          }
         }
+      }
+    }
+  }
+
+  if (referenceAnalysis) {
+    if (canonicalCategory === 'Trees & Vegetation') {
+      if (parameterProvenance.trunkColor?.source === 'default') {
+        parameterProvenance.trunkColor = {
+          value: referenceAnalysis.dominantPaletteHex.bottomHex,
+          source: 'image_reference',
+        };
+      }
+      if (parameterProvenance.leafColor?.source === 'default') {
+        parameterProvenance.leafColor = {
+          value: referenceAnalysis.dominantPaletteHex.topHex,
+          source: 'image_reference',
+        };
       }
     }
   }
@@ -1830,11 +2367,41 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   const resolvedMode: GenerationExecutionMode =
     req.generation_mode || (referenceAnalysis ? 'image_to_3d' : 'procedural');
 
+  const latencyMs = Math.max(1, Date.now() - generationStartMs);
+  const combinedWarnings = [
+    ...provenanceWarnings,
+    ...(req.execution_report?.warnings || []),
+    ...(req.execution_report?.fallback_triggered && req.execution_report?.fallback_reason
+      ? [req.execution_report.fallback_reason]
+      : []),
+  ];
+
   const executionReport: EngineExecutionReport = {
     requested_mode: req.execution_report?.requested_mode || resolvedMode,
     executed_mode: req.execution_report?.executed_mode || resolvedMode,
     ai_provider_available: req.execution_report?.ai_provider_available ?? false,
     ai_provider_used: req.execution_report?.ai_provider_used ?? false,
+    provider:
+      req.execution_report?.provider ||
+      (req.execution_report?.ai_provider_used
+        ? 'google-gemini'
+        : referenceAnalysis
+          ? 'local-image-silhouette'
+          : 'forge-local-parametric'),
+    model_used:
+      req.execution_report?.model_used ||
+      req.execution_report?.external_model_used ||
+      (req.execution_report?.ai_provider_used
+        ? 'gemini-director'
+        : 'procedural-hybrid-v3'),
+    provider_status:
+      req.execution_report?.provider_status ||
+      (req.execution_report?.fallback_triggered
+        ? 'fallback'
+        : req.execution_report?.ai_provider_used
+          ? 'connected'
+          : 'mock_or_local'),
+    generation_stage: req.execution_report?.generation_stage || 'completed',
     image_reference_processed: Boolean(referenceAnalysis),
     reference_image_analyzed: Boolean(referenceAnalysis),
     fallback_triggered: req.execution_report?.fallback_triggered ?? false,
@@ -1845,6 +2412,8 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     poly_budget_requested: generated.budgetProfile.targetPolyBudget,
     poly_budget_achieved: totalTris,
     detail_level: effectiveDetailLevel,
+    parameter_provenance: parameterProvenance,
+    warnings: combinedWarnings,
   };
 
   const semanticInterpretation = interpretPromptSemantics({
@@ -1865,7 +2434,11 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
   });
 
   const objFam = generated.blueprint.identity.object_family;
+  const usedArbitraryGraph = Boolean(
+    generated.blueprint.arbitrary_components && generated.blueprint.arbitrary_components.length >= 2
+  );
   const engineUsed =
+    usedArbitraryGraph ||
     objFam === 'quadruped_animal' ||
     objFam === 'winged_creature' ||
     objFam === 'biped_humanoid_or_statue' ||
@@ -1890,8 +2463,10 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
     engine_used: engineUsed,
     seed: String(seed),
     ...(canonicalCategory === 'Trees & Vegetation'
-      ? { tree_params: { seed, ...req.tree_params } }
+      ? { tree_params: effectiveTreeParams || { seed, ...req.tree_params } }
       : {}),
+    parameter_provenance: parameterProvenance,
+    warnings: combinedWarnings,
     poly_count: totalTris,
     poly_budget_requested: generated.budgetProfile.targetPolyBudget,
     target_poly_budget: generated.budgetProfile.targetPolyBudget,
@@ -1924,6 +2499,11 @@ export function synthesizeSeededProcedural3DAsset(req: Procedural3DGenerationReq
 
   return {
     ...baseAsset,
+    latency_ms: latencyMs,
+    execution_report: {
+      ...executionReport,
+      latency_ms: req.execution_report?.latency_ms ?? latencyMs,
+    },
     contentHash,
   };
 }
